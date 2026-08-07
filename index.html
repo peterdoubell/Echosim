@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EchoSim — Interactive 3D Echocardiography Simulator</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%E2%97%AE%3C/text%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="css/style.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./vendor/three.module.min.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◮</span>
+      <div>
+        <h1>EchoSim</h1>
+        <p>Interactive 3D in-silico echocardiography trainer</p>
+      </div>
+    </div>
+    <div class="cycle-readout">
+      <div class="ecg" id="ecgWrap" title="Lead II rhythm strip — derived from a vectorcardiogram dipole model">
+        <canvas id="ecg" width="240" height="46"></canvas>
+      </div>
+      <button id="twelveBtn" class="lead-btn" title="Show the full 12-lead ECG">12-Lead</button>
+      <div class="phase-label"><span id="phaseName">—</span><small id="hrReadout">72 bpm</small></div>
+      <button id="helpBtn" class="help-btn" title="Show help & keyboard shortcuts" aria-label="Help">?</button>
+    </div>
+  </header>
+
+  <!-- 12-lead ECG modal (computed from the same VCG buffer as the rhythm strip) -->
+  <div id="twelveModal" class="overlay hidden">
+    <div class="twelve-card">
+      <button id="twelveClose" class="overlay-x" aria-label="Close">×</button>
+      <h2>12-Lead ECG <small id="twelveSub">derived from the cardiac dipole (VCG) via the inverse-Dower lead field</small></h2>
+      <canvas id="twelveLead"></canvas>
+    </div>
+  </div>
+
+  <main class="layout">
+    <!-- 3D anatomy view -->
+    <section class="panel view3d">
+      <div class="panel-head">
+        <h2>3D Anatomy</h2>
+        <span class="hint hint-orbit">drag to orbit · scroll to zoom</span>
+        <span class="hint hint-tap">tap &amp; drag to orbit · pinch to zoom</span>
+      </div>
+      <div id="scene3d" class="scene">
+        <div id="rebuildOverlay" class="rebuild-overlay hidden" role="status" aria-live="polite">
+          <span class="rebuild-spinner" aria-hidden="true"></span>
+          <span class="rebuild-text">Rebuilding 3D…</span>
+        </div>
+      </div>
+      <div class="legend">
+        <span><i class="sw" style="background:#c0392b"></i>Oxygenated / left</span>
+        <span><i class="sw" style="background:#2b6cb0"></i>Deoxygenated / right</span>
+        <span><i class="sw" style="background:#39c0e8"></i>Ultrasound plane</span>
+      </div>
+    </section>
+
+    <!-- 2D echo machine view -->
+    <section class="panel viewEcho">
+      <div class="panel-head">
+        <h2>Echo Display <span id="viewTag" class="tag">PLAX</span></h2>
+        <span class="hint" id="probeInfo">2.5 MHz · sector</span>
+      </div>
+      <div class="echo-stack">
+        <div class="echo-holder">
+          <canvas id="echo" width="440" height="500"></canvas>
+          <canvas id="echoOverlay" width="440" height="500" aria-hidden="true"></canvas>
+        </div>
+        <div class="doppler-scale" title="Colour Doppler: red = flow toward the probe, blue = away">
+          <div class="ds-bar"></div>
+          <span class="ds-top">▲</span>
+          <span class="ds-bot">▼</span>
+        </div>
+      </div>
+      <div class="spectral-wrap">
+        <span class="sp-label">Spectral Doppler (steered gate · 1 cardiac cycle)</span>
+        <canvas id="spectral" width="440" height="120"></canvas>
+      </div>
+    </section>
+
+    <!-- control console -->
+    <aside class="panel console">
+      <div class="ctl-group">
+        <h3>Standard Views</h3>
+        <div class="seg modality-ctl" id="modalityCtl" role="group" aria-label="Echo modality">
+          <button data-modality="TTE" class="seg-btn active" aria-pressed="true" title="Transthoracic echo">TTE</button>
+          <button data-modality="TEE" class="seg-btn" aria-pressed="false" title="Transoesophageal echo">TEE</button>
+        </div>
+        <div class="btn-grid" id="viewBtns">
+          <button data-view="PLAX" class="active" aria-pressed="true">PLAX</button>
+          <button data-view="PSAX" aria-pressed="false">PSAX</button>
+          <button data-view="PSAX_AV" aria-pressed="false" title="Aortic-valve-level short axis (three cusps)">PSAX AV</button>
+          <button data-view="A4C" aria-pressed="false">A4C</button>
+          <button data-view="A2C" aria-pressed="false">A2C</button>
+          <button data-view="SUBCOSTAL" aria-pressed="false">Subcostal</button>
+        </div>
+        <div class="btn-grid hidden" id="teeBtns">
+          <button data-view="ME4C" aria-pressed="false" title="Mid-oesophageal 4-chamber">ME 4-Ch</button>
+          <button data-view="MELAX" aria-pressed="false" title="Mid-oesophageal long axis (LVOT/AV/aorta)">ME LAX</button>
+          <button data-view="TGSAX" aria-pressed="false" title="Transgastric mid-papillary short axis">TG SAX</button>
+          <button data-view="MELAA" aria-pressed="false" title="Mid-oesophageal left atrial appendage">ME LAA</button>
+        </div>
+      </div>
+
+      <div class="ctl-group">
+        <h3>Pathology</h3>
+        <select id="pathology">
+          <option value="normal">Normal heart</option>
+          <option value="mr">Mitral regurgitation</option>
+          <option value="ms">Mitral stenosis</option>
+          <option value="as">Aortic stenosis</option>
+          <option value="dcm">Dilated cardiomyopathy</option>
+          <option value="rwma">Regional wall-motion abn. (MI)</option>
+          <option value="effusion">Pericardial effusion</option>
+          <option value="vsd">Ventricular septal defect</option>
+          <option value="asd">Atrial septal defect</option>
+          <option value="tr">Tricuspid regurgitation</option>
+          <option value="phtn">Pulmonary hypertension (RV overload)</option>
+        </select>
+        <div class="seg severity-ctl hidden" id="severityCtl" role="group" aria-label="Lesion severity">
+          <button data-grade="mild" class="seg-btn" aria-pressed="false">Mild</button>
+          <button data-grade="moderate" class="seg-btn" aria-pressed="false">Moderate</button>
+          <button data-grade="severe" class="seg-btn active" aria-pressed="true">Severe</button>
+        </div>
+        <div id="teaching" class="teaching"></div>
+      </div>
+
+      <div class="ctl-group">
+        <h3>Cardiac Cycle</h3>
+        <div class="row">
+          <button id="playBtn" class="wide">⏸ Pause</button>
+        </div>
+        <label>Heart rate <output id="hrOut" for="hr" aria-live="polite">72</output> bpm
+          <input type="range" id="hr" min="35" max="150" value="72" aria-label="Heart rate (bpm)" aria-valuetext="72 bpm" />
+        </label>
+        <label>Scrub cycle
+          <input type="range" id="scrub" min="0" max="1000" value="0" aria-label="Scrub cardiac cycle" aria-valuetext="0%" />
+        </label>
+        <label for="rhythm">Rhythm</label>
+        <select id="rhythm" aria-label="Cardiac rhythm">
+          <option value="sinus">Sinus rhythm</option>
+          <option value="afib">Atrial fibrillation</option>
+          <option value="brady">Sinus bradycardia</option>
+          <option value="tachy">Sinus tachycardia</option>
+          <option value="avblock1">1st-degree AV block</option>
+          <option value="pvc">Ventricular ectopy (PVCs)</option>
+          <option value="lbbb">Left bundle branch block</option>
+          <option value="rbbb">Right bundle branch block</option>
+          <option value="stemi">Anterior STEMI</option>
+          <option value="hyperk">Hyperkalaemia</option>
+        </select>
+        <label for="ecgLead">Rhythm-strip lead</label>
+        <select id="ecgLead" aria-label="ECG lead shown in the strip">
+          <option>I</option><option selected>II</option><option>III</option>
+          <option>aVR</option><option>aVL</option><option>aVF</option>
+          <option>V1</option><option>V2</option><option>V3</option>
+          <option>V4</option><option>V5</option><option>V6</option>
+        </select>
+      </div>
+
+      <div class="ctl-group">
+        <h3>Measurements <span id="measFlag" class="grp-flag"></span></h3>
+        <div class="metrics" id="metrics">
+          <div><span>LVIDd</span><b id="mLvidd">—</b><small class="ref" id="refLvidd">normal 3.9–5.9 cm</small></div>
+          <div><span>LVIDs</span><b id="mLvids">—</b><small class="ref" id="refLvids">normal 2.2–4.1 cm</small></div>
+          <div><span>EF</span><span class="mval"><b id="mEf">—</b></span><small class="ref" id="refEf">normal ≥55%</small></div>
+          <div title="Mitral annular plane systolic excursion — a longitudinal-function marker"><span>MAPSE</span><b id="mMapse">—</b><small class="ref">normal ≥10 mm</small></div>
+          <div><span>Peak V <em id="mVelLabel" class="peak-label"></em></span><span class="mval"><b id="mVel">—</b></span><small class="ref">normal &lt;2.5 m/s</small></div>
+          <div><span>ΔP peak</span><b id="mGrad">—</b><small class="ref">normal &lt;25 mmHg</small></div>
+          <div><span>Effusion</span><b id="mEff">—</b><small class="ref">none normal</small></div>
+        </div>
+        <small class="bse-note">Calibrated to BSE/ASE reference ranges. Also: IVS/wall 0.6–1.2 cm · LA diam. 3.0–4.0 cm · aortic root &lt;3.7 cm.</small>
+      </div>
+
+      <div class="ctl-group">
+        <h3>Caliper tools <small class="grp-sub">place your own measurements</small></h3>
+        <div class="seg meas-tools" role="group" aria-label="Measurement tool">
+          <button data-tool="caliper" class="seg-btn" aria-pressed="false" title="Click two points on the frozen image to measure a distance (cm)">⟺ Caliper</button>
+          <button data-tool="simpsonED" class="seg-btn" aria-pressed="false" title="End-diastole: click along the LV endocardium from one mitral hinge, around the apex, to the other hinge; double-click to close.">Trace ED</button>
+          <button data-tool="simpsonES" class="seg-btn" aria-pressed="false" title="End-systole: click along the LV endocardium from one mitral hinge, around the apex, to the other hinge; double-click to close.">Trace ES</button>
+        </div>
+        <div class="meas-actions">
+          <button id="measClear" class="wide small">✕ Clear</button>
+          <button id="measFreeze" class="wide small" title="Freeze the frame to place calipers accurately">⏸ Freeze frame</button>
+        </div>
+        <div class="meas-result" id="measResult">
+          <div class="mr-line"><span>Caliper</span><b id="measDist">—</b></div>
+          <div class="mr-line"><span>Simpson EF <em class="peak-label" id="measSimpTag"></em></span><b id="measSimpEf">—</b></div>
+          <div class="mr-line accuracy" id="measAcc"><span>vs model truth</span><b id="measErr">—</b></div>
+        </div>
+        <small class="bse-note">Learner-placed <b>method-of-discs (Simpson single-plane)</b> EF and linear calipers, checked live against the model's own ground truth — the same accuracy check in <code>docs/VALIDATION.md §A2</code>.</small>
+      </div>
+
+      <div class="ctl-group">
+        <h3>Haemodynamics <small class="grp-sub">lumped-parameter PV loop</small></h3>
+        <div class="pv-wrap" title="Left-ventricular pressure–volume loop from a time-varying-elastance + Windkessel circulation model">
+          <canvas id="pvLoop" width="240" height="170"></canvas>
+        </div>
+        <div class="hemo-grid" id="hemoGrid">
+          <div><span>EDV</span><b id="hEdv">—</b></div>
+          <div><span>ESV</span><b id="hEsv">—</b></div>
+          <div><span>SV</span><b id="hSv">—</b></div>
+          <div><span>EF</span><b id="hEf">—</b></div>
+          <div><span>P<sub>LV</sub> peak</span><b id="hPlv">—</b></div>
+          <div><span>Aortic</span><b id="hPao">—</b></div>
+          <div><span>AV ΔP<sub>peak</sub></span><b id="hGrad">—</b></div>
+          <div><span>Regurg. frac.</span><b id="hRf">—</b></div>
+          <div title="Estimated PA systolic pressure from the peak TR jet: PASP = 4·V_TR² + RAP"><span>Est. PASP</span><b id="hPasp">—</b></div>
+          <div title="Mitral inflow E/A ratio (early rapid filling ÷ atrial kick). Normal ≈ 0.8–1.5; &lt;0.8 suggests impaired relaxation."><span>E/A</span><b id="hEa">—</b></div>
+          <div title="Global longitudinal strain — peak systolic shortening of the LV long axis (speckle-tracking). Normal more negative than −18%."><span>GLS</span><b id="hGls">—</b></div>
+        </div>
+        <small class="bse-note">P<sub>LV</sub>/P<sub>ao</sub> mmHg · volumes mL. Loop area = stroke work; width = stroke volume.</small>
+      </div>
+
+      <div class="ctl-group">
+        <h3>Regional strain <small class="grp-sub">GLS bullseye (17-segment)</small></h3>
+        <div class="bullseye-wrap" title="AHA 17-segment peak systolic longitudinal strain. Red = normal shortening (~−20%); pale/blue = reduced (infarct/akinesis). Global longitudinal strain (GLS) shown at centre.">
+          <canvas id="bullseye" width="230" height="230"></canvas>
+        </div>
+        <div class="hemo-grid">
+          <div><span>GLS</span><b id="sGls">—</b></div>
+          <div><span>Pattern</span><b id="sPattern">—</b></div>
+        </div>
+        <small class="bse-note">Speckle-tracking longitudinal strain. Normal GLS more negative than −18% (BSE/EACVI); regional loss localises the culprit territory.</small>
+      </div>
+
+      <div class="ctl-group">
+        <h3>Image quality <small class="grp-sub">live self-validation</small></h3>
+        <div class="metrics iq-grid">
+          <div title="Generalized contrast-to-noise ratio between myocardium and LV-cavity blood (robust to dynamic range). Real cardiac B-mode ~0.7–0.95."><span>gCNR</span><b id="qGcnr">—</b><small class="ref">target 0.7–0.95</small></div>
+          <div title="Contrast-to-noise ratio, tissue vs lumen"><span>CNR</span><b id="qCnr">—</b><small class="ref">tissue vs lumen</small></div>
+          <div title="Speckle signal-to-noise ratio of the myocardial texture (fully-developed Rayleigh speckle ≈ 1.91)"><span>Speckle SNR</span><b id="qSnr">—</b><small class="ref">Rayleigh ≈ 1.9</small></div>
+        </div>
+      </div>
+
+      <div class="ctl-group">
+        <h3>Probe / Plane <span id="planeFlag" class="grp-flag"></span></h3>
+        <label title="Rotate the imaging plane about the heart's long axis">Rotate plane <output id="azOut" for="az" aria-live="polite">0°</output>
+          <input type="range" id="az" min="-90" max="90" value="0" aria-label="Rotate imaging plane (degrees)" aria-valuetext="0°" />
+        </label>
+        <label title="Tilt the beam up/down out of the current plane">Tilt <output id="tiltOut" for="tilt" aria-live="polite">0°</output>
+          <input type="range" id="tilt" min="-45" max="45" value="0" aria-label="Tilt beam (degrees)" aria-valuetext="0°" />
+        </label>
+        <label title="Translate the probe laterally across the surface (cm)">Slide <output id="slideOut" for="slide" aria-live="polite">0</output> cm
+          <input type="range" id="slide" min="-30" max="30" value="0" aria-label="Slide probe laterally (cm)" aria-valuetext="0 cm" />
+        </label>
+        <label title="Imaging depth of the sector (cm)">Depth <output id="depthOut" for="depth" aria-live="polite">15</output> cm
+          <input type="range" id="depth" min="8" max="24" value="15" aria-label="Imaging depth (cm)" aria-valuetext="15 cm" />
+        </label>
+        <div class="reset-row">
+          <button id="resetPlane" class="wide small">↺ Reset plane</button>
+          <button id="resetAll" class="wide small" title="Restore gain, nyquist, depth, HR, plane offsets and toggles to defaults">⟲ Reset all</button>
+        </div>
+      </div>
+
+      <div class="ctl-group">
+        <h3>Imaging</h3>
+        <label title="Overall brightness of the B-mode image">Gain <output id="gainOut" for="gain" aria-live="polite">1.0</output>
+          <input type="range" id="gain" min="0.4" max="1.8" step="0.05" value="1.0" aria-label="B-mode gain" aria-valuetext="1.0" />
+        </label>
+        <label title="Aliasing velocity for colour Doppler — flow faster than this wraps (mosaic)">Nyquist limit <output id="nyqOut" for="nyq" aria-live="polite">0.62</output> m/s
+          <input type="range" id="nyq" min="0.3" max="1.2" step="0.02" value="0.62" aria-label="Nyquist limit (m/s)" aria-valuetext="0.62 m/s" />
+        </label>
+        <label title="Frame averaging. Blends each frame with the previous ones to suppress speckle noise — at the cost of temporal blurring, which smears fast-moving structures like valve leaflets.">Persistence <output id="persOut" for="pers" aria-live="polite">0</output>
+          <input type="range" id="pers" min="0" max="0.85" step="0.05" value="0" aria-label="Persistence (frame averaging)" aria-valuetext="0" />
+        </label>
+        <label title="Transmit focal depth — the beam is narrowest here and diverges either side. 0 = auto (mid-field). Put the focus on the structure you are measuring.">Focus <output id="focusOut" for="focus" aria-live="polite">auto</output>
+          <input type="range" id="focus" min="0" max="20" step="0.5" value="0" aria-label="Transmit focal depth (cm)" aria-valuetext="auto" />
+        </label>
+        <label for="detail" title="B-mode spatial resolution. Auto adapts to your hardware; High forces the full-resolution sector (needs a capable GPU/CPU).">Detail</label>
+        <select id="detail" aria-label="Image detail / resolution">
+          <option value="0" selected>Auto (adapts to hardware)</option>
+          <option value="1">High — full resolution</option>
+          <option value="2">Standard</option>
+          <option value="3">Smooth (fastest)</option>
+        </select>
+        <div class="toggles">
+          <label class="chk" title="Elevational slice thickness — the scan plane has a finite out-of-plane thickness set by a fixed acoustic lens, so each pixel averages a slab rather than a point. Switch off to see an (unphysical) infinitely thin cut."><input type="checkbox" id="elevOn" checked /> Slice thickness</label>
+          <label class="chk" title="Tissue harmonic imaging — transmit at f, receive at 2f. Narrower effective beam and near-total suppression of near-field reverberation, at the cost of deep penetration."><input type="checkbox" id="harmonicOn" /> Harmonic imaging (THI)</label>
+          <label class="chk"><input type="checkbox" id="colorOn" checked /> Colour Doppler</label>
+          <label class="chk"><input type="checkbox" id="labelsOn" checked /> Anatomy labels</label>
+          <label class="chk"><input type="checkbox" id="flowOn" checked /> 3D flow</label>
+          <label class="chk"><input type="checkbox" id="transp" checked /> Transparent walls</label>
+          <label class="chk" title="Rule-based helical myofibre architecture (Streeter): +60° endocardium → −60° epicardium"><input type="checkbox" id="fibersOn" /> Myofibres</label>
+        </div>
+      </div>
+
+      <div class="ctl-group">
+        <h3>Training</h3>
+        <div class="seg" id="difficultyCtl" role="group" aria-label="Challenge difficulty">
+          <button data-diff="easy" class="seg-btn active" aria-pressed="true">Easy</button>
+          <button data-diff="medium" class="seg-btn" aria-pressed="false">Medium</button>
+          <button data-diff="hard" class="seg-btn" aria-pressed="false">Hard</button>
+        </div>
+        <button id="challengeBtn" class="wide">🎯 Challenge mode</button>
+      </div>
+    </aside>
+  </main>
+
+  <!-- help / onboarding overlay -->
+  <div id="helpOverlay" class="overlay hidden">
+    <div class="overlay-card" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+      <button id="helpClose" class="overlay-x" aria-label="Close">×</button>
+      <h2 id="helpTitle">Welcome to EchoSim</h2>
+      <p>A schematic 3D heart you scan like a real echo machine. Three panels work together:</p>
+      <ul>
+        <li><b>3D Anatomy</b> — a beating heart. The cyan <b>fan</b> is the ultrasound plane; drag to orbit.</li>
+        <li><b>Echo Display</b> — exactly what that plane sees, as a live 2D ultrasound with colour &amp; spectral Doppler.</li>
+        <li><b>Console</b> — pick a <b>standard view</b>, choose a <b>pathology</b>, then move the <b>probe/plane</b> sliders and watch both panels update.</li>
+      </ul>
+      <p class="kbd-legend"><b>Keys:</b> <kbd>Space</kbd> play/pause · <kbd>←</kbd>/<kbd>→</kbd> scrub · <kbd>1</kbd>–<kbd>5</kbd> views · <kbd>R</kbd> reset plane · <kbd>L</kbd> labels · <kbd>C</kbd> challenge</p>
+      <p class="cite-note">Measurements &amp; severity thresholds are calibrated to BSE/ASE reference ranges.<br />
+        <small>Source: British Society of Echocardiography chamber quantification &amp; valve assessment guidelines, 2020–2022.</small></p>
+      <button id="helpGot" class="wide primary">Got it</button>
+    </div>
+  </div>
+
+  <!-- polite live region for transient status announcements (e.g. reset) -->
+  <div id="liveStatus" class="sr-only" role="status" aria-live="polite"></div>
+
+  <footer class="footnote">
+    In-silico teaching model — not for diagnosis. Anatomy is a signed-distance
+    reconstruction (continuous myocardium, septum, papillary muscles, great vessels);
+    measurements are illustrative.
+  </footer>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

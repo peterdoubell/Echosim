@@ -1,0 +1,9 @@
+# Internal working documents — kept in version control, not published on the site.
+# VALIDATION_RESULTS.md in particular is an in-progress expert-review record whose
+# ratings are still pending; it has no business on a public teaching site.
+docs/
+BENCHMARKS.md
+*.pdf
+
+# Verification harnesses: developer tooling, not part of the app.
+tools/
