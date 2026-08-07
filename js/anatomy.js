@@ -12,6 +12,7 @@
 import {
   smin, ssub, sdSphere, sdEllipsoid, sdCapsule, sdRoundCone,
 } from './sdf.js';
+import { smoothstep } from './mathutils.js';
 
 // ---- BSE/ASE normal reference ranges -------------------------------------
 // Adult echocardiographic normal ranges, exported so the Measurements UI can
@@ -209,12 +210,48 @@ function buildEustachian(c, r) {
   };
 }
 
+// ---- atrial phase function ------------------------------------------------
+// The atria are RESERVOIRS, so their volume curve runs roughly ANTI-phase to the
+// ventricles': they are distending while the ventricles eject, and emptying
+// while the ventricles fill. Three overlapping mechanical roles, with phase 0 at
+// AV-valve closure (QRS / onset of ventricular systole):
+//
+//   reservoir (0.00 -> 0.46)  mitral + tricuspid shut, so pulmonary-venous and
+//                             caval inflow distends the atrium; descent of the
+//                             AV plane during ejection adds to it. Atrial volume
+//                             therefore PEAKS at AV-valve opening — the instant
+//                             the ventricle is at its smallest.
+//   conduit   (0.50 -> 0.68)  AV valves open: rapid early-diastolic emptying
+//                             (the E wave), then a near-flat diastasis.
+//   booster   (0.86 -> 1.00)  atrial systole (the A wave) empties the atrium to
+//                             its minimum, reached exactly at the next AV-valve
+//                             closure.
+//
+// The amplitudes satisfy A_RES === A_COND + A_BOOST, so the curve is exactly
+// periodic — f(1) === f(0) — with no step or slope break across the wrap.
+//
+// Calibration: these are LINEAR scale factors on the atrial semi-axes, so volume
+// goes as f^3. Peak 1.17 / minimum 0.89 gives a total LA emptying fraction of
+// 1 - 0.89^3/1.17^3 ~= 56 %, split into a passive (conduit) emptying fraction of
+// ~38 % and an active (booster) emptying fraction of ~30 % — normal adult values.
+const A_MIN = 0.89, A_RES = 0.28, A_COND = 0.17, A_BOOST = 0.11;
+
+export function atrialFill(phase) {
+  const p = phase - Math.floor(phase);          // wrap into [0,1)
+  const reservoir = smoothstep(0.00, 0.46, p);
+  const conduit   = smoothstep(0.50, 0.68, p);
+  const booster   = smoothstep(0.86, 1.00, p);
+  return A_MIN + A_RES * reservoir - A_COND * conduit - A_BOOST * booster;
+}
+
 // Build the per-phase parameter bundle. k = contraction 0..1, kick = atrial
 // kick 0..1, path = pathology flags. `mech` (optional) carries the volume-exact
 // LV scaling from the lumped-parameter circulation (sShort/sLong/lvWall) so the
 // SDF cavity tracks the modelled PV loop; when omitted the legacy kinematic
 // scaling is used (keeps anatomyParams callable standalone / backward-compatible).
-export function anatomyParams(k, kick, path = {}, mech = null) {
+// `phase` drives the atrial reservoir curve above; it cannot be recovered from k
+// (which is two-valued in phase) so it is passed explicitly.
+export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   let contract = 1.0, lvScale = 1.0, lvWallMul = 1.0, laScale = 1.0;
   if (path.dilated) { contract = 0.26; lvScale = CFG.dilatedScale; lvWallMul = 0.82; laScale = CFG.laDilation; }
   if (path.lvh || path.aorticStenosis) lvWallMul = 1.7;
@@ -245,8 +282,9 @@ export function anatomyParams(k, kick, path = {}, mech = null) {
   // wall to apexY + (y0−apexY)·lsy. Used for the papillary muscles + valve plane.
   const axialMap = (y0) => apexY + (y0 - apexY) * lsy;
 
-  // atria: reservoir fills through systole, empties in diastole, kicks at end
-  const aFill = (0.86 + 0.32 * (1 - k) - 0.34 * kick);
+  // atria: reservoir/conduit/booster curve — largest at AV-valve opening, i.e.
+  // out of phase with the ventricles rather than contracting alongside them.
+  const aFill = atrialFill(phase);
 
   // aortic root: the ascending column is angled slightly rightward (-x) and
   // anterior (+z) so its septal (anterior) wall reads continuous with the

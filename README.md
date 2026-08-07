@@ -38,7 +38,9 @@ and commissural coaptation seams (the short-axis "Mercedes" Y).
 **Physiology** — a closed-loop circulation (time-varying elastance + Windkessel)
 drives a real LV pressure–volume loop, and the cavity geometry is volume-exact
 against it, so measured EF and LVIDd fall out of the modelled volume rather than
-a prescribed curve. Continuity-equation and Bernoulli Doppler, AHA 17-segment
+a prescribed curve. The atria run anti-phase to the ventricles on an explicit
+reservoir/conduit/booster curve — peak volume at AV-valve opening, emptying on
+the E wave and again on the A wave. Continuity-equation and Bernoulli Doppler, AHA 17-segment
 regional strain, MAPSE, mitral E/A, and pulmonary-vein S/D waves with systolic
 flow reversal in severe MR.
 
@@ -54,6 +56,7 @@ npm install playwright          # browsers are expected to be preinstalled
 node tools/validate.mjs         # 12 ECG morphology checks
 node tools/shoot.mjs out/       # screenshots across views/pathologies, asserts 0 console errors
 node tools/verify-measure.mjs   # end-to-end caliper + Simpson-EF check
+node tools/verify-atrial-phase.mjs  # atrio-ventricular phase relationship
 ```
 
 ## Honest limits

@@ -15,7 +15,7 @@
 // students actually rely on.
 
 import { clamp, smoothstep, pulse, unit } from './mathutils.js';
-import { anatomyParams, bodyClassify, epiDist, BODY, CFG } from './anatomy.js';
+import { anatomyParams, atrialFill, bodyClassify, epiDist, BODY, CFG } from './anatomy.js';
 import { hemodynamics, hemoSummary, pvLoop, gradeOf, eaRatio } from './hemodynamics.js';
 
 // Re-export the lumped-parameter circulation API so echo.js / the UI can read the
@@ -317,15 +317,16 @@ export function geometryAt(phase, path = {}) {
   });
   const rvWall = BASE.rv.wall * (1 + k * 0.5);
 
-  // atria: fill through systole (reservoir), empty during diastole, kick at end
-  // (reuse the already-computed contraction fraction k rather than recomputing)
-  const atrialFill = 0.85 + 0.35 * (1 - k) - 0.35 * kick;
-  const laR = BASE.la.r.map((r) => r * (path.dilated ? CFG.laDilation : 1) * atrialFill);
-  const raR = BASE.ra.r.map((r) => r * atrialFill);
+  // atria: the same reservoir/conduit/booster curve the SDF anatomy uses, so the
+  // coarse proxies used for flow gating, labels and measurements stay locked to
+  // the rendered atrial wall (see atrialFill() in anatomy.js).
+  const aFill = atrialFill(phase);
+  const laR = BASE.la.r.map((r) => r * (path.dilated ? CFG.laDilation : 1) * aFill);
+  const raR = BASE.ra.r.map((r) => r * aFill);
 
   // anatomical SDF bundle (built once here so the chordae apparatus below can
   // hang off the same apex-anchored papillary tips + valve plane).
-  const A = anatomyParams(kv, kick, path, { sShort, sLong, lvWall });
+  const A = anatomyParams(kv, kick, path, { sShort, sLong, lvWall }, phase);
 
   return {
     phase, k, kick, kv,
