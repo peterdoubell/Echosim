@@ -130,6 +130,62 @@ function vcgAtBeat(tr, W, out) {
 }
 
 // ---------------------------------------------------------------------------
+// Heart-rate warp of the mechanical cycle.
+//
+// The circulation (hemodynamics.js) is solved once, at the reference cycle of
+// 0.833 s (72 bpm), and indexed by a phase whose 0 is the onset of contraction.
+// Dividing the time since contraction onset by the R-R stretched every interval
+// in proportion: at 50 bpm LV ejection lasted ~425 ms and aortic closure came
+// ~110 ms after the end of the T wave; at 120 bpm ejection lasted ~175 ms and
+// the valve shut ~75 ms before it. In the heart the isovolumic periods barely
+// change with rate, ejection shortens only modestly (Weissler: LVET ≈ 413 −
+// 1.7·HR ms) and diastole takes up most of the R-R change, with atrial systole
+// locked to the next QRS (a constant PR interval). So the post-QRS time is
+// mapped piecewise onto the reference phases of the normal trace:
+//   IVCT  (MVC → AVO)   fixed duration
+//   LVET  (AVO → AVC)   scaled by LVET(HR) / LVET(72)
+//   IVRT  (AVC → MVO)   fixed duration
+//   early diastole      absorbs the R-R change (rapid filling + diastasis)
+//   atrial systole      fixed ~167 ms before the next contraction; in tachycardia
+//                       it shares the short diastole with early filling (E/A
+//                       approaching fusion)
+// At 72 bpm the map is the identity. tools/verify-timing.mjs checks the
+// breakpoints against the solved trace and aortic closure against the T wave.
+// ---------------------------------------------------------------------------
+export const REF_RR = 0.833;           // reference cycle (s) — hemodynamics CYCLE
+export const PH_AVO = 0.072;           // aortic opening (normal trace)
+export const PH_AVC = 0.421;           // aortic closure
+export const PH_MVO = 0.513;           // mitral opening
+export const PH_ATR = 0.80;            // start of atrial systole (A-wave onset)
+// Weissler's LV ejection time (s) for a heart rate (bpm), clamped to a sane range.
+export function lvetAt(hr) { return clamp(0.413 - 0.0017 * hr, 0.18, 0.36); }
+const LVET_REF = lvetAt(60 / REF_RR);
+
+// Reference mechanical phase [0, 1) at time tp (s) since contraction onset
+// (QRS + electromechanical delay) in a beat whose R-R is rr (s).
+export function mechPhase(tp, rr) {
+  let ivct = PH_AVO * REF_RR;
+  let ej = (PH_AVC - PH_AVO) * REF_RR * lvetAt(60 / rr) / LVET_REF;
+  let ivrt = (PH_MVO - PH_AVC) * REF_RR;
+  // very fast rates: keep at least ~28 % of the cycle for filling
+  const sys = ivct + ej + ivrt, cap = 0.72 * rr;
+  if (sys > cap) { const f = cap / sys; ivct *= f; ej *= f; ivrt *= f; }
+  const dia = rr - (ivct + ej + ivrt);
+  const atr = Math.min((1 - PH_ATR) * REF_RR, 0.5 * dia);
+  const early = dia - atr;
+  // piecewise-linear: [segment duration, phase at start, phase at end]
+  const t = Math.max(0, tp);
+  let t0 = 0;
+  const segs = [[ivct, 0, PH_AVO], [ej, PH_AVO, PH_AVC], [ivrt, PH_AVC, PH_MVO],
+    [early, PH_MVO, PH_ATR], [atr, PH_ATR, 1]];
+  for (const [d, p0, p1] of segs) {
+    if (t < t0 + d) return clamp(p0 + (p1 - p0) * (t - t0) / d, 0, 0.999);
+    t0 += d;
+  }
+  return 0.999;
+}
+
+// ---------------------------------------------------------------------------
 // Rhythm engine — schedules beats and drives the mechanical phase.
 // ---------------------------------------------------------------------------
 export class Heartbeat {
@@ -180,9 +236,12 @@ export class Heartbeat {
     let W = applyMorphology(normalWaves(), this.path, this.rhythm, sched.type);
     // AV block: prolong PR (shift P earlier relative to R)
     if (this.rhythm === 'avblock1') W.P.t0 = -0.28;
-    // QT scales with RR (Bazett-ish): reposition/scale T with sqrt(RR)
-    const qtScale = Math.sqrt(clamp(sched.rr, 0.3, 1.5) / 0.857);
-    W.T.t0 *= qtScale;
+    // QT scales with RR: the T peak moves with sqrt(RR) (Bazett-ish) and the wave
+    // narrows with the cube root (Fridericia), so the end of the T wave keeps
+    // pace with aortic closure (A2) as the rate changes
+    const rrC = clamp(sched.rr, 0.3, 1.5) / 0.857;
+    W.T.t0 *= Math.sqrt(rrC);
+    W.T.s *= Math.cbrt(rrC);
     const beat = { t: atT, rr: sched.rr, type: sched.type, W };
     this._beats.push(beat);
     if (this._beats.length > 6) this._beats.shift();
@@ -217,12 +276,21 @@ export class Heartbeat {
 
   // Mechanical beat phase (0..1) for the CURRENT beat, with the electromechanical
   // delay applied, so contraction follows depolarisation. Returns {phase, rr}.
+  // The phase indexes the circulation, which is solved once at the reference
+  // cycle (72 bpm), so time since the delayed QRS is WARPED onto it (mechPhase)
+  // rather than divided by the R-R: systole keeps its physiological length at
+  // any rate and diastole absorbs the rest.
   mechanical() {
-    // find the beat whose window contains _t (nearest onset at/just before _t)
-    let cur = this._beats[0];
-    for (const b of this._beats) if (b.t <= this._t + 1e-6) cur = b;
-    const local = clamp((this._t - cur.t - this._emDelay) / cur.rr, 0, 0.999);
-    return { phase: local, rr: cur.rr, beatType: cur.type };
+    // find the beat whose window contains _t (nearest onset at/just before _t);
+    // until its contraction starts (the electromechanical delay after the QRS)
+    // the previous beat's late diastole — atrial systole, mitral closure — is
+    // still playing, so it keeps the phase instead of a 40 ms freeze at 0
+    let i = 0;
+    for (let j = 0; j < this._beats.length; j++) if (this._beats[j].t <= this._t + 1e-6) i = j;
+    let cur = this._beats[i];
+    if (this._t - cur.t < this._emDelay && i > 0) cur = this._beats[i - 1];
+    const phase = mechPhase(this._t - cur.t - this._emDelay, cur.rr);
+    return { phase, rr: cur.rr, beatType: cur.type };
   }
 
   setHR(hr) { this.hr = hr; }

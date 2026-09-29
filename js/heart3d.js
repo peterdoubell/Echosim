@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from '../vendor/OrbitControls.js';
 import { geometryAt, velocityAt, VALVE_DEFS } from './cardiac-model.js';
-import { myoDist, lumenDist } from './anatomy.js';
+import { myoDist, lumenDist, LM } from './anatomy.js';
 import { buildMesh } from './marching.js';
 
 const MUSCLE = 0x8a3330;
@@ -21,8 +21,11 @@ const RA_COLOR = 0x203f79; // deeper indigo (darker + shifted)
 
 // Voxel volume + resolution for the marching-cubes heart surface, and how many
 // cardiac-phase keyframes to pre-bake (swapped per frame for the beating loop).
-const BBOX = { min: [-4.9, -5.6, -3.6], max: [3.9, 6.0, 3.8] };
-const CELL = 0.30;
+// The box frames the heart at adult size (~12.5 x 15 x 11 cm with the root and
+// PA) and clips the cavae; the cell is set so a phase bakes in about the same
+// time as the old compact schematic did.
+const BBOX = { min: [-7.4, -9.4, -4.6], max: [5.2, 6.0, 6.6] };
+const CELL = 0.36;
 const NPHASE = 12;
 
 export class Heart3D {
@@ -66,8 +69,8 @@ export class Heart3D {
     this.scene.add(rim);
 
     // subtle ground grid for spatial reference
-    const grid = new THREE.GridHelper(30, 30, 0x1f3550, 0x14202f);
-    grid.position.y = -7.5;
+    const grid = new THREE.GridHelper(40, 40, 0x1f3550, 0x14202f);
+    grid.position.y = BBOX.min[1] - 1.2;                // just below the apex
     this.scene.add(grid);
 
     this.heartGroup = new THREE.Group();
@@ -216,7 +219,7 @@ export class Heart3D {
       RV: this._geomFrom((x, y, z) => lumenDist(x, y, z, A, 'RV')),
       LA: this._geomFrom((x, y, z) => lumenDist(x, y, z, A, 'LA')),
       RA: this._geomFrom((x, y, z) => lumenDist(x, y, z, A, 'RA')),
-      VES: this._geomFrom((x, y, z) => Math.min(lumenDist(x, y, z, A, 'AO'), lumenDist(x, y, z, A, 'PA'))),
+      VES: this._geomFrom((x, y, z) => Math.min(lumenDist(x, y, z, A, 'AOROOT'), lumenDist(x, y, z, A, 'PA'))),
     };
   }
 
@@ -703,10 +706,11 @@ export class Heart3D {
   _seedFlow(st) {
     // seed a particle at an inlet region depending on cycle handled generically:
     // pick a random chamber-ish location; velocity field will carry it.
+    const mid = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
     const spots = [
-      [1.3, 2.2, -0.4], [1.3, 0.2, 0.1],   // LA -> LV column
-      [-1.5, 2.1, 0.4], [-1.5, 0.1, 0.5],  // RA -> RV
-      [0.4, 1.7, 0.1], [0.4, 3.2, 0.15],   // LVOT/aorta
+      mid(LM.M, LM.LA_ROOF, 0.4), mid(LM.M, LM.apex, 0.35),           // LA -> LV column
+      mid(LM.T, LM.RA_ROOF, 0.4), mid(LM.T, [-2.6, -5.5, 1.2], 0.35), // RA -> RV
+      LM.LVOT0, mid(LM.A, LM.AO_STJ, 0.6),                             // LVOT / aorta
     ];
     const s = spots[(Math.random() * spots.length) | 0];
     st.x = s[0] + (Math.random() - 0.5) * 1.6;

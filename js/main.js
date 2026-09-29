@@ -10,65 +10,28 @@ import { Heart3D } from './heart3d.js';
 import { EchoView } from './echo.js';
 import { MeasureTool } from './measure.js';
 import { vadd, vsub, vscale, vdot, vcross, norm, vrot } from './mathutils.js';
+import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, makeProbe } from './views.js';
 import { Heartbeat, vcgToLeads, LEAD_NAMES } from './electrophysiology.js';
 
-// Build a probe {pos,dir,lat,normal} from a target point, a rough beam
-// direction and the desired imaging-plane normal.
-function makeProbe(target, dirGuess, normal, standoff) {
-  const n = norm(normal);
-  let dir = vsub(dirGuess, vscale(n, vdot(dirGuess, n))); // project into plane
-  dir = norm(dir);
-  const lat = norm(vcross(n, dir));
-  const pos = vsub(target, vscale(dir, standoff));
-  return { pos, dir, lat, normal: n, target: target.slice() };
-}
-
 // ---------------------------------------------------------------------------
-// Standard echocardiographic windows (schematic tuning of our model space)
+// Standard echocardiographic windows: derived from the anatomy landmarks in
+// views.js, each displayed in the ASE/EACVI screen orientation (e.g. A4C with
+// the LV on the right, PLAX with the aorta on the right, PSAX viewed from the
+// apex with the RV on the left) at real clinical imaging depths.
 // ---------------------------------------------------------------------------
-const VIEWS = {
-  PLAX:      () => makeProbe([0.75, 1.15, -0.1], [-0.05, -0.15, -1], [-0.62, -0.2, -0.76], 4.6),
-  // true short axis: plane normal parallel to the LV long axis (~+y), centred on
-  // the LV so it renders as a ring with the RV as a crescent alongside.
-  PSAX:      () => makeProbe([1.15, -0.6, 0.1], [-0.15, 0, -1], [0.04, 1, 0.05], 5.0),
-  // aortic-valve-level short axis: plane normal along the aortic root axis, seated
-  // at the valve, so the three cusps show as the closing "Mercedes" Y with the RVOT
-  // wrapping anteriorly and the atria/interatrial septum behind.
-  PSAX_AV:   () => makeProbe([0.42, 1.55, 0.14], [-0.15, 0, -1], [0.05, 1, 0.05], 5.0),
-  // true four-chamber: the plane is tipped posterior toward the base so it passes
-  // BEHIND the aortic root (centre ~[0.35,2.2,0.15]) — excluding the aorta/LVOT
-  // that would otherwise make this an apical 5-chamber view. Keeps LV, RV, LA, RA
-  // and the mitral & tricuspid valves in-plane.
-  A4C:       () => makeProbe([0.0, 0.6, -0.25], [0, 1, 0.06], [0.06, 0.6, 1], 6.6),
-  A2C:       () => makeProbe([1.2, 0.7, -0.3], [0, 1, -0.08], [1, 0.08, 0.18], 6.4),
-  SUBCOSTAL: () => makeProbe([0.0, 0.8, 0.0], [0, 1, 0.42], [0.12, 0.1, 1], 7.2),
-};
-
-// Per-view display depth (cm) so the heart FILLS the sector instead of sitting in
-// the near field with an empty far field. Apical/subcostal windows are longer than
-// the short parasternal ones. Real TTE fills the FOV; this matches that framing.
-const VIEW_DEPTH = { PLAX: 10, PSAX: 10, PSAX_AV: 9, A4C: 12, A2C: 12, SUBCOSTAL: 13 };
+const VIEWS = Object.fromEntries(Object.entries(TTE_VIEWS).map(([k, v]) => [k, v.probe]));
+const viewDepth = (name) => (TTE_VIEWS[name] || EXTRA_VIEWS[name] || {}).depth || 16;
 // friendly labels for the on-image view tag (raw keys may contain underscores)
-const VIEW_LABEL = { PSAX_AV: 'PSAX-AV', MELAA: 'ME LAA' };
-const viewDepth = (name) => VIEW_DEPTH[name] || 12;
-
-// Transesophageal (TEE) window set — a high-frequency probe posterior to the left
-// atrium imaging anteriorly, so the atria sit in the near field (inverted from the
-// apical windows). Each view carries its own shallower display depth. Calibrated
-// against the anatomy so ME 4-Ch shows LA→valves→LV/RV, ME LAX the LVOT/AV/aorta,
-// and the transgastric view the LV short axis with both papillary muscles.
-const TEE_VIEWS = {
-  ME4C:  { probe: () => makeProbe([0.1, 0.4, -0.1], [0, -1, -0.05], [0.06, 0.6, 1], 5.4), depth: 14 },
-  MELAX: { probe: () => makeProbe([0.7, 0.6, 0.0], [-0.1, -0.5, 0.85], [-0.62, -0.2, -0.76], 4.8), depth: 13 },
-  TGSAX: { probe: () => makeProbe([1.2, -0.6, 0.15], [0, 1, 0], [0.04, 1, 0.05], 5.0), depth: 12 },
-  // Mid-oesophageal left-atrial-appendage view (~45-90 deg). The LAA is a TEE
-  // structure — TTE sees it poorly, which is exactly why AF thrombus exclusion is
-  // a TEE study. The plane is set to CONTAIN the appendage's long axis (running
-  // anterolaterally out of the LA) so the narrow ostium, the neck and the hooked
-  // lobes all lie in-plane, alongside the LA body.
-  MELAA: { probe: () => makeProbe([2.0, 2.42, 0.0], [0.25, -1, 0.3], [0.82, 0, -0.53], 5.0), depth: 10 },
+const VIEW_LABEL = {
+  PSAX_AV: 'PSAX-AV', MELAA: 'ME LAA', PSAX_MV: 'PSAX-MV', RVIT: 'RV inflow', SC_IVC: 'Subcostal IVC',
+  SSN: 'Suprasternal', ME2C: 'ME 2C', MEAVSAX: 'ME AV SAX', MEBICAVAL: 'ME bicaval', MERVIO: 'ME RV in-out',
+  DESCAO: 'Desc Ao SAX',
 };
-const TEE_CAM = { ME4C: 'A4C', MELAX: 'PLAX', TGSAX: 'PSAX', MELAA: 'A2C' }; // reuse a sensible 3D camera
+
+// Transesophageal (TEE) window set (views.js): a higher-frequency probe in the
+// oesophagus directly behind the left atrium, so the atria sit in the near field.
+const TEE_CAM = { ME4C: 'A4C', MELAX: 'PLAX', TGSAX: 'PSAX', MELAA: 'A2C', ME2C: 'A2C', MEAVSAX: 'PSAX_AV',
+  MEBICAVAL: 'SUBCOSTAL', MERVIO: 'PSAX_AV', DESCAO: 'PSAX' }; // reuse a sensible 3D camera
 
 const PATHOLOGY = {
   normal:    { flags: {}, view: 'PLAX', name: 'Normal heart',
@@ -125,9 +88,13 @@ const state = {
 };
 
 // adjust the base probe by the manual azimuth/tilt/slide controls
-function effectiveProbe() {
+function effectiveProbe(A) {
   let { pos, dir, lat, normal, target } = state.baseProbe;
   pos = pos.slice(); dir = dir.slice(); lat = lat.slice(); normal = normal.slice();
+  // views that follow a moving landmark (PSAX-MV tracks the mitral annulus)
+  const vw = TTE_VIEWS[state.viewName] || EXTRA_VIEWS[state.viewName] || TEE_VIEWS[state.viewName];
+  const trk = A && vw && vw.track;
+  if (trk) { const o = trk(A); pos = vadd(pos, o); target = vadd(target, o); }
   const Y = [0, 1, 0];
   if (state.az) {
     const a = state.az * Math.PI / 180;
@@ -162,6 +129,8 @@ window.echosim = {
   echo, measure, get state() { return state; },
   // set an arbitrary probe (for TEE view calibration): makeProbe(target,dir,normal,standoff)
   setProbe: (t, d, n, s) => { state.viewName = 'CUSTOM'; state.baseProbe = makeProbe(t, d, n, s); state.az = state.tilt = state.slide = 0; },
+  // select any named view, including the extra apical/parasternal ones (A5C, A3C, PSAX_MV)
+  setView: (name) => setView(name),
 };
 
 // ---------------------------------------------------------------------------
@@ -330,7 +299,7 @@ function loop(now) {
   }
 
   const G = geometryAt(state.phase, state.path);
-  const probe = effectiveProbe();
+  const probe = effectiveProbe(G.A);
 
   echo.depthCm = state.depthCm || 17;
   heart3d.updateProbe(probe, echo.sectorHalf, echo.depthCm);
@@ -410,7 +379,7 @@ function publishMetrics() {
 function sevLevel(sev) {
   if (/very severe|severe|large/.test(sev)) return 'severe';
   if (/moderate/.test(sev)) return 'moderate';
-  if (/mild/.test(sev)) return 'mild';
+  if (/mild|restrictive|shunt/.test(sev)) return 'mild';
   return 'normal';
 }
 // create/update/remove a coloured severity badge as a sibling of a metric value
@@ -634,11 +603,17 @@ function setView(name) {
     state.baseProbe = tee.probe();
     state.depthCm = tee.depth; echo.depthCm = tee.depth;
     echo.freqMHz = 5.5;                 // TEE probes run higher-frequency → finer PSF
+    echo.nearFieldCm = 0.3;             // only the oesophageal wall lies in front
+    // small high-frequency TEE aperture: a thin slab focused in the near field
+    echo.elevFocus = 4.0; echo.elevMin = 0.05; echo.elevDiv = 0.015;
     setRange('depth', tee.depth, 'depthOut', String(tee.depth), tee.depth + ' cm');
     heart3d.setCameraForView(TEE_CAM[name] || 'A4C');
   } else {
-    state.baseProbe = VIEWS[name]();
+    state.baseProbe = (VIEWS[name] || EXTRA_VIEWS[name].probe)();
     echo.freqMHz = 2.7;                 // standard transthoracic probe
+    echo.elevFocus = 8.0; echo.elevMin = 0.09; echo.elevDiv = 0.025;
+    // chest wall (parasternal / apical) or abdominal wall (subcostal) under the probe
+    echo.nearFieldCm = name === 'SUBCOSTAL' ? 1.6 : /^A\dC$/.test(name) ? 1.4 : 2.0;
     const d = viewDepth(name);          // fill the FOV per view
     state.depthCm = d; echo.depthCm = d;
     setRange('depth', d, 'depthOut', String(d), d + ' cm');
