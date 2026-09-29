@@ -6,7 +6,8 @@
 // (BART) convention with a wall filter and aliasing, on-image anatomical
 // labels, live measurements, and a scrolling spectral-Doppler trace.
 
-import { classify, velocityAt, geometryAt, TISSUE, VALVE_DEFS, FLOW, AORTIC_CUSPS } from './cardiac-model.js';
+import { classify, velocityAt, geometryAt, hemoSummary, TISSUE, VALVE_DEFS, FLOW, AORTIC_CUSPS, shuntLabel, stenosisCw } from './cardiac-model.js';
+import { LM } from './anatomy.js';
 import { clamp } from './mathutils.js';
 
 // Human-readable labels for the flow compartment that produced the frame's peak
@@ -24,18 +25,97 @@ const FLOW_LABELS = {
   [FLOW.PV_FLOW]: 'pulmonary vein',
 };
 
+// Echogenicity of the body wall at fractional depth f (0 = skin, 1 = pleura /
+// pericardium) with speckle samples n, nn: a bright dermis, hypoechoic
+// subcutaneous fat crossed by thin septa, bright fascia, striated muscle.
+function chestWall(f, n, nn) {
+  if (f < 0.1) return 0.55 + 0.3 * n;                               // skin
+  if (f < 0.42) return 0.1 + 0.12 * n + (nn > 0.93 ? 0.35 : 0);     // subcutaneous fat, fibrous septa
+  if (f < 0.47) return 0.6 + 0.25 * n;                              // superficial fascia
+  if (f < 0.9) return 0.2 + 0.18 * n + (Math.sin(f * 60) > 0.8 ? 0.12 : 0); // muscle, striated
+  return 0.55 + 0.3 * nn;                                            // deep fascia / intercostal membrane
+}
+
+// Backscatter of each tissue class in dB relative to the strongest diffuse
+// reflector (pericardium / diaphragm ~0 dB). The display is log-compressed over
+// a ~55 dB dynamic range, so blood (-52) is near-black, myocardium (-28) mid-grey,
+// valves (-15) bright and calcium (-4) near-white. The fibrous pericardium /
+// liver capsule scatters only modestly (-24): its bright line is the specular
+// interface echo (_specular, Z 1.85), so a thick or grazing cut through the
+// layer never renders as a solid bright slab. Converted once to amplitude.
+const DB = {
+  blood: -60, myo: -28, valve: -15, calc: -4, peri: -24, liver: -26, fat: -36,
+  vwall: -26, vein: -52, soft: -45, lung: -48,
+};
+const AMP = Object.fromEntries(Object.entries(DB).map(([k, v]) => [k, Math.pow(10, v / 20)]));
+// Legacy linear echogenicity (0..1, tuned for the old power-law display) mapped
+// onto the same log scale, for the body-wall layers and effusion lines.
+const DR_REF = 55;
+function legacyAmp(e) {
+  const g = Math.pow(e < 0 ? 0 : e > 1 ? 1 : e, 0.78);
+  return Math.pow(10, (g - 1) * DR_REF / 20);
+}
+// Scatterer field. Each tissue voxel of ~0.35 mm holds a random complex
+// scatterer amplitude, looked up by hashing its MATERIAL coordinates, so the
+// speckle it produces after PSF convolution is carried by the tissue as it
+// moves (as on a real scanner) instead of the walls sliding through a fixed
+// screen texture. Returns an approximately unit-variance Gaussian sample.
+const SCAT_CELL = 1 / 0.035;
+function scatGauss(ix, iy, iz, salt) {
+  let h = Math.imul(ix, 0x8da6b343) ^ Math.imul(iy, 0xd8163841) ^ Math.imul(iz, 0xcb1ab31f) ^ salt;
+  h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d);
+  h = Math.imul(h ^ (h >>> 12), 0x297a2d39);
+  h ^= h >>> 15;
+  // Irwin-Hall sum of the four bytes: mean 510, variance 4 * (256^2 - 1) / 12
+  const sum = (h & 255) + ((h >>> 8) & 255) + ((h >>> 16) & 255) + ((h >>> 24) & 255);
+  return (sum - 510) * 0.006766;
+}
+
+// Intrinsic attenuation (dB / cm / MHz, one way) by tissue class: blood and
+// effusion attenuate little, which is where posterior enhancement comes from.
+const ALPHA = {
+  [TISSUE.LV]: 0.18, [TISSUE.RV]: 0.18, [TISSUE.LA]: 0.18, [TISSUE.RA]: 0.18,
+  [TISSUE.AORTA]: 0.18, [TISSUE.VEIN]: 0.18, [TISSUE.PERICARDIUM]: 0.1,
+  [TISSUE.MYO]: 0.52, [TISSUE.VALVE]: 0.8, [TISSUE.PERI_LINE]: 0.8, [TISSUE.VWALL]: 0.7,
+  [TISSUE.LIVER]: 0.5, [TISSUE.FAT]: 0.6, [TISSUE.OUTSIDE]: 0.5, [TISSUE.LUNG]: 0.5,
+};
+// Default TGC slope: compensates the average soft-tissue/blood path, so tissue
+// is roughly flat with depth and the far field slightly darker and noisier.
+const ALPHA_TGC = 0.38;
+
+// Characteristic acoustic impedance of each tissue class (MRayl; blood 1.61,
+// myocardium ~1.68, fat ~1.38, dense fibrous tissue ~1.8), used for the specular
+// interface echoes. OUTSIDE (mediastinal fat / connective tissue) is set low so
+// the parietal pericardium stands out as the strongest reflector, as on a scan.
+const Z_OF = {
+  [TISSUE.OUTSIDE]: 1.62, [TISSUE.MYO]: 1.68, [TISSUE.LV]: 1.61, [TISSUE.RV]: 1.61,
+  [TISSUE.LA]: 1.61, [TISSUE.RA]: 1.61, [TISSUE.AORTA]: 1.61, [TISSUE.VALVE]: 1.72,
+  [TISSUE.PERICARDIUM]: 1.53, [TISSUE.LUNG]: 0.6, [TISSUE.PERI_LINE]: 1.85,
+  [TISSUE.LIVER]: 1.66, [TISSUE.VEIN]: 1.61, [TISSUE.FAT]: 1.40, [TISSUE.VWALL]: 1.70,
+};
+
 // Structures expected to lie in each standard imaging plane. When the UI sets
 // this.viewName, _labels() only annotates structures on this list (plus the
 // tightened geometric plane test); when unset it falls back to geometry alone.
 const VIEW_WHITELIST = {
-  PLAX: ['LV', 'LA', 'Ao', 'AV', 'MV', 'RV'],
+  PLAX: ['LV', 'LA', 'Ao', 'AV', 'MV', 'RVOT', 'DAo', 'CS'],
   PSAX: ['LV', 'RV'],
-  PSAX_AV: ['RCC', 'LCC', 'NCC', 'RV', 'RA', 'LA'],
-  MELAA: ['LAA', 'LA', 'LV'],
-  A4C: ['LV', 'RV', 'LA', 'RA', 'MV', 'TV'],
-  A2C: ['LV', 'LA', 'MV'],
-  SUBCOSTAL: ['LV', 'RV', 'LA', 'RA'],
+  PSAX_MV: ['LV', 'RV', 'MV'],
+  PSAX_AV: ['RCC', 'LCC', 'NCC', 'RVOT', 'RA', 'LA', 'PA', 'TV'],
+  MELAA: ['LAA', 'LA', 'LV', 'PA'],
+  A4C: ['LV', 'RV', 'LA', 'RA', 'MV', 'TV', 'DAo'],
+  A5C: ['LV', 'RV', 'LA', 'RA', 'AV', 'Ao'],
+  A2C: ['LV', 'LA', 'MV', 'LAA', 'CS', 'DAo'],
+  A3C: ['LV', 'LA', 'MV', 'AV', 'Ao'],
+  SUBCOSTAL: ['LV', 'RV', 'LA', 'RA', 'Liver'],
 };
+// Fixed anatomical label anchors beyond the chamber centroids (heart space).
+const _mid = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+const EXTRA_LABELS = [
+  ['RVOT', LM.RVOT[1]],
+  ['PA', _mid(LM.PV, LM.PA_BIF, 0.45)],
+  ['DAo', LM.DTA_P],
+];
 
 // sampling resolution of the offscreen buffer (upscaled to the visible canvas).
 // Raised from 240x300 toward modality-grade spatial resolution: a real adult TTE
@@ -104,6 +184,10 @@ export class EchoView {
     // ~2-3.5 MHz; the PSF widths scale with 1/freq (higher freq => tighter beam,
     // finer speckle). The probe object carries no frequency, so it lives here.
     this.freqMHz = 2.7;
+    // thickness (cm) of body wall between the transducer face and the first
+    // thoracic structure: chest wall for parasternal/apical windows, abdominal
+    // wall for subcostal, ~0 for TEE (only the oesophageal wall). Set per view.
+    this.nearFieldCm = 1.8;
     // Tissue harmonic imaging: transmit at f, receive at 2f. Off by default so the
     // fundamental image (and the gCNR/speckle figures validated against it) is
     // unchanged; turning it on is a genuine, measurable contrast improvement.
@@ -117,6 +201,10 @@ export class EchoView {
     // so high persistence smears fast-moving structures — valves especially. It
     // is a genuine trade-off control, not a quality slider.
     this.persistence = 0;
+    // log-compression dynamic range (dB) and the elevation (slice-thickness)
+    // lens of the current probe — TEE probes have a much thinner slab
+    this.dynRange = 55;
+    this.elevFocus = ELEV_FOCUS; this.elevMin = ELEV_MIN; this.elevDiv = ELEV_DIV;
     // Elevational slice thickness (out-of-plane partial-volume averaging). On by
     // default because every real probe has it; exposed so it can be switched off
     // to show learners exactly what artefact it is responsible for.
@@ -168,8 +256,12 @@ export class EchoView {
     this._refl = new Float32Array(SW * SH);   // linear reflectivity (pre-PSF, then blurred in place)
     this._tmp = new Float32Array(SW * SH);    // scratch for the separable blur
     this._depth = new Float32Array(SW * SH);  // cm depth per pixel (0 outside fan)
-    this._abin = new Uint16Array(SW * SH);    // artifact beam bin per pixel
+    this._abin = new Float32Array(SW * SH);   // artifact beam position per pixel (fractional bin)
     this._kind = new Uint8Array(SW * SH);     // tissue kind per pixel (TISSUE.*)
+    this._zimp = new Float32Array(SW * SH);   // acoustic impedance per pixel (MRayl), for specular echoes
+    this._zsm = new Float32Array(SW * SH);    // its smoothed copy (interface orientation)
+    this._ztmp = new Float32Array(SW * SH);
+    this.specular = true;                     // angle-dependent interface (specular) reflection
     this._mask = new Uint8Array(SW * SH);     // 1 = inside sector, 0 = background
     this._dcol = new Float32Array(SW * SH * 3); // Doppler colour (kept crisp, composited after PSF)
     this._dalpha = new Float32Array(SW * SH);   // Doppler overlay alpha
@@ -178,12 +270,17 @@ export class EchoView {
     this._NA = 128;                           // artifact beam count across the sector
     this._NS = 96;                            // depth samples per beam
     this._shadowGain = new Float32Array(this._NA * this._NS); // distal attenuation (shadowing)
-    this._enhGain = new Float32Array(this._NA * this._NS);    // posterior enhancement
+    this._enhGain = new Float32Array(this._NA * this._NS);    // attenuation x TGC (incl. enhancement)
+    this._lungDepth = new Float32Array(this._NA);            // pleural-line depth per beam (or 1e9)
+    this._spk = new Float32Array(SW * SH);                   // fully developed speckle (post-PSF)
+    this._sI = new Float32Array(SW * SH);                    // scatterer field, in-phase
+    this._sQ = new Float32Array(SW * SH);                    // ... and quadrature
+    this._frame = 0;
 
     // Precomputed normalised 1-D Gaussian PSF kernels indexed by integer radius
     // 0..RMAX. The blur picks a kernel per pixel from its depth/frequency, so no
     // exp() runs in the hot loop. r=0 is the identity (near-field crispness).
-    this._RMAX = 8;
+    this._RMAX = 12;
     this._kern = [];
     for (let r = 0; r <= this._RMAX; r++) {
       const k = new Float32Array(2 * r + 1);
@@ -193,6 +290,9 @@ export class EchoView {
       for (let t = 0; t < k.length; t++) k[t] /= sum;
       this._kern.push(k);
     }
+    // sum of squared weights per kernel: the variance a unit-variance white
+    // field keeps after convolution (to normalise the speckle envelope)
+    this._kernPow = this._kern.map((k) => k.reduce((a, v) => a + v * v, 0));
   }
 
   // Lateral (across-beam) PSF radius in px for a given depth. Lateral resolution
@@ -227,21 +327,20 @@ export class EchoView {
   // beam limits how badly the image degrades away from the transmit focus. That
   // is why real scanners stay usable off-focus, and it is the physics a
   // transmit-only model gets wrong: it over-punishes the near and far field.
-  _latRadius(depth, freqScale, focus) {
-    const wTx = 1.4 + Math.abs(depth - focus) * 0.42;            // focused once
-    const wRx = depth <= RX_APERTURE_CM                          // dynamically focused
-      ? RX_W : RX_W * (depth / RX_APERTURE_CM);                  // aperture-limited beyond
-    const w = (wTx * wRx) / Math.sqrt(wTx * wTx + wRx * wRx);    // round trip
-    return clamp(Math.round(w * freqScale), 0, this._RMAX);
+  _latRadius(depth, freqScale, focus, pxPerCm) {
+    // FWHM ~ lambda * F-number: ~2.2 mm at the focus for a 3 MHz adult phased
+    // array, widening away from it (and beyond the fully open aperture)
+    const wTx = 0.22 * (1 + 0.09 * Math.abs(depth - focus));   // focused once
+    const wRx = depth <= RX_APERTURE_CM ? 0.2 : 0.2 * (depth / RX_APERTURE_CM);
+    const fw = Math.sqrt(wTx * wRx) * freqScale;               // round trip (cm)
+    return clamp(Math.round(fw / 2.355 / 0.62 * pxPerCm), 0, this._RMAX);
   }
 
-  // Axial (along-beam) PSF radius in px — always tighter than lateral, and NOT
-  // focus-dependent at all: axial resolution is set by the pulse length, not by
-  // beam geometry. It still degrades with depth because attenuation preferentially
-  // removes the high-frequency content, downshifting the centre frequency and so
-  // stretching the effective pulse.
-  _axRadius(depth, freqScale) {
-    return clamp(Math.round((0.25 + depth * 0.17) * freqScale), 0, this._RMAX);
+  // Axial (along-beam) PSF radius in px: set by the pulse length, ~0.6-0.8 mm
+  // FWHM, nearly independent of depth — so lateral is 2-3x worse than axial.
+  _axRadius(depth, freqScale, pxPerCm) {
+    const fw = (0.065 + depth * 0.002) * freqScale;
+    return clamp(Math.round(fw / 2.355 / 0.62 * pxPerCm), 0, this._RMAX);
   }
 
   // Tissue-harmonic beam narrowing. Harmonic energy is generated in tissue in
@@ -318,6 +417,16 @@ export class EchoView {
     // hoist the plane normal out of the loop: repeated element reads off a plain
     // array are measurably slower than locals at this call frequency
     const eN = probe.normal, enx = eN[0], eny = eN[1], enz = eN[2];
+    // Material (reference, end-diastolic) coordinates for the scatterer field:
+    // undo the apex-anchored longitudinal shortening and the radial contraction
+    // of the ventricles, and the annular descent of the atria, so each piece of
+    // tissue keeps its own scatterers through the cycle. Blood scatterers are
+    // re-drawn every frame (flowing red cells decorrelate).
+    const sI = this._sI, sQ = this._sQ;
+    const Av = G.A, apxY = Av.axial.apexY, lsyInv = 1 / Av.axial.lsy;
+    const baseY = Av.lv.M[1], dMy = Av.lv.M[1] - LM.M[1];
+    const rS = 2 / (1 + Av.lv.sS);
+    const bloodSalt = (++this._frame) * 0x9e3779b1;
     // Store the sampled scatterer/context of the st x st block anchored at (i,j)
     // into the reflectivity + context buffers. The B-mode grey is NOT formed here:
     // reflectivity is first PSF-convolved, then display-processed (TGC, artifacts,
@@ -366,7 +475,7 @@ export class EchoView {
         // neighbours that sampled different offsets — a Monte-Carlo estimate of
         // the partial-volume average at essentially no extra sampling cost.
         if (elevOn) {
-          const hw = (ELEV_MIN + Math.abs(depth - ELEV_FOCUS) * ELEV_DIV) * elevAmp;
+          const hw = (this.elevMin + Math.abs(depth - this.elevFocus) * this.elevDiv) * elevAmp;
           // indexed by SAMPLING BLOCK, not pixel, so the pattern survives striding
           const off = hw * ELEV_DITHER[((bj & 1) << 1) | (bi & 1)];
           wx += enx * off; wy += eny * off; wz += enz * off;
@@ -375,6 +484,16 @@ export class EchoView {
         const t = classify(wx, wy, wz, G, path);
         const tissue = t.echo; // capture before velocityAt reuses singletons
         const kind = t.tissue;
+
+        // scatterers at this sample's material coordinates
+        let mx = wx, my = wy, mz = wz, salt = 0;
+        const isBloodK = kind === TISSUE.LV || kind === TISSUE.RV || kind === TISSUE.LA ||
+                         kind === TISSUE.RA || kind === TISSUE.AORTA;
+        if (isBloodK) salt = bloodSalt;
+        else if (wy < baseY + 0.3) { my = apxY + (wy - apxY) * lsyInv; mx *= rS; mz *= rS; }
+        else my = wy - dMy;
+        const ix = Math.floor(mx * SCAT_CELL), iy = Math.floor(my * SCAT_CELL), iz = Math.floor(mz * SCAT_CELL);
+        const gI = scatGauss(ix, iy, iz, salt), gQ = scatGauss(ix, iy, iz, salt ^ 0x5bd1e995);
 
         // --- B-mode grey from echogenicity, speckle & depth gain ---
         // Correlated speckle sampled at a depth-dependent scale so the grain
@@ -389,38 +508,57 @@ export class EchoView {
         const sj = (((j / sc) | 0) + dOff * 3) % SH;
         const n = this.noise[((sj * SW + si) + shim) % this.noise.length];
         const nn = this.noise[((sj * SW + ((si + 37) % SW)) + shim) % this.noise.length];
-        let e = tissue;
-        if (kind === TISSUE.MYO) e = (0.16 + 0.20 * tissue) * (0.7 + 0.5 * n); // believable mid-grey, capped ~0.45, speckle kept
-        else if (kind === TISSUE.VALVE) {
-          // Normal leaflets are only moderately echogenic (~0.5-0.6); reserve the
-          // bright, near-white band for calcified valves. The model flags calcified
-          // leaflets with a higher raw echo (0.98 vs 0.85 normal) — key on that so
-          // a healthy mitral/tricuspid plane no longer renders as a solid bright bar.
-          const calcified = tissue > 0.92;
-          e = calcified ? (0.72 + 0.30 * n) : (0.40 + 0.28 * n);
+        // Mean backscatter AMPLITUDE of the sampled tissue (see DB). No speckle
+        // here: fully developed speckle multiplies the field AFTER the PSF, as
+        // the interference of sub-resolution scatterers does on a real scanner.
+        const calc = t.calc === 1;
+        let e;
+        if (kind === TISSUE.MYO) {
+          e = AMP.myo * Math.pow(10, 0.6 * (tissue - 0.55)); // papillaries/crista a touch brighter
+          // Fibre anisotropy: ventricular myofibres run circumferentially, and
+          // backscatter is strongest when the beam crosses them at right angles
+          // (along the wall normal) — so in PSAX the anterior and inferior
+          // segments read brighter than the septal and lateral ones (~6 dB).
+          if (wy < baseY + 0.3) {
+            const rr = Math.hypot(wx, wz);
+            if (rr > 0.5) {
+              const c = (bd[0] * wx + bd[2] * wz) / rr;
+              e *= Math.sqrt(0.25 + 0.75 * c * c);
+            }
+          }
         }
+        else if (kind === TISSUE.VALVE) e = calc ? AMP.calc : AMP.valve;
         else if (kind === TISSUE.LV || kind === TISSUE.RV ||
                  kind === TISSUE.LA || kind === TISSUE.RA ||
-                 kind === TISSUE.AORTA) e = 0.02 + 0.05 * n * n; // near-anechoic blood + faint noise floor
+                 kind === TISSUE.AORTA) e = AMP.blood;
         else if (kind === TISSUE.PERICARDIUM) {
-          e = 0.003; // echo-free effusion: distinctly dark, sharply bounded
+          e = legacyAmp(0.003); // echo-free effusion: distinctly dark, sharply bounded
           // inner (visceral) pericardial line where the effusion abuts myocardium:
           // probe one short step TOWARD the transducer for the myo interface.
           const nbIn = classify(wx - 0.2 * bd[0], wy - 0.2 * bd[1], wz - 0.2 * bd[2], G, path);
-          if (nbIn.tissue === TISSUE.MYO) e = 0.85;
+          if (nbIn.tissue === TISSUE.MYO) e = legacyAmp(0.85);
           else {
             // mirror: thin bright parietal-pericardium / lung line on the OUTER
             // side — probe one step AWAY from the transducer; a non-fluid,
             // non-myo neighbour there marks the fluid->outside interface.
             const nbOut = classify(wx + 0.2 * bd[0], wy + 0.2 * bd[1], wz + 0.2 * bd[2], G, path);
-            if (nbOut.tissue !== TISSUE.PERICARDIUM && nbOut.tissue !== TISSUE.MYO) e = 0.8;
+            if (nbOut.tissue !== TISSUE.PERICARDIUM && nbOut.tissue !== TISSUE.MYO) e = legacyAmp(0.8);
           }
         }
-        else {
-          // surrounding soft tissue / lung: a dim non-zero speckle floor so a
-          // truly anechoic effusion reads as distinctly darker than the surround.
-          e = Math.max(0.035 + 0.05 * nn, tissue * (0.35 + 0.8 * nn));
+        else if (depth < this.nearFieldCm && (kind === TISSUE.OUTSIDE || kind === TISSUE.LUNG || kind === TISSUE.LIVER)) {
+          // body wall under the transducer: skin (bright), subcutaneous fat
+          // (dark, fine septa), then muscle with bright fascial planes — bands at
+          // constant depth, so they curve with the sector as on a real scanner
+          // (subcostally the abdominal wall lies over the liver)
+          e = legacyAmp(chestWall(depth / this.nearFieldCm, n, nn));
         }
+        else if (kind === TISSUE.PERI_LINE) e = AMP.peri * Math.pow(10, 0.5 * (tissue - 0.3)); // pericardium / Glisson
+        else if (kind === TISSUE.LIVER) e = AMP.liver;
+        else if (kind === TISSUE.FAT) e = AMP.fat;
+        else if (kind === TISSUE.VWALL) e = AMP.vwall;
+        else if (kind === TISSUE.VEIN) e = AMP.vein;
+        else if (kind === TISSUE.LUNG) e = AMP.lung;
+        else e = AMP.soft;                        // mediastinal / thoracic soft tissue
 
         // reflectivity `e` is the scatterer field; TGC / artifacts / log
         // compression are applied AFTER the PSF convolution (see _psfBlur +
@@ -464,7 +602,7 @@ export class EchoView {
               const isBlood = kind === TISSUE.LV || kind === TISSUE.RV ||
                               kind === TISSUE.LA || kind === TISSUE.RA ||
                               kind === TISSUE.AORTA;
-              if (isBlood && e < 0.11) {
+              if (isBlood && e < 0.01) {
                 // Position-seeded jitter dithers the aliasing wrap boundary so a
                 // fast jet breaks into a TRUE mosaic instead of coherent hue-wrap
                 // stripes. Two spatial-frequency terms (a low-frequency sequential
@@ -486,8 +624,11 @@ export class EchoView {
           }
         }
 
-        const ab = clamp((((theta + half) * halfInv * NA) | 0), 0, NA - 1);
+        const ab = clamp((theta + half) * halfInv * NA - 0.5, 0, NA - 1);
         store(i, j, e, depth, kind, 1, ab, dR, dG, dB, dA);
+        for (let bj2 = j; bj2 < j + st && bj2 < SH; bj2++) {
+          for (let bi2 = i; bi2 < i + st && bi2 < SW; bi2++) { const q = bj2 * SW + bi2; sI[q] = gI; sQ[q] = gQ; }
+        }
       }
     }
 
@@ -517,14 +658,25 @@ export class EchoView {
       else if (this._emaMs < 14 && this._stride > 1) this._stride--;
     }
 
+    // A stenotic jet seen in the plane is read the way a CW sweep reads it: at its
+    // vena contracta, i.e. the modelled peak (the 2-D sample rarely lands on the
+    // core). The frame value follows the flow envelope; `cw` is the cycle peak.
+    let cwPeak = 0;
+    if (hasPeak) {
+      const cw = stenosisCw(peakFlow, G.hemo, path);
+      cwPeak = cw.peak;
+      if (cwPeak > 0 && cwPeak * cw.env > peakSpeed) peakSpeed = cwPeak * cw.env;
+    }
     // record the steered spectral gate for _spectral() (null => fall back to centre)
     this._peakGate = hasPeak ? {
+      cw: cwPeak,                     // modelled cycle-peak jet speed for a stenosis seen in this plane (else 0)
       x: pkx, y: pky, z: pkz, los: pkLos, turbulent: pkTurb,
       speed: peakSpeed,               // true jet-core peak SPEED this frame (== metrics.peakVel)
-      jet: pkTurb || peakSpeed > 1.8, // genuine jet: turbulent core, or clearly above inflow velocities
+      jet: pkTurb || peakSpeed > 1.8 || cwPeak > 0, // genuine jet: turbulent core, or clearly above inflow velocities
     } : null;
 
     // --- image formation: acoustic artifacts, PSF convolution, composite -------
+    if (this.specular) this._specular(cx, apexY);  // interface echoes: impedance steps facing the beam
     this._marchArtifacts(G, path, probe, half);   // shadowing / enhancement (polar)
     this._psfBlur();                               // depth/frequency separable PSF
     this._composite(data, cx, apexY, pxPerCm, half); // TGC + artifacts + log-compress + Doppler + gCNR
@@ -556,6 +708,60 @@ export class EchoView {
     this._spectral(G, path, probe);
   }
 
+  // Specular (interface) reflection. Tissue scatters DIFFUSELY (speckle, set per
+  // tissue above) but every boundary between tissues of different acoustic
+  // impedance is also a mirror: it returns an echo proportional to the reflection
+  // coefficient (Z2 - Z1) / (Z2 + Z1), and only when it faces the transducer — a
+  // mirror tilted away sends its echo elsewhere. So interfaces perpendicular to
+  // the beam are bright (the posterior pericardium in PLAX, the septum and
+  // posterior wall), while walls running ALONG the beam fade: the lateral-wall and
+  // interatrial-septal "drop-out" of the apical views, a classic pitfall (a false
+  // ASD). Computed on the sampled raster from a [1,2,1]-smoothed impedance map:
+  // the kernel exactly cancels the 2x2 elevation dither (which would otherwise
+  // read as a spurious, direction-dependent step and paint curved interfaces as
+  // facets) and gives a smooth interface normal; the gradient magnitude is the
+  // step size and its radial share the incidence angle. Added to the
+  // reflectivity BEFORE the PSF, so interface echoes take the beam's real width.
+  _specular(cx, apexY) {
+    const kind = this._kind, refl = this._refl, mask = this._mask, Z = this._zimp;
+    const n = SW * SH;
+    for (let i = 0; i < n; i++) Z[i] = Z_OF[kind[i]] || 1.45;
+    const h = Math.max(1, this._stride);
+    const Zs = this._zsm, T = this._ztmp;
+    for (let j = 0; j < SH; j++) {                       // [1,2,1]/4 at spacing h, x then y
+      const o = j * SW;
+      for (let i = 0; i < SW; i++) {
+        const l = i - h < 0 ? 0 : i - h, r = i + h >= SW ? SW - 1 : i + h;
+        T[o + i] = 0.25 * (Z[o + l] + 2 * Z[o + i] + Z[o + r]);
+      }
+    }
+    for (let j = 0; j < SH; j++) {
+      const u = (j - h < 0 ? 0 : j - h) * SW, d = (j + h >= SH ? SH - 1 : j + h) * SW, o = j * SW;
+      for (let i = 0; i < SW; i++) Zs[o + i] = 0.25 * (T[u + i] + 2 * T[o + i] + T[d + i]);
+    }
+    const GAIN = 0.6, K = 4 / 3;                         // K: peak of the smoothed step
+    for (let j = h; j < SH - h; j++) {
+      const dy = j - apexY;
+      if (dy <= 0) continue;
+      for (let i = h; i < SW - h; i++) {
+        const idx = j * SW + i;
+        if (!mask[idx]) continue;
+        const gx = Zs[idx + h] - Zs[idx - h], gy = Zs[idx + h * SW] - Zs[idx - h * SW];
+        const g2 = gx * gx + gy * gy;
+        if (g2 < 1e-6) continue;
+        const dx = i - cx;
+        const r = Math.sqrt(dx * dx + dy * dy);
+        const g = Math.sqrt(g2);
+        const gr = (gx * dx + gy * dy) / r;
+        const c = (gr < 0 ? -gr : gr) / g;                     // cos(incidence)
+        const c2 = c * c;
+        const R = K * g / (2 * Zs[idx] + 1e-6);                // reflection coefficient
+        const c4 = c2 * c2;                                  // narrow specular lobe: near-parallel walls drop out
+        refl[idx] += GAIN * R * c4 * c4 * (0.75 + 0.5 * this.noise[idx % this.noise.length]);
+      }
+    }
+  }
+
   // March the sector in polar (angle x depth) space and accumulate two acoustic
   // artifact fields distal along each beam, gated by the tissue kinds already in
   // the model: (a) acoustic SHADOWING behind calcified/strongly-reflective valves
@@ -564,38 +770,89 @@ export class EchoView {
   // classify() calls — far fewer than the Cartesian sampling loop.
   _marchArtifacts(G, path, probe, half) {
     const NA = this._NA, NS = this._NS;
-    const shadow = this._shadowGain, enh = this._enhGain;
+    const shadow = this._shadowGain, enh = this._enhGain, lungD = this._lungDepth;
     const P = probe.pos;
     const dStep = this.depthCm / NS;
+    // Attenuation is cumulative along each beam and tissue-specific; the TGC ramp
+    // assumes an average path. Behind a long blood (or effusion) column the beam
+    // has lost less than the TGC restores — posterior ENHANCEMENT — while thin
+    // structures (papillary muscles, chordae) cost a dB or two and cast no
+    // visible streak. The harmonic is attenuated at a higher effective frequency
+    // on the way back, so its far field is softer: the penetration trade-off.
+    const f = this.freqMHz, fAtt = this.harmonic ? f * 1.5 : f;
+    const kAtt = 2 * fAtt * dStep, kTgc = 2 * f * ALPHA_TGC;
     for (let a = 0; a < NA; a++) {
       const theta = -half + (a + 0.5) / NA * 2 * half;
       const bd = this.beamDir(probe, theta);
       const bx = bd[0], by = bd[1], bz = bd[2];
-      let sh = 1;            // persistent distal attenuation (shadow)
-      let fluidRun = 0;      // cm of contiguous anechoic column just traversed
-      let enhAmt = 0;        // enhancement bonus captured on exiting a fluid column
-      let sincePast = 1e9;   // cm since the fluid column ended
+      let sh = 1;            // persistent distal shadow behind calcium
+      let att = 0;           // accumulated attenuation (dB)
+      let lastFluid = -1e9;  // depth of the last blood / effusion sample on this beam
+      lungD[a] = 1e9;
       const base = a * NS;
       for (let s = 0; s < NS; s++) {
         const depth = (s + 0.5) * dStep;
         const t = classify(P[0] + depth * bx, P[1] + depth * by, P[2] + depth * bz, G, path);
         const kind = t.tissue;
         // strong reflector: calcified valve (AS/MS) casts a distal shadow
-        if (kind === TISSUE.VALVE && t.echo > 0.92) sh *= Math.exp(-2.4 * dStep);
+        if (kind === TISSUE.VALVE && t.calc === 1) sh *= Math.exp(-2.4 * dStep);
         if (sh < 0.16) sh = 0.16; // shadow, not pure black
-        const isFluid = kind === TISSUE.LV || kind === TISSUE.RV || kind === TISSUE.LA ||
-                        kind === TISSUE.RA || kind === TISSUE.AORTA || kind === TISSUE.PERICARDIUM;
-        if (isFluid) { fluidRun += dStep; sincePast = 0; }
-        else {
-          if (fluidRun > 0.6) enhAmt = Math.min(fluidRun * 0.24, 0.7); // brighten behind a real column
-          fluidRun = 0; sincePast += dStep;
+        // (the chest wall's near field is not lung, and a pleural surface must be a
+        // real air interface: the lung continues at least 0.4 cm deeper)
+        if (kind === TISSUE.LUNG && lungD[a] > 1e8 && depth > this.nearFieldCm &&
+            classify(P[0] + (depth + 0.4) * bx, P[1] + (depth + 0.4) * by, P[2] + (depth + 0.4) * bz, G, path).tissue === TISSUE.LUNG) {
+          // refine the pleural depth by bisection so the pleural line and its
+          // A-line reverberations stay smooth across beams (no depth staircase)
+          let lo = depth - dStep, hi = depth;
+          for (let it = 0; it < 5; it++) {
+            const mid = 0.5 * (lo + hi);
+            const tm = classify(P[0] + mid * bx, P[1] + mid * by, P[2] + mid * bz, G, path);
+            if (tm.tissue === TISSUE.LUNG) hi = mid; else lo = mid;
+          }
+          lungD[a] = hi;
         }
-        // enhancement applies to tissue behind the column, decaying with distance
-        let en = 1;
-        if (enhAmt > 0 && !isFluid) en = 1 + enhAmt * Math.exp(-sincePast / 2.2);
+        const al = ALPHA[kind];
+        att += 0.5 * (al === undefined ? 0.5 : al) * kAtt;   // to the sample centre
         shadow[base + s] = sh;
-        enh[base + s] = en;
+        if (kind === TISSUE.LV || kind === TISSUE.RV || kind === TISSUE.LA || kind === TISSUE.RA ||
+            kind === TISSUE.AORTA || kind === TISSUE.VEIN || kind === TISSUE.PERICARDIUM) lastFluid = depth;
+        // enhancement capped at +6 dB just behind the fluid, easing to +3 dB for
+        // tissue far beyond it (a scanner's TGC/processing keeps a deep organ
+        // from outshining the myocardium)
+        const past = depth - lastFluid;
+        const cap = past < 3 ? 6 : past > 5 ? 3 : 6 - 3 * (past - 3) * (past - 3) * (6 - past) / 4;
+        enh[base + s] = Math.pow(10, Math.min(cap, kTgc * depth - att) / 20);
+        att += 0.5 * (al === undefined ? 0.5 : al) * kAtt;
       }
+    }
+    // the gain field varies across beams only as fast as the beam is wide: blur
+    // it laterally (+-1.8 deg, triangular) so a fluid column's edge does not cast
+    // a razor-straight radial step of enhancement into the far field
+    {
+      const col = new Float32Array(NA);
+      for (let s = 0; s < NS; s++) {
+        for (let a = 0; a < NA; a++) col[a] = enh[a * NS + s];
+        for (let a = 0; a < NA; a++) {
+          let sw = 0, sv = 0;
+          for (let k = -3; k <= 3; k++) {
+            const b = a + k; if (b < 0 || b >= NA) continue;
+            const w = 4 - Math.abs(k); sw += w; sv += w * col[b];
+          }
+          enh[a * NS + s] = sv / sw;
+        }
+      }
+    }
+    // smooth the pleural depth across neighbouring beams (a steep pleura otherwise
+    // steps from beam to beam as a saw-tooth); beams without lung are left alone
+    const tmpL = lungD.slice(0, NA);
+    for (let a = 0; a < NA; a++) {
+      if (tmpL[a] > 1e8) continue;
+      let sw = 0, sd = 0;
+      for (let k = -2; k <= 2; k++) {
+        const b = a + k; if (b < 0 || b >= NA || tmpL[b] > 1e8) continue;
+        const w = 3 - Math.abs(k); sw += w; sd += w * tmpL[b];
+      }
+      lungD[a] = sd / sw;
     }
   }
 
@@ -608,6 +865,33 @@ export class EchoView {
   _psfBlur() {
     const w = SW, h = SH, refl = this._refl, tmp = this._tmp, depthBuf = this._depth;
     const mask = this._mask, kern = this._kern;
+    const pxPerCm = (SH * 0.92) / this.depthCm;
+    // Resolve the stochastic slice-thickness estimate locally first: a
+    // [1,2,1] x [1,2,1] average exactly cancels the 2x2 elevation dither, so no
+    // periodic hatch survives even where the PSF is narrow (the TEE near field).
+    if (this.elevation !== false) {
+      const hs = Math.max(1, this._stride);
+      for (let y = 0; y < h; y++) {
+        const row = y * w;
+        for (let x = 0; x < w; x++) {
+          const idx = row + x;
+          if (!mask[idx]) { tmp[idx] = 0; continue; }
+          const l = x - hs >= 0 && mask[idx - hs] ? refl[idx - hs] : refl[idx];
+          const r = x + hs < w && mask[idx + hs] ? refl[idx + hs] : refl[idx];
+          tmp[idx] = 0.25 * (l + 2 * refl[idx] + r);
+        }
+      }
+      for (let y = 0; y < h; y++) {
+        const row = y * w;
+        for (let x = 0; x < w; x++) {
+          const idx = row + x;
+          if (!mask[idx]) continue;
+          const u = y - hs >= 0 && mask[idx - hs * w] ? tmp[idx - hs * w] : tmp[idx];
+          const d = y + hs < h && mask[idx + hs * w] ? tmp[idx + hs * w] : tmp[idx];
+          refl[idx] = 0.25 * (u + 2 * tmp[idx] + d);
+        }
+      }
+    }
     const freqScale = clamp(3.0 / this.freqMHz, 0.5, 2.0); // ref 3 MHz; higher freq => tighter PSF
     const [hLat, hAx] = this._harmonicScale();
     const latScale = freqScale * hLat, axScale = freqScale * hAx;
@@ -621,11 +905,30 @@ export class EchoView {
     const dMax = this.depthCm || 1;
     for (let i = 0; i < LN; i++) {
       const d = (i + 0.5) * dMax / LN;
-      latLut[i] = this._latRadius(d, latScale, focus);
-      axLut[i] = this._axRadius(d, axScale);
+      latLut[i] = this._latRadius(d, latScale, focus, pxPerCm);
+      axLut[i] = this._axRadius(d, axScale, pxPerCm);
     }
     const lutK = LN / dMax;
-    // lateral pass (across beams ~ horizontal): refl -> tmp
+    this._sepBlur(refl, tmp, latLut, axLut, lutK, LN);
+    // Speckle: the complex scatterer field convolved with the SAME PSF, then
+    // envelope-detected — fully developed (Rayleigh) speckle whose grain is the
+    // resolution cell (wider laterally, growing with depth) and which moves with
+    // the tissue that carries the scatterers.
+    const sI = this._sI, sQ = this._sQ, spk = this._spk, kn = this._kernPow;
+    this._sepBlur(sI, tmp, latLut, axLut, lutK, LN);
+    this._sepBlur(sQ, tmp, latLut, axLut, lutK, LN);
+    for (let idx = 0; idx < w * h; idx++) {
+      if (!mask[idx]) { spk[idx] = 1; continue; }
+      let li = (depthBuf[idx] * lutK) | 0; if (li >= LN) li = LN - 1;
+      const pw = 2 * kn[latLut[li]] * kn[axLut[li]];      // expected I^2 + Q^2
+      spk[idx] = Math.sqrt((sI[idx] * sI[idx] + sQ[idx] * sQ[idx]) / pw);
+    }
+  }
+
+  // In-place separable Gaussian convolution of `f` (lateral, then axial), with
+  // per-pixel radii from the depth lookup tables; masked pixels are excluded.
+  _sepBlur(f, tmp, latLut, axLut, lutK, LN) {
+    const w = SW, h = SH, depthBuf = this._depth, mask = this._mask, kern = this._kern;
     for (let y = 0; y < h; y++) {
       const row = y * w;
       for (let x = 0; x < w; x++) {
@@ -633,27 +936,26 @@ export class EchoView {
         if (!mask[idx]) { tmp[idx] = 0; continue; }
         let li = (depthBuf[idx] * lutK) | 0; if (li >= LN) li = LN - 1;
         const r = latLut[li];
-        if (r === 0) { tmp[idx] = refl[idx]; continue; }
+        if (r === 0) { tmp[idx] = f[idx]; continue; }
         const k = kern[r]; let acc = 0, wsum = 0;
         for (let t = -r; t <= r; t++) {
           const xx = x + t;
           if (xx < 0 || xx >= w) continue;
           const j2 = row + xx;
           if (!mask[j2]) continue;
-          const wv = k[t + r]; acc += refl[j2] * wv; wsum += wv;
+          const wv = k[t + r]; acc += f[j2] * wv; wsum += wv;
         }
-        tmp[idx] = wsum > 0 ? acc / wsum : refl[idx];
+        tmp[idx] = wsum > 0 ? acc / wsum : f[idx];
       }
     }
-    // axial pass (along beam ~ vertical): tmp -> refl
     for (let y = 0; y < h; y++) {
       const row = y * w;
       for (let x = 0; x < w; x++) {
         const idx = row + x;
-        if (!mask[idx]) { refl[idx] = 0; continue; }
+        if (!mask[idx]) { f[idx] = 0; continue; }
         let ai = (depthBuf[idx] * lutK) | 0; if (ai >= LN) ai = LN - 1;
         const r = axLut[ai];
-        if (r === 0) { refl[idx] = tmp[idx]; continue; }
+        if (r === 0) { f[idx] = tmp[idx]; continue; }
         const k = kern[r]; let acc = 0, wsum = 0;
         for (let t = -r; t <= r; t++) {
           const yy = y + t;
@@ -662,7 +964,7 @@ export class EchoView {
           if (!mask[j2]) continue;
           const wv = k[t + r]; acc += tmp[j2] * wv; wsum += wv;
         }
-        refl[idx] = wsum > 0 ? acc / wsum : tmp[idx];
+        f[idx] = wsum > 0 ? acc / wsum : tmp[idx];
       }
     }
   }
@@ -687,9 +989,13 @@ export class EchoView {
     if (pers > 0 && !this._prevGrey) this._prevGrey = new Float32Array(SW * SH);
     const prevGrey = this._prevGrey;
     const harm = this.harmonic;
-    const atten = harm ? 0.030 : 0.023;
-    const gainComp = harm ? 1.26 : 1.15;
-    const revbGain = harm ? 0.16 : 1.0;
+    const gainComp = harm ? 1.26 : 1.0;
+    // near-field reverberation arises in the chest wall between the transducer and
+    // the first strong interface: it scales with that wall (≈ nothing for TEE)
+    const revbGain = (harm ? 0.16 : 1.0) * Math.min(1, (this.nearFieldCm || 0) / 1.4);
+    const dTh = 2 * half / this._NA;                 // beam spacing (rad) of the artifact grid
+    const spk = this._spk, lungD = this._lungDepth;
+    const DRinv = 20 / (this.dynRange || 55);
     // image-quality accumulators (target = myocardium, background = LV blood)
     const NB = 48; const hMyo = new Float32Array(NB), hLv = new Float32Array(NB);
     let nM = 0, sM = 0, sM2 = 0, nL = 0, sL = 0, sL2 = 0;
@@ -705,18 +1011,51 @@ export class EchoView {
         // and itself attenuated at twice the frequency, so the far field goes
         // softer. That trade-off (cleaner near/mid field, worse deep penetration)
         // is the honest reason harmonics are not simply "better" everywhere.
-        const tgc = Math.exp(-depth * atten) * (1 + depth * 0.065);
-        let b = refl[idx] * tgc * gain * gainComp;
-        // acoustic artifacts (polar lookup): distal shadow / posterior enhancement
+        let b = refl[idx] * spk[idx] * gain * gainComp;
+        // attenuation x TGC (incl. posterior enhancement) and calcific shadowing
         let s = (depth * dInv) | 0; if (s >= NS) s = NS - 1;
-        const abase = abin[idx] * NS + s;
+        const abase = Math.round(abin[idx]) * NS + s;
         b *= shadow[abase] * enh[abase];
+        // aerated lung: a bright pleural line then reverberation A-lines at
+        // multiples of its depth, fading — no anatomy is seen through air
+        // Gated by the BEAM's pleural depth (not the per-pixel tissue label, whose
+        // elevation dither would comb the pleural border into a ladder): beyond the
+        // pleura the beam carries only the pleural echo and its reverberations.
+        {
+          // pleural depth interpolated continuously across beams (no per-bin steps)
+          const af = abin[idx], ab0 = af | 0, ab1 = ab0 + 1 < this._NA ? ab0 + 1 : ab0, fr = af - ab0;
+          const dl = lungD[ab1] < 1e8 && lungD[ab0] < 1e8 ? lungD[ab0] * (1 - fr) + lungD[ab1] * fr
+            : Math.min(lungD[ab0], lungD[ab1]);
+          if (dl < 1e8 && depth > dl - 0.05) {
+            const w = depth >= dl ? 1 : (depth - dl + 0.05) / 0.05;   // soft entry into the air
+            // pleural line (m = 1) smooth and continuous, A-lines fainter and more
+            // speckled, over a low grey reverberation haze (air is not echo-free)
+            // the pleura is a specular reflector: its echo falls off with the
+            // incidence angle (same cos^4 lobe as the tissue specular term), and it
+            // is blurred axially by the pulse (widening with depth), not a 1-px wire
+            const slope = lungD[ab1] < 1e8 && lungD[ab0] < 1e8 ? (lungD[ab1] - lungD[ab0]) / (dl * dTh) : 0;
+            const ci = 1 / (1 + slope * slope), spec = 0.12 + 0.88 * ci * ci;
+            const sig = 0.06 + 0.004 * depth;
+            let al = 0, pl = 0;
+            for (let m = 1, amp = 0.55; m <= 4; m++, amp *= 0.45) {
+              const q = (depth - m * dl) / (sig * (1 + 0.3 * (m - 1))), g = amp * Math.exp(-q * q);
+              if (m === 1) pl = g * spec; else al += g * spec;
+            }
+            const haze = 0.004 * Math.exp(-(depth - dl) / 4) * (0.4 + 0.6 * spk[idx]);   // ~ -48 dB, below tissue
+            b = b * (1 - w) + w * (0.02 * b + (pl * (0.55 + 0.9 * spk[idx]) + al * (0.5 + 0.8 * spk[idx]) + haze) * gain);
+          }
+        }
         // subtle near-field reverberation: faint repeating echoes close to the
         // transducer (multiple internal reflections), fading fast with depth.
         if (depth < 2.4 && revbGain > 0) {
-          b += revbGain * 0.05 * Math.exp(-depth / 1.1) * (0.5 + 0.5 * Math.sin(depth * 9.0)) * (0.6 + 0.4 * refl[idx]);
+          b += revbGain * 0.012 * Math.exp(-depth / 0.8) * spk[idx];   // speckled, no fixed banding
         }
-        b = Math.pow(clamp(b, 0, 1), 0.78); // log-ish compression
+        // receiver noise floor: blood and echo-free regions are never digital zero —
+        // a faint speckled floor (~-52 dB) that rises slightly with depth (TGC gain)
+        b += 0.00012 * (0.5 + spk[idx]) * (1 + depth * 0.06) * gain;
+        // log compression over the dynamic range
+        b = b > 1e-9 ? 1 + Math.log10(b) * DRinv : 0;
+        b = b < 0 ? 0 : b > 1 ? 1 : b;
         // persistence: exponential blend with the previous frame's grey. Applied
         // AFTER compression so it averages what is displayed, as a scanner does.
         if (pers > 0) { b = b * (1 - pers) + prevGrey[idx] * pers; prevGrey[idx] = b; }
@@ -809,12 +1148,19 @@ export class EchoView {
     const items = [
       ['LV', G.lv.c], ['RV', G.rv.c], ['LA', G.la.c], ['RA', G.ra.c], ['Ao', G.aorta.c],
       ['MV', VALVE_DEFS.mitral.c], ['TV', VALVE_DEFS.tricuspid.c], ['AV', VALVE_DEFS.aortic.c],
+      ...EXTRA_LABELS,
     ];
+    if (G.A && G.A.cs) items.push(['CS', G.A.cs[1].b]);
+    // subcostal: the liver is the near-field acoustic window along the beam
+    if (this.viewName === 'SUBCOSTAL') items.push(['Liver', [probe.pos[0] + probe.dir[0] * 3.2, probe.pos[1] + probe.dir[1] * 3.2, probe.pos[2] + probe.dir[2] * 3.2]]);
     // aortic-valve short axis: name the three cusps (R/L/N-coronary) at their centroids
     if (this.viewName === 'PSAX_AV') for (const c of AORTIC_CUSPS) items.push([c.name, c.p]);
     // LAA view: label the appendage body (mid-lobe of the appendage chain)
     if (this.viewName === 'MELAA' && G.A && G.A.la.aa && G.A.la.aa.length) {
       const s = G.A.la.aa[Math.floor(G.A.la.aa.length / 2)];
+      items.push(['LAA', [(s.a[0] + s.b[0]) / 2, (s.a[1] + s.b[1]) / 2, (s.a[2] + s.b[2]) / 2]]);
+    } else if (this.viewName === 'A2C' && G.A && G.A.la.aa) {
+      const s = G.A.la.aa[1];
       items.push(['LAA', [(s.a[0] + s.b[0]) / 2, (s.a[1] + s.b[1]) / 2, (s.a[2] + s.b[2]) / 2]]);
     }
     // optional per-view whitelist: only label structures expected in this view
@@ -856,7 +1202,8 @@ export class EchoView {
     // recompute only when the path/pathology object identity changes.
     if (path !== this._lastMetricsPath) {
       this._ged = geometryAt(0.0, path);   // end-diastole
-      this._ges = geometryAt(0.32, path);  // end-systole
+      // end-systole = the circulation's minimum-volume instant (not a fixed phase)
+      this._ges = geometryAt(hemoSummary(path).tMinVol, path);
       this._lastMetricsPath = path;
       this._peakVelMax = 0;                 // reset the peak-velocity tracker
     }
@@ -905,10 +1252,11 @@ export class EchoView {
       severity = gr; severityLabel = gr + ' MR';
     } else if (path.tr) {
       severity = gr; severityLabel = gr + ' TR';
-    } else if (path.vsd) {          // modelled shunts are large by design
-      severity = 'large shunt'; severityLabel = 'large VSD';
-    } else if (path.asd) {
-      severity = 'large shunt'; severityLabel = 'large ASD';
+    } else if (path.vsd || path.asd) {
+      // a ~1 cm VSD with a ~4.5 m/s jet is restrictive, never 'large' (a large VSD is
+      // non-restrictive and overloads the LA/LV; this circulation has no Qp:Qs)
+      const sl = shuntLabel(path);
+      severity = sl.severity; severityLabel = sl.label;
     } else if (path.mitralStenosis) {
       // graded by the modelled diastolic mean gradient / valve area
       severity = gr; severityLabel = gr + ' MS';
@@ -964,7 +1312,7 @@ export class EchoView {
     // the beam or straddling a thin vena contracta under-reads otherwise. Normal
     // laminar inflow keeps the honest gated line-of-sight (PW) sample.
     const isJet = !!(gate && gate.jet);
-    const coreSpeed = gate ? gate.speed : 0;
+    const coreSpeed = gate ? (gate.cw > 0.1 ? gate.cw : gate.speed) : 0;
     let peakAbs = 0;
     for (let c = 0; c < cols; c++) {
       const ph = c / cols;

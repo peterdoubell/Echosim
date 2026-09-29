@@ -22,40 +22,60 @@
 import { clamp } from './mathutils.js';
 
 const CYCLE = 0.833;          // reference cycle length (s) at ~72 bpm
-const TSYS = 0.40;            // systolic activation fraction of the cycle
+// Ventricular activation is ASYMMETRIC: contraction to peak elastance takes
+// longer than the relaxation that follows, and end-systole sits at the peak. A
+// symmetric bump over 0..0.40 put peak elastance at tau 0.20, which ended
+// ejection there and gave an LV ejection time of only ~125 ms (normal 280-320)
+// with a peak aortic flow of ~1190 mL/s (normal ~450) — the stroke volume was
+// right but it was expelled far too fast, so the LV then sat frozen at ESV for
+// the rest of systole. TC puts peak elastance (end-systole, aortic closure) at
+// ~333 ms post-QRS. TR sets the isovolumic pressure fall: 0.12 gives an IVRT of
+// ~85 ms (normal 70-100) with mitral opening at phase ~0.50; a slower decay
+// (0.22) stretched IVRT to ~150 ms, the impaired-relaxation pattern.
+const TC = 0.40;              // contraction: activation rises to peak (end-systole)
+const TR = 0.14;              // relaxation: activation decays back to zero
 const NSAMPLE = 240;          // samples stored per output cycle
 const STEPS = 3000;           // integration steps per cycle
 const NCYCLE = 10;            // cycles run to reach the limit cycle
 
-// Ventricular activation e(τ) in [0,1]: a raised-sine bump over systole, zero
-// through diastole. τ is the cardiac phase in [0,1) (0 == onset of systole).
+// Ventricular activation e(τ) in [0,1]: a raised-sine rise to peak elastance at
+// τ = TC (end-systole), then a faster raised-cosine decay to zero at TC+TR, zero
+// through the rest of diastole. τ is the cardiac phase in [0,1) (0 == onset of
+// systole). Both joins are C1 (zero slope at τ=0, τ=TC and τ=TC+TR).
 function activation(tau) {
-  if (tau >= TSYS) return 0;
-  const s = Math.sin(Math.PI * tau / TSYS);
-  return s * s;
+  if (tau < TC) { const u = tau / TC, sn = Math.sin(Math.PI * 0.5 * u), cs = 0.5 * (1 - Math.cos(Math.PI * u)); const w = 0.4; return sn * (1 - w) + cs * w; }
+  if (tau < TC + TR) { const c = Math.cos(Math.PI * 0.5 * (tau - TC) / TR); return c * c; }
+  return 0;
 }
 
 // Left-atrial pressure source: a resting reservoir pressure plus a late-diastolic
 // a-wave (atrial kick ~τ 0.9). Elevated resting LAP models MS / MR congestion.
 function atrialP(tau, p) {
-  const d = (tau - 0.90) / 0.045;
+  // the a-wave peaks just before the QRS (atrial systole ends at mitral closure,
+  // ~40-60 ms before ejection); wrap-safe so its tail continues across tau = 0
+  let dd = tau - (0.95); dd -= Math.round(dd);
+  const d = dd / 0.045;
   const aWave = Math.exp(-d * d);
   return p.Pla0 + p.aWave * aWave;
 }
 
 // Per-pathology circulation parameters. Normal values are calibrated to
-// EDV≈120, ESV≈50, EF≈58%, aortic 120/78, LVEDP≈8.
+// EDV≈121, ESV≈47, EF≈61%, aortic ~125/76, LVEDP≈8.
 function circParams(path) {
   const p = {
-    Emax: 3.0,   // end-systolic elastance (contractility)
+    Emax: 2.7,   // end-systolic elastance (contractility)
     Emin: 0.085, // diastolic (passive) elastance / stiffness
     V0: 10,      // unstressed LV volume
     Pla0: 8.0,   // resting left-atrial / filling pressure (raised → stronger E wave)
     aWave: 4.4,  // atrial-kick pressure bump (tuned → E-dominant normal filling, E/A≈1.1)
     Rmv: 0.010,  // mitral (inflow) resistance
-    Rao: 0.018,  // aortic-valve resistance (∝ 1/AVA)
-    Rsys: 1.15,  // systemic vascular resistance
-    Cao: 1.6,    // arterial (Windkessel) compliance
+    // Rao 0.018 gave a peak LV→aorta gradient of ~14 mmHg in a NORMAL heart,
+    // which on echo reads as mild aortic stenosis; a normal valve is 2-5 mmHg.
+    // AS overrides Rao explicitly per grade below, so this only affects normals.
+    Rao: 0.006,
+    // (aortic-valve resistance, ∝ 1/AVA)
+    Rsys: 0.95,  // systemic vascular resistance
+    Cao: 1.50,   // arterial (Windkessel) compliance (sets pulse pressure)
     Pven: 4,     // downstream systemic venous pressure
     Rmr: Infinity, // mitral regurgitant-orifice resistance (∞ = competent)
   };
@@ -63,24 +83,45 @@ function circParams(path) {
   // presets that set only the flag keep their original "severe by design" behaviour.
   const g = gradeOf(path);
   if (path.aorticStenosis) {                                      // small AVA → LV pressure overload
-    p.Rao = ({ mild: 0.052, moderate: 0.090, severe: 0.14 })[g];
-    p.Emax = ({ mild: 3.2, moderate: 3.4, severe: 3.6 })[g];
+    p.Rao = ({ mild: 0.068, moderate: 0.125, severe: 0.24 })[g];
+    p.Emax = ({ mild: 2.95, moderate: 3.3, severe: 3.95 })[g];   // compensatory, above normal (2.7)
   }
   if (path.lvh && !path.dilated) { p.Emin = 0.12; }               // stiff, hypertrophied → higher LVEDP
   if (path.dilated) { p.Emax = 0.60; p.Emin = 0.060; p.V0 = 30; p.Rsys = 1.30; p.Cao = 1.4; p.Pla0 = 13; }
-  if (path.mr) {                                                  // regurgitant orifice + congested LA
-    p.Rmr = ({ mild: 0.90, moderate: 0.33, severe: 0.11 })[g];
-    p.Pla0 = ({ mild: 8, moderate: 9, severe: 10 })[g];
+  // DCM: annular dilatation and leaflet tethering leave a central FUNCTIONAL MR
+  // (moderate: regurgitant fraction ~30 %) even with structurally normal leaflets
+  if (path.dilated && !path.mr) { p.Rmr = 1.2; }
+  if (path.mr) {
+    // Regurgitant orifice + congested LA, plus the chronic volume-overload
+    // REMODELLING of primary MR: the LV dilates (unstressed volume V0 rises) so it
+    // is not emptied to nothing through the low-resistance leak — EF stays
+    // high-normal (~65-75 %) with a dilated, hyperdynamic ventricle. Calibrated to
+    // ASE grading: regurgitant fraction ~24 / 35 / 54 %, volume ~22 / 40 / 80 mL.
+    // Chronic MR keeps the forward stroke volume by ejecting a larger total volume
+    // over a near-normal time, not by emptying faster: with normal contractility
+    // the unloaded LV reached its end-systolic volume ~190 ms into severe-MR
+    // ejection at a peak aortic flow ~1.3x normal, so the cusps opened for only
+    // two-thirds of systole. The (subclinically) lower end-systolic elastance of
+    // chronic volume overload gives LVET ~230 ms at a near-normal peak aortic flow.
+    p.Rmr = ({ mild: 1.6, moderate: 0.9, severe: 0.38 })[g];
+    p.Pla0 = ({ mild: 9, moderate: 11, severe: 14 })[g];
+    p.V0 = ({ mild: 20, moderate: 34, severe: 40 })[g];
+    p.Emax = Math.min(p.Emax, ({ mild: 2.7, moderate: 2.4, severe: 1.8 })[g]);
     p.aWave = 6;
   }
   if (path.mitralStenosis) {                                      // narrow inflow, high LAP
-    p.Rmv = ({ mild: 0.045, moderate: 0.065, severe: 0.090 })[g];
-    p.Pla0 = ({ mild: 11, moderate: 14, severe: 16 })[g];
+    p.Rmv = ({ mild: 0.043, moderate: 0.078, severe: 0.128 })[g];
+    p.Pla0 = ({ mild: 12, moderate: 16, severe: 20 })[g];
     p.aWave = 8;
   }
   if (path.rwma) { p.Emax = Math.min(p.Emax, 1.8); }              // regional dysfunction → low global contractility
   return p;
 }
+
+// Mitral valve area (cm^2) per grade: the ONE area the leaflet geometry (planimetry)
+// is drawn to. circParams' Rmv/Pla0 are tuned so the Hakki area of the solved
+// circulation agrees with it (verify-anatomy checks this).
+export const MS_AREA = { mild: 1.8, moderate: 1.3, severe: 0.95 };
 
 // Normalise a pathology's severity grade to 'mild' | 'moderate' | 'severe'.
 // Default 'severe' preserves the original single-severity presets.
@@ -94,7 +135,9 @@ export function gradeOf(path = {}) {
 function simulate(path) {
   const p = circParams(path);
   const dt = CYCLE / STEPS;
-  let Vlv = 120, Pao = 80;
+  let Vlv = 120, Pao = 80, Qao = 0;
+  // LVOT/aortic inertance (mmHg·s²/mL) and aortic characteristic impedance (mmHg·s/mL)
+  const L = 0.0015, Zc = 0.08;
 
   const tr = {
     phase: new Float64Array(NSAMPLE), Plv: new Float64Array(NSAMPLE),
@@ -114,7 +157,15 @@ function simulate(path) {
       const Pla = atrialP(tau, p);
       // valves (diode + resistance); mitral opens when LA>LV (diastole)
       const Qmv = Pla > Plv ? (Pla - Plv) / p.Rmv : 0;
-      const Qao = Plv > Pao ? (Plv - Pao) / p.Rao : 0;
+      // aortic outflow has INERTIA (blood mass in the LVOT / proximal aorta) and
+      // meets the aorta's characteristic impedance: the flow accelerates over
+      // ~80-100 ms to a mid-systolic peak instead of jumping to its maximum the
+      // instant the valve opens. Semi-implicit (stable) update; the valve closes
+      // when the forward flow decelerates to zero.
+      if (Qao > 0 || Plv > Pao) {
+        Qao = (Qao + dt / L * (Plv - Pao)) / (1 + dt * (p.Rao + Zc) / L);
+        if (Qao < 0) Qao = 0;
+      }
       const Qmr = (p.Rmr !== Infinity && Plv > Pla) ? (Plv - Pla) / p.Rmr : 0;
       const Qsys = (Pao - p.Pven) / p.Rsys;
       Vlv += (Qmv - Qao - Qmr) * dt;
@@ -126,7 +177,7 @@ function simulate(path) {
         const target = Math.floor((s + 1) * NSAMPLE / STEPS);
         while (sIdx < target && sIdx < NSAMPLE) {
           tr.phase[sIdx] = sIdx / NSAMPLE;
-          tr.Plv[sIdx] = Plv; tr.Pao[sIdx] = Pao; tr.Vlv[sIdx] = Vlv;
+          tr.Plv[sIdx] = Plv; tr.Pao[sIdx] = Pao + Zc * Qao; tr.Vlv[sIdx] = Vlv;   // Pao: ascending-aortic pressure
           tr.Qmv[sIdx] = Qmv; tr.Qao[sIdx] = Qao; tr.Qmr[sIdx] = Qmr; tr.Pla[sIdx] = Pla;
           sIdx++;
         }
@@ -136,8 +187,8 @@ function simulate(path) {
 
   // summary scalars from the recorded cycle
   let EDV = -1e9, ESV = 1e9, PlvSys = -1e9, PaoSys = -1e9, PaoDia = 1e9;
-  let grad = 0, fwd = 0, regurg = 0, tMin = 0, PlaAtSys = 0;
-  let QaoMax = 0, QmvMax = 0, QmrMax = 0;
+  let grad = 0, fwd = 0, regurg = 0, tMin = 0, PlaAtSys = 0, gradMV = 0, mvSum = 0, mvN = 0;
+  let QaoMax = 0, QmvMax = 0, QmrMax = 0, iQmax = 0, iOpen = -1, iClose = -1;
   const dtS = CYCLE / NSAMPLE;
   for (let i = 0; i < NSAMPLE; i++) {
     if (tr.Vlv[i] > EDV) EDV = tr.Vlv[i];
@@ -145,8 +196,14 @@ function simulate(path) {
     if (tr.Plv[i] > PlvSys) { PlvSys = tr.Plv[i]; PlaAtSys = tr.Pla[i]; }
     if (tr.Pao[i] > PaoSys) PaoSys = tr.Pao[i];
     if (tr.Pao[i] < PaoDia) PaoDia = tr.Pao[i];
-    if (tr.Qao[i] > 1 && tr.Plv[i] - tr.Pao[i] > grad) grad = tr.Plv[i] - tr.Pao[i];
-    if (tr.Qao[i] > QaoMax) QaoMax = tr.Qao[i];
+    if (tr.Qao[i] > 1 && tr.Qao[i] * p.Rao > grad) grad = tr.Qao[i] * p.Rao;   // transvalvular drop
+    if (tr.Qao[i] > QaoMax) { QaoMax = tr.Qao[i]; iQmax = i; }
+    if (tr.Qao[i] > 1) { if (iOpen < 0) iOpen = i; iClose = i; }
+    if (tr.Qmv[i] > 1) {                                   // transmitral LA-LV gradient during filling
+      const dm = tr.Pla[i] - tr.Plv[i];
+      if (dm > gradMV) gradMV = dm;
+      mvSum += dm; mvN++;
+    }
     if (tr.Qmv[i] > QmvMax) QmvMax = tr.Qmv[i];
     if (tr.Qmr[i] > QmrMax) QmrMax = tr.Qmr[i];
     fwd += tr.Qao[i] * dtS;
@@ -156,10 +213,16 @@ function simulate(path) {
   const sum = {
     EDV, ESV, SV, EF: EDV > 0 ? (SV / EDV) * 100 : 0,
     PlvSys, PaoSys, PaoDia, PlaAtSys, gradient: grad,
+    // transmitral gradient (mmHg): peak and diastolic mean, and the Hakki valve area
+    // (cardiac output L/min over sqrt(mean gradient)) — what continuity/PHT would report
+    gradientMV: gradMV, meanGradMV: mvN ? mvSum / mvN : 0,
+    mvaHakki: mvN && mvSum > 0 ? (SV * 60 / CYCLE / 1000) / Math.sqrt(mvSum / mvN) : 0,
     forwardSV: fwd, regurgVol: regurg,
     regurgFraction: SV > 0 ? clamp(regurg / SV, 0, 1) : 0,
     tMinVol: tMin,
     QaoMax, QmvMax, QmrMax, // per-cycle peak flows, for jet-velocity envelopes
+    accelTime: (iQmax - iOpen) * dtS, ejectTime: (iClose - iOpen + 1) * dtS,
+    Pla0: p.Pla0,           // chronic LA pressure (drives LA remodelling in the anatomy)
   };
   return { tr, sum, params: p };
 }

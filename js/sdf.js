@@ -58,3 +58,33 @@ export function sdRoundCone(px, py, pz, ax, ay, az, bx, by, bz, r1, r2) {
   const dx = px - cx, dy = py - cy, dz = pz - cz;
   return Math.sqrt(dx * dx + dy * dy + dz * dz) - r;
 }
+
+// Flat-capped cylinder from a to b (radius r): the right primitive for a valve
+// orifice — a capsule's hemispherical cap would bulge ~r through the valve plane
+// into the neighbouring chamber.
+export function sdCylinder(px, py, pz, ax, ay, az, bx, by, bz, r) {
+  const bax = bx - ax, bay = by - ay, baz = bz - az;
+  const L = Math.sqrt(bax * bax + bay * bay + baz * baz) || 1e-6;
+  const ux = bax / L, uy = bay / L, uz = baz / L;
+  const pax = px - ax, pay = py - ay, paz = pz - az;
+  const t = pax * ux + pay * uy + paz * uz;
+  const rx = pax - ux * t, ry = pay - uy * t, rz = paz - uz * t;
+  const dr = Math.sqrt(rx * rx + ry * ry + rz * rz) - r;
+  const dh = Math.abs(t - L * 0.5) - L * 0.5;
+  const ox = dr > 0 ? dr : 0, oh = dh > 0 ? dh : 0;
+  return Math.min(Math.max(dr, dh), 0) + Math.sqrt(ox * ox + oh * oh);
+}
+// Tapered, flat-capped cone frustum (radius ra at a, rb at b), approximate.
+export function sdFrustum(px, py, pz, ax, ay, az, bx, by, bz, ra, rb) {
+  const bax = bx - ax, bay = by - ay, baz = bz - az;
+  const L = Math.sqrt(bax * bax + bay * bay + baz * baz) || 1e-6;
+  const ux = bax / L, uy = bay / L, uz = baz / L;
+  const pax = px - ax, pay = py - ay, paz = pz - az;
+  const t = pax * ux + pay * uy + paz * uz;
+  const h = t < 0 ? 0 : t > L ? 1 : t / L;
+  const rx = pax - ux * t, ry = pay - uy * t, rz = paz - uz * t;
+  const dr = (Math.sqrt(rx * rx + ry * ry + rz * rz) - (ra + (rb - ra) * h)) / Math.sqrt(1 + ((rb - ra) / L) * ((rb - ra) / L));
+  const dh = Math.abs(t - L * 0.5) - L * 0.5;
+  const ox = dr > 0 ? dr : 0, oh = dh > 0 ? dh : 0;
+  return Math.min(Math.max(dr, dh), 0) + Math.sqrt(ox * ox + oh * oh);
+}
