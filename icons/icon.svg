@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#101826"/>
+      <stop offset="1" stop-color="#05080e"/>
+    </linearGradient>
+    <radialGradient id="fan" cx="256" cy="84" r="380" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#39c0e8" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#39c0e8" stop-opacity="0.06"/>
+    </radialGradient>
+    <linearGradient id="heart" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff7a6e"/>
+      <stop offset="1" stop-color="#e8392d"/>
+    </linearGradient>
+    <clipPath id="sector"><path d="M256 84 L436 396 A360 360 0 0 1 76 396 Z"/></clipPath>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <!-- ultrasound sector: apex at the transducer, fanning down -->
+  <path d="M256 84 L436 396 A360 360 0 0 1 76 396 Z" fill="url(#fan)"/>
+  <g clip-path="url(#sector)" fill="none" stroke="#39c0e8" stroke-opacity="0.22" stroke-width="5">
+    <circle cx="256" cy="84" r="150"/>
+    <circle cx="256" cy="84" r="230"/>
+    <circle cx="256" cy="84" r="310"/>
+  </g>
+  <path d="M256 84 L436 396 A360 360 0 0 1 76 396 Z" fill="none" stroke="#39c0e8" stroke-width="14" stroke-linejoin="round"/>
+  <!-- transducer -->
+  <rect x="216" y="52" width="80" height="34" rx="12" fill="#39c0e8"/>
+  <!-- heart in the imaging plane -->
+  <path d="M256 368 C 214 334 164 298 164 252 C 164 222 186 200 214 200 C 232 200 247 210 256 226 C 265 210 280 200 298 200 C 326 200 348 222 348 252 C 348 298 298 334 256 368 Z" fill="url(#heart)"/>
+  <!-- ECG trace across the heart -->
+  <path d="M150 286 H214 L230 250 L248 318 L266 232 L282 286 H362" fill="none" stroke="#ffffff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

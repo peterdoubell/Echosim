@@ -38,10 +38,7 @@ body {
   background: linear-gradient(180deg, #0c111b, #0a0e16);
 }
 .brand { display: flex; align-items: center; gap: 14px; }
-.logo {
-  font-size: 30px; color: var(--accent);
-  filter: drop-shadow(0 0 10px rgba(57,192,232,0.5));
-}
+.logo { width: 36px; height: 36px; display: block; flex: none; }
 .brand h1 { font-size: 20px; margin: 0; letter-spacing: 1px; }
 .brand p { margin: 0; font-size: 12px; color: var(--muted); }
 
