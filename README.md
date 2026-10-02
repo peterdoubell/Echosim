@@ -57,7 +57,13 @@ node tools/validate.mjs         # 12 ECG morphology checks
 node tools/shoot.mjs out/       # screenshots across views/pathologies, asserts 0 console errors
 node tools/verify-measure.mjs   # end-to-end caliper + Simpson-EF check
 node tools/verify-atrial-phase.mjs  # atrio-ventricular phase relationship
+node tools/verify-anatomy.mjs   # anatomy audit: ASE dimensions and relationships, swept
+                                # over views, phases and pathologies (open defects tagged KNOWN-FAIL)
+node tools/verify-timing.mjs    # valve timing, heart-rate warping, right-heart offsets
 ```
+
+`docs/ANATOMY.md` describes the anatomical model, the audit and the expert-panel
+review history.
 
 ## Honest limits
 
@@ -69,5 +75,8 @@ a risk file — which is funded human work, not something a commit can deliver.
 Anatomical face validity is still pending expert sign-off; see
 `docs/VALIDATION_RESULTS.md`.
 
-Development history for the work up to this point lives in the pull request on
-the repository this was extracted from.
+Development before the move to this repository happened in
+`peterdoubell/desktop-tutorial`; its history is in pull requests
+[#2](https://github.com/peterdoubell/desktop-tutorial/pull/2) and
+[#69](https://github.com/peterdoubell/desktop-tutorial/pull/69) there. This
+repository is now the only home of EchoSim.
