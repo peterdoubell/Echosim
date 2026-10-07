@@ -250,11 +250,13 @@ check('RA', 'RA major / LA major (A4C, ES)', ra4.major / la4.major, [0.75, 1.3],
 const laV = volume(GES, 'LA', [-3, 5, -3, 7, -5, 4]);
 check('LA', 'LA volume (voxel, ES)', laV, [30, 70], 'mL', 'LAVI 16-34 mL/m2 x BSA 1.9');
 {
-  // RA area in the A4C plane at end-systole
+  // RA area in the A4C plane at end-systole (ASE: traced excluding the venae
+  // cavae beyond their orifices)
   let n = 0; const h = 0.05, c = GES.A.ra.c;
   const u = a4c.lat, v = a4c.dir;
   for (let i = -5; i <= 5; i += h) for (let j = -5; j <= 5; j += h) {
     const p = add(add(add(c, mul(u, i)), mul(v, j)), mul(a4c.normal, dot(sub(a4c.pos, c), a4c.normal)));
+    if (inCapsule(p, GES.A.svc) || inCapsule(p, GES.A.ivc)) continue;
     if (classify(p[0], p[1], p[2], GES, {}).tissue === TISSUE.RA) n++;
   }
   check('RA', 'RA area (A4C, ES)', n * h * h, REF.raAreaNormal, 'cm2');
@@ -573,6 +575,46 @@ for (const [nm, G] of [['ED', GED], ['ES', GES]]) {
     }
   }
   check('Subcostal IVC', `hepatic vein joins the IVC, cm below the RA junction (${nm})`, hvMin, [1.0, 2.5]);
+  {
+    // F06: the joining hepatic vein is a real channel in plane (not a speck), and
+    // the IVC runs WITHIN the liver (caudate lobe behind it)
+    const hv = [], seen = new Set();
+    for (const [k, c] of g.cells) if (c.t === TISSUE.VEIN && segDist(c.q, iv.a, iv.b) < iv.r + 0.3 && segDist(c.q, iv.a, iv.b) > iv.r - 0.05) { hv.push(k); seen.add(k); }
+    for (let h = 0; h < hv.length; h++) {
+      const [i, j] = hv[h].split(',').map(Number);
+      for (const kk of [`${i + 1},${j}`, `${i - 1},${j}`, `${i},${j + 1}`, `${i},${j - 1}`]) {
+        const c = g.cells.get(kk);
+        if (c && c.t === TISSUE.VEIN && !seen.has(kk) && segDist(c.q, iv.a, iv.b) > iv.r - 0.05) { seen.add(kk); hv.push(kk); }
+      }
+    }
+    // length: the farthest vein cell from where it opens through the IVC wall
+    const mouth = hv.filter((k) => segDist(g.cells.get(k).q, iv.a, iv.b) < iv.r + 0.15).map((k) => g.cells.get(k).q);
+    let reach = 0;
+    for (const k of hv) {
+      const q = g.cells.get(k).q;
+      let m = 1e9; for (const o of mouth) m = Math.min(m, Math.hypot(...sub(q, o)));
+      if (mouth.length) reach = Math.max(reach, m);
+    }
+    const area = hv.length * g.h * g.h;
+    check('Subcostal IVC', `hepatic vein in plane: length from the IVC wall (${nm})`, reach, [2.5, 9]);
+    check('Subcostal IVC', `hepatic vein in plane: mean width (${nm})`, reach > 0 ? area / reach : 0, [0.4, 1.5]);
+    // liver deep to the IVC in the image along its course (1 to 6 cm below the
+    // junction): 0.5 cm beyond the vessel's far wall
+    const onP = (q) => sub(q, mul(g.p.normal, dot(sub(q, g.p.pos), g.p.normal)));
+    const ia = unit(sub(iv.b, iv.a)), uP = unit(sub(ia, mul(g.p.normal, dot(ia, g.p.normal))));
+    let deep = unit(sub(g.p.dir, mul(uP, dot(g.p.dir, uP))));
+    let nl = 0, nn = 0;
+    for (let t = 1.0; t <= 6.0; t += 0.25) {
+      let q = onP(add(iv.a, mul(ia, t)));
+      const ivcBlood = (r) => { const c = classify(r[0], r[1], r[2], G, {}).tissue; return c === TISSUE.VEIN || c === TISSUE.RA; };
+      if (!ivcBlood(q)) continue;                                              // (the IVC is not in plane here)
+      let k = 0;
+      while (k < 40 && ivcBlood(q)) { q = add(q, mul(deep, 0.05)); k++; }
+      q = add(q, mul(deep, 0.5));
+      nn++; if (classify(q[0], q[1], q[2], G, {}).tissue === TISSUE.LIVER) nl++;
+    }
+    check('Subcostal IVC', `liver behind the IVC (caudate), share of 1-6 cm below the junction (${nm})`, nn ? nl / nn : 0, [0.6, 1], '', `${nn} samples`);
+  }
   assert('Subcostal IVC', `IVC lumen continuous with the RA (${nm})`, joined);
   let bad = 0;
   for (let r = 0.1; r < 3; r += 0.1) {
@@ -1166,14 +1208,8 @@ SECTION = 'Sweep';
   }
   const wc = worstOf(chan), ws = worstOf(svc), wi = worstOf(ivc);
   check('Cavae', 'SVC -> sinus venarum -> IVC lumen margin, all cases ED/ES', wc.val, [-9, -0.3], 'cm', `worst: ${wc.tag}`);
-  // KNOWN-FAIL (F02/WI2): ~1 cm below the SVC orifice a wall (VWALL/gap/MYO)
-  // crosses the straight path into the RA body; the SVC reaches the RA only
-  // through the sinus venarum. The RA -> IVC path stays inside the lumen but
-  // with a narrow (< 0.3 cm) margin mid-way.
-  KNOWN = true;
   check('Cavae', 'SVC orifice -> RA centre lumen margin, all cases ED/ES', ws.val, [-9, -0.3], 'cm', `worst: ${ws.tag}`);
   check('Cavae', 'RA centre -> IVC orifice lumen margin, all cases ED/ES', wi.val, [-9, -0.3], 'cm', `worst: ${wi.tag}`);
-  KNOWN = false;
 }
 // in the image: the caval lumen and the RA body are ONE connected blood pool,
 // with >= 1.5 cm of the tube in plane (the IVC opens into the RA in SC-IVC and
@@ -1199,11 +1235,119 @@ for (const [vn, view, vessels] of [['SC_IVC', EXTRA_VIEWS.SC_IVC, ['ivc']], ['ME
         if ((body.get(id[k]) || 0) * S.step * S.step < 1.0) continue;
         const t = dot(sub(q, V.a), ax); lo = Math.min(lo, t); hi = Math.max(hi, t);
       }
-      if (vn === 'MEBICAVAL' && v === 'svc') KNOWN = true;              // (WI2: the SVC leaves the sector at its orifice)
       check('Cavae', `${vn}: ${v.toUpperCase()} length in plane, joined to the RA (${tag})`, hi > lo ? hi - Math.max(lo, 0) : 0, [1.5, 20], 'cm',
         `tube lumen in plane ${(inPl * S.step * S.step).toFixed(2)} cm2`);
-      KNOWN = false;
     }
+  }
+}
+
+// ---- ME bicaval: LA near field, the septum and fossa in plane, an ASD ------
+// (F02: the cavae sit ~1 cm off the septum, in line with the fossa, and the
+// probe stays in the oesophagus, so LA, septum, RA and both cavae share a plane)
+{
+  const sec0 = SECTION; SECTION = 'TEE';
+  const view = TEE_VIEWS.MEBICAVAL, pb = view.probe();
+  const fr = sub(LM.IAS.fossaC, pb.pos);
+  // the septal line in the image: where the view plane crosses the septal plane
+  const L = unit(cross(pb.normal, LM.IAS_N));
+  let q0 = sub(LM.IAS.fossaC, mul(pb.normal, dot(fr, pb.normal)));
+  q0 = sub(q0, mul(LM.IAS_N, dot(sub(q0, LM.IAS_P), LM.IAS_N)));
+  const septum = (G, path) => {                        // per sample on the line: 0 none, 1 septal wall, 2 hole
+    const out = [];
+    for (let t = -6; t <= 6; t += 0.05) {
+      const q = add(q0, mul(L, t)), r = sub(q, pb.pos), d = dot(r, pb.dir), x = dot(r, pb.lat);
+      if (d <= 0 || Math.hypot(d, x) > view.depth || Math.abs(Math.atan2(x, d)) > 0.66) { out.push(0); continue; }
+      const la = classify(...sub(q, mul(LM.IAS_N, 0.35)), G, path).tissue === TISSUE.LA;
+      const ra = classify(...add(q, mul(LM.IAS_N, 0.35)), G, path).tissue === TISSUE.RA;
+      const c = classify(q[0], q[1], q[2], G, path).tissue;
+      out.push(la && ra ? (c === TISSUE.LA || c === TISSUE.RA ? 2 : 1) : 0);
+    }
+    return out;
+  };
+  check('TEE', 'MEBICAVAL: fossa ovalis distance from the plane', Math.abs(dot(fr, pb.normal)), [0, 0.5]);
+  assert('TEE', 'MEBICAVAL: fossa ovalis inside the sector', Math.abs(Math.atan2(dot(fr, pb.lat), dot(fr, pb.dir))) < 0.6 && dot(fr, pb.dir) < view.depth,
+    `${(Math.atan2(dot(fr, pb.lat), dot(fr, pb.dir)) * 57.3).toFixed(0)} deg, ${dot(fr, pb.dir).toFixed(1)} cm deep`);
+  for (const [tag, ph] of [['ED', ED], ['ES', ES]]) {
+    const G = geo(ph), A = G.A;
+    for (const v of ['svc', 'ivc']) {
+      check('TEE', `${v.toUpperCase()} orifice on the RA side of the septal plane (${tag})`, dot(sub(A[v].a, LM.IAS_P), LM.IAS_N), [0.6, 1.2]);
+    }
+    const la = run(G, pb.pos, pb.dir, isT(TISSUE.LA), view.depth, 0, 0.3);
+    // the LA fills the near field: >= 2 cm of LA on the beams of the central 30 deg,
+    // starting within 2.5 cm of the transducer
+    let laBest = 0, laTop = 99;
+    for (let a = -0.26; a <= 0.261; a += 0.0325) {
+      const bd = add(mul(pb.dir, Math.cos(a)), mul(pb.lat, Math.sin(a)));
+      const r = run(G, pb.pos, bd, isT(TISSUE.LA), view.depth, 0, 0.3);
+      if (r && len(r) > laBest) { laBest = len(r); laTop = r[0]; }
+    }
+    check('TEE', `MEBICAVAL: LA depth in the central 30 deg of the sector (${tag})`, laBest, [2.0, 8], 'cm', `from ${laTop.toFixed(1)} cm`);
+    check('TEE', `MEBICAVAL: LA near-field edge (${tag})`, laTop, [0.5, 2.5]);
+    // KNOWN-FAIL at ED: the beam is aimed at the septum above the fossa (so the
+    // SVC stays in the sector) and at end-diastole, after atrial contraction, the
+    // LA free wall has fallen back toward the septum: the central beam passes
+    // above the small LA (3 cm of LA on it at ES)
+    KNOWN = tag === 'ED';
+    check('TEE', `MEBICAVAL: LA depth along the central beam (${tag})`, len(la), [2.0, 8]);
+    KNOWN = false;
+    const sp = septum(G, {}), ias = sp.filter((k) => k > 0).length * 0.05;
+    check('TEE', `MEBICAVAL: interatrial septum in plane, LA on one side and RA on the other (${tag})`, ias, [1.5, 12]);
+    // KNOWN-FAIL: ~1.8 cm. The LA's septal face is small and lies anterosuperior
+    // of the RA's (they overlap only about the fossa), and the aortic root above
+    // the fossa keeps the SVC ~1.8 cm behind it, so no plane through the
+    // oesophagus holds both cavae and a longer stretch of shared septum
+    KNOWN = true;
+    check('TEE', `MEBICAVAL: interatrial septum in plane >= 3 cm (${tag})`, ias, [3.0, 12]);
+    KNOWN = false;
+    assert('TEE', `MEBICAVAL: normal septum intact in plane (${tag})`, !sp.includes(2));
+  }
+  {
+    const path = PATHS.asd, sp = septum(geo(0, 'asd'), path);
+    const gap = sp.filter((k) => k === 2).length * 0.05;
+    check('Pathology', 'secundum ASD: LA-RA gap across the septum in ME bicaval (ED)', gap, [0.8, 3]);
+    // rims: septal wall in plane on both sides of the defect
+    const i0 = sp.indexOf(2), i1 = sp.lastIndexOf(2);
+    let lo = 0, hi = 0;
+    for (let i = i0 - 1; i >= 0 && sp[i] === 1; i--) lo += 0.05;
+    for (let i = i1 + 1; i < sp.length && sp[i] === 1; i++) hi += 0.05;
+    // KNOWN-FAIL: only the superior (SVC-side) rim is in plane (~0.45 cm): the
+    // in-plane septum is ~1.8 cm and the 1.2 cm defect opens at its lower end
+    KNOWN = true;
+    check('Pathology', 'secundum ASD: both rims in ME bicaval (shorter rim)', Math.min(lo, hi), [0.5, 5], 'cm', `rims ${lo.toFixed(2)} / ${hi.toFixed(2)} cm`);
+    KNOWN = false;
+  }
+  SECTION = sec0;
+}
+
+// ---- crista terminalis: a ridge on the RA wall, never a free bar (F14) -----
+{
+  let worst = { val: 0, tag: '' };
+  for (const key of Object.keys(PATHS)) for (const ph of [0, esOf(key)]) {
+    const A = geo(ph, key).A;
+    for (const sg of A.crista) {
+      const d = lumenDist(...mul(add(sg.a, sg.b), 0.5), A, 'RA');
+      if (Math.abs(d) > Math.abs(worst.val)) worst = { val: d, tag: `${key} ${ph === 0 ? 'ED' : 'ES'}` };
+    }
+  }
+  check('RA', 'crista terminalis: segment midpoints on the RA wall (signed, all cases ED/ES)', worst.val, [-0.4, 0.3], 'cm', `worst: ${worst.tag}`);
+  // A4C: no muscle island floating in the RA blood pool
+  for (const [tag, ph] of [['ED', ED], ['ES', ES]]) {
+    const S = planeSample(TTE_VIEWS.A4C, geo(ph), {}, 0.05);
+    const { comps } = components(S, (l) => l === TISSUE.MYO);
+    let isl = 0;
+    for (const cells of comps) {
+      let free = true;
+      for (const k of cells) {
+        const i = k % S.nx;
+        for (const kk of [i + 1 < S.nx ? k + 1 : -1, i > 0 ? k - 1 : -1, k + S.nx, k - S.nx]) {
+          const l = kk >= 0 && kk < S.lab.length ? S.lab[kk] : -1;
+          if (l !== TISSUE.MYO && l !== TISSUE.RA) { free = false; break; }
+        }
+        if (!free) break;
+      }
+      if (free) isl += cells.length * S.step * S.step;
+    }
+    check('RA', `A4C: muscle islands floating in the RA (${tag})`, isl, [0, 0], 'cm2');
   }
 }
 

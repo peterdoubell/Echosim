@@ -215,6 +215,7 @@ function rvInflowTrack(A) {
 // Subcostal IVC long axis: the IVC running through the liver into the RA, the
 // hepatic veins joining it; cranial (RA) to the right of the screen.
 const SC_IVC_CRANIAL = 15;                        // deg
+const SC_IVC_ROLL = -25;                          // deg
 function subcostalIvcProbe() {
   // transducer at the subxiphoid window (the subcostal 4C skin point), aimed at
   // the IVC ~1.5 cm below its RA junction; the plane contains the IVC axis so the
@@ -228,7 +229,11 @@ function subcostalIvcProbe() {
   // field) instead of in front of the lung bases.
   const tgt = vadd(iv.a, vscale(ax, -0.8));
   const back = inPlane(vadd(BODY_AX.P, vscale(BODY_AX.S, 0.3)), vcross(ax, BODY_AX.P));
-  const perp = norm(vsub(back, vscale(ax, vdot(back, ax))));
+  let perp = norm(vsub(back, vscale(ax, vdot(back, ax))));
+  // rolled about the IVC axis toward the patient's right, so above the caval
+  // orifice the plane runs up through the RA body, clear of the RV in front of it
+  const roll = SC_IVC_ROLL * Math.PI / 180;
+  perp = norm(vadd(vscale(perp, Math.cos(roll)), vscale(vcross(ax, perp), Math.sin(roll))));
   const th = SC_IVC_CRANIAL * Math.PI / 180;
   const dir = norm(vadd(vscale(perp, Math.cos(th)), vscale(ax, Math.sin(th))));
   return chestWallProbe(tgt, dir, ax, 9.0, 6.0);
@@ -367,24 +372,86 @@ function meAvSaxProbe() {
 // ME bicaval (~90-110 deg): the RA with the SVC entering on the right of the
 // screen and the IVC on the left, the interatrial septum and fossa in profile
 // between the LA (near field) and the RA — the view for PFO / sinus venosus ASD.
+// The transducer stays in the oesophagus: it slides along it (BODY_AX.S) or is
+// backed off behind it, and the omniplane plane is turned and rolled about the
+// beam. Of the planes within BICAVAL_FOSSA cm of the fossa ovalis centre (so the
+// fossa membrane is cut and the septum lies between the LA and the RA), the one
+// holding the most of the first 3 cm of BOTH cavae is kept; the beam is then
+// aimed through the LA at the septum just above the fossa.
+const BICAVAL_SLIDE = [-3, 2.5];                 // search along the oesophagus (cm, + = withdrawn)
+const BICAVAL_BACK = 1.5;                        // ... and behind it (cm)
+const BICAVAL_FOSSA = 0.45;                      // fossa centre within this of the plane (cm)
+const BICAVAL_AIM = 1.2;                         // beam aimed this far above the fossa (cm)
+const BICAVAL_HALF = 0.45;                       // (its axis within this share of its radius of the plane)
+const BICAVAL_CAVA = 1.6;                        // each cava's first 3 cm: at least this much in plane (cm)
+const BICAVAL_SEPT_W = 1.0;                      // septal length traded 1:1 for caval length
+let _bicaval = null;
 function meBicavalProbe() {
-  // ~90-110 deg: from the oesophagus behind the LA through the fossa region into
-  // the RA, the plane holding the IVC (screen-left) -> SVC (screen-right) axis,
-  // rolled ~15 deg about the beam so the ascending aorta stays out of the sector.
-  // the plane through the oesophagus and both caval orifices (a point 1.5 cm into
-  // each vessel keeps the tubes in plane), IVC screen-left, SVC screen-right
-  const sv = vadd(A0.svc.a, vscale(norm(vsub(A0.svc.b, A0.svc.a)), 1.5));
-  const iv = vadd(A0.ivc.a, vscale(norm(vsub(A0.ivc.b, A0.ivc.a)), 1.5));
-  // and the fossa ovalis, so the septum lies between the LA (near field) and the RA
-  const fos = LM.IAS.fossaC;
-  const n = norm(vcross(vsub(sv, iv), vsub(fos, iv)));
-  const pos = vsub(ESO, vscale(n, vdot(vsub(ESO, fos), n)));
-  const cav = vscale(vadd(sv, iv), 0.5);
-  const tgt = vadd(vscale(cav, 0.5), vscale(fos, 0.5));
-  const dir = norm(vsub(tgt, pos));
-  let up = vsub(sv, iv);
-  up = norm(vsub(up, vscale(dir, vdot(up, dir))));
-  return teeClear(probeFrom(tgt, dir, up, vdot(vsub(tgt, pos), dir)));
+  if (!_bicaval) {
+    const along = (V, t) => vadd(V.a, vscale(norm(vsub(V.b, V.a)), t));
+    const fos = LM.IAS.fossaC;
+    // in-plane share of a cava's first 3 cm (its axis within ~half a radius of
+    // the plane); 0 when the orifice itself is out of plane
+    const inPl = (V, pos, n) => {
+      let l = 0;
+      for (let t = 0; t <= 3.001; t += 0.1) {
+        if (Math.abs(vdot(vsub(along(V, t), pos), n)) < V.r * BICAVAL_HALF) l += 0.1;
+        else if (t < 0.5) return 0;
+      }
+      return l;
+    };
+    // septum in plane: length of the line where the plane crosses the septal
+    // plane that has LA blood on one side and RA blood on the other
+    const N = LM.IAS_N;
+    const septLen = (pos, n) => {
+      const L = norm(vcross(n, N));
+      let q0 = vsub(fos, vscale(n, vdot(vsub(fos, pos), n)));
+      q0 = vsub(q0, vscale(N, vdot(vsub(q0, LM.IAS_P), N)));
+      let l = 0;
+      for (let t = -4; t <= 4; t += 0.1) {
+        const q = vadd(q0, vscale(L, t));
+        if (lumenDist(...vsub(q, vscale(N, 0.3)), A0, 'LA') < 0 && lumenDist(...vadd(q, vscale(N, 0.3)), A0, 'RA') < 0) l += 0.1;
+      }
+      return l;
+    };
+    const cands = [], fallback = [];
+    for (let s = BICAVAL_SLIDE[0]; s <= BICAVAL_SLIDE[1] + 1e-9; s += 0.25) {
+      for (let b = 0; b <= BICAVAL_BACK + 1e-9; b += 0.25) {
+        const pos = vadd(vadd(ESO, vscale(BODY_AX.S, s)), vscale(BODY_AX.P, b));
+        const r0 = norm(vsub(fos, pos));
+        const e2 = vcross(r0, norm(vcross(r0, BODY_AX.S)));
+        for (let ta = -0.15; ta <= 0.151; ta += 0.01) {
+          const ax = norm(vadd(r0, vscale(e2, ta)));          // an in-plane ray near the fossa
+          const a1 = norm(vcross(ax, BODY_AX.S)), a2 = vcross(ax, a1);
+          for (let ph = 0; ph < Math.PI; ph += 0.02) {
+            const n = vadd(vscale(a1, Math.cos(ph)), vscale(a2, Math.sin(ph)));
+            const fo = Math.abs(vdot(vsub(fos, pos), n));
+            if (fo > BICAVAL_FOSSA) continue;
+            const cv = Math.min(inPl(A0.svc, pos, n), inPl(A0.ivc, pos, n));
+            if (cv >= BICAVAL_CAVA) cands.push({ cv, fo, b, pos, n });
+            else if (!fallback.length || cv > fallback[0].cv) fallback[0] = { cv, fo, b, pos, n };
+          }
+        }
+      }
+    }
+    // among those holding enough of both cavae, the longest septum (then the
+    // fossa nearest the plane, the probe nearest the oesophagus)
+    let best = null;
+    if (!cands.length) cands.push(...fallback);
+    for (const c of cands) {
+      c.sc = Math.min(c.cv, 2.5) + BICAVAL_SEPT_W * septLen(c.pos, c.n) - 0.3 * c.fo - 0.05 * c.b;
+      if (!best || c.sc > best.sc) best = c;
+    }
+    const { pos, n } = best;
+    const onPlane = (q) => vsub(q, vscale(n, vdot(vsub(q, pos), n)));
+    const up = norm(vsub(onPlane(A0.svc.a), onPlane(A0.ivc.a)));
+    const tgt = vadd(onPlane(fos), vscale(up, BICAVAL_AIM));
+    const dir = norm(vsub(tgt, pos));
+    let right = vcross(n, dir);
+    if (vdot(right, up) < 0) right = vscale(right, -1);                     // SVC screen-right
+    _bicaval = teeClear(probeFrom(tgt, dir, right, vdot(vsub(tgt, pos), dir)));
+  }
+  return { ..._bicaval, pos: _bicaval.pos.slice(), target: _bicaval.target.slice() };
 }
 // ME RV inflow-outflow (~60-75 deg): RA and tricuspid on the left, the RV
 // wrapping round the aortic valve to the RVOT and pulmonary valve on the right.
