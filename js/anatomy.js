@@ -298,12 +298,14 @@ function diaphH() {
   DIAPH_H = best + DIAPH_BELOW;
   return DIAPH_H;
 }
-// Gastric fundus contact for the transgastric window: the probe sits on the inner
-// surface of the stomach wall (GASTRIC.p, facing GASTRIC.n toward the heart), below
-// the inferior wall, where the wall is an oblate shell ~0.6 cm thick
+// Gastric contact for the transgastric window: the probe sits on the inner surface
+// of the stomach wall (GASTRIC.p, facing GASTRIC.n toward the heart), below the
+// inferior wall. The stomach itself is ONE organ, LIV_LOBE.stomach (left upper
+// quadrant, under the left dome, behind the left lobe), fitted so its lumen
+// surface passes through p with its normal close to n; its wall is t thick.
 const GASTRIC = (() => {
   const n = unit([0.1, 0, 1]);
-  return { n, p: mad([0, -3.6, 0], n, -4.6), t: 0.6, ra: 3.0, rl: 8.0 };
+  return { n, p: mad([0, -3.6, 0], n, -4.6), t: 0.45 };
 })();
 const DIAPH_WRAP = 6.5;                              // how far the diaphragm rises to meet the sac (cm)
 const MIDLINE = -2.0;                                  // p . L of the body mid-sagittal plane
@@ -1444,19 +1446,23 @@ function diaphragmLift(x, y, z) {
 }
 // Height below the (lifted) diaphragm sheet, + inferior: for audits and tools.
 export function diaphragmBelow(x, y, z) { return belowDiaphragm(x, y, z) + diaphragmLift(x, y, z); }
-// Gastric wall of the fundus (transgastric window): signed distance out from the
-// lumen surface (the shell is 0 < d < GASTRIC.t), an oblate ellipsoid about GASTRIC.p
-function dGastric(x, y, z) {
-  const G = GASTRIC, n = G.n;
-  const vx = x - G.p[0] + n[0] * G.ra, vy = y - G.p[1] + n[1] * G.ra, vz = z - G.p[2] + n[2] * G.ra;
-  const qn = vx * n[0] + vy * n[1] + vz * n[2];                    // along the probe axis
-  const u = vx * n[2] - vz * n[0];                                 // lateral in the x-z plane
-  return sdEllipsoid(u, vy, qn, 0, 0, 0, G.rl, G.rl, G.ra);
+// Stomach (fundus and upper body): signed distance from its lumen surface, in body
+// left / posterior / below-diaphragm coordinates (the gastric wall is the shell
+// 0 < d < GASTRIC.t). The same ellipsoid hollows the liver's gastric impression.
+// h is measured below the dome sheet WITHOUT its local lift round the sac (that
+// drape falls off steeply beside the heart and would bend the organ into a
+// straight-sided wedge); the stomach is classified only below the lifted sheet.
+function dStomach(l, p, h) {
+  const S = LIV_LOBE.stomach;
+  return sdEllipsoid(l, p, h, S.c[0], S.c[1], S.c[2], S.r[0], S.r[1], S.r[2]);
+}
+export function stomachDist(x, y, z) {
+  return dStomach(x * BL[0] + y * BL[1] + z * BL[2] - MIDLINE, x * BP[0] + y * BP[1] + z * BP[2], belowDiaphragm(x, y, z));
 }
 
 // Liver: right-upper-quadrant solid organ beneath the diaphragm whose left lobe
 // crosses the midline under the heart — the subcostal acoustic window.
-function dLiver(x, y, z, h) {
+function dLiver(x, y, z, h, hRaw) {
   if (h < -1) return -h;
   const l = x * BL[0] + y * BL[1] + z * BL[2] - MIDLINE;        // + left
   const p = x * BP[0] + y * BP[1] + z * BP[2];                   // + posterior
@@ -1471,8 +1477,7 @@ function dLiver(x, y, z, h) {
   // windows as a straight wall of liver). All faces are curved, so no imaging
   // plane cuts them in a straight line.
   const Q = LIV_LOBE, lp = l > 0 ? l : 0;
-  const S = Q.stomach;
-  const stom = sdEllipsoid(l, p, h, S.c[0], S.c[1], S.c[2], S.r[0], S.r[1], S.r[2]);
+  const stom = dStomach(l, p, hRaw) - GASTRIC.t - 0.25;            // outside the wall and a gap
   const back = (p + Q.pk * l + Q.pc * lp * lp - Q.p0) / Math.hypot(1, Q.pk + 2 * Q.pc * lp);
   const low = (h + Q.hk * l + Q.hc * lp * lp - Q.h0) / Math.hypot(1, Q.hk + 2 * Q.hc * lp);
   return smax(smax(smax(smax(0.1 - h, ell, 1.5), back, 1.2), low, 1.2), -stom, 0.8);
@@ -1482,7 +1487,10 @@ function dLiver(x, y, z, h) {
 // (fundus and body under the left dome) as an ellipsoid the lobe wraps around
 const LIV_LOBE = {
   p0: 5.0, pk: 0.6, pc: 0.06, h0: 7.0, hk: 0.5, hc: 0.05,
-  stomach: { c: [5.5, 2.5, 3.5], r: [4.5, 4.0, 4.5] },
+  // lumen: fundus/upper body ~5 x 6 x 6.5 cm, entirely left of the midline (wall
+  // included); its upper-right surface carries the TG contact (GASTRIC.p, with
+  // the lumen normal there along GASTRIC.n). h: below the unlifted dome sheet
+  stomach: { c: [2.93, 1.56, 2.99], r: [2.6, 3.0, 3.2] },
 };
 function dHepaticVeins(x, y, z, A) {
   const ivc = A.ivc;
@@ -1590,7 +1598,7 @@ export function bodyClassify(x, y, z, A, periOff = 0) {
   // the interatrial (Waterston's) groove between the two atria holds fat, never
   // diaphragm or liver, however deep it is at end-diastole
   if (m.core > 0 && dla + dra < 0.9) return bc(BODY.FAT, 0.45);
-  const below = belowDiaphragm(x, y, z) + diaphragmLift(x, y, z);
+  const bRaw = belowDiaphragm(x, y, z), below = bRaw + diaphragmLift(x, y, z);
   // Anterior epicardial fat pad: a few mm of fat between the RV free wall and
   // the parietal pericardium, thickest anteriorly — the classic mimic of an
   // anterior effusion (it is granular, not echo-free, and does not track
@@ -1633,11 +1641,17 @@ export function bodyClassify(x, y, z, A, periOff = 0) {
   // (mucosa, dark muscularis, bright serosa), then liver parenchyma with its
   // hepatic veins and the IVC
   if (below > -0.4) {
-    const gi = dGastric(x, y, z);
-    if (gi > 0 && gi < GASTRIC.t) return bc(BODY.VESSELWALL, gi < 0.15 ? 0.55 : gi < 0.48 ? 0.3 : 0.65);
-    if (gi > 0 && gi < GASTRIC.t + 0.4) return bc(BODY.FAT, 0.6);   // perigastric fat / diaphragm before any liver
-    const liv = dLiver(x, y, z, below);
-    if (liv < 0) {
+    const liv = dLiver(x, y, z, below, bRaw);
+    if (liv >= 0) {
+      // the stomach, outside the liver and left of the midline only
+      const lb = x * BL[0] + y * BL[1] + z * BL[2] - MIDLINE;
+      if (lb > 0) {
+        const gi = dStomach(lb, x * BP[0] + y * BP[1] + z * BP[2], bRaw);
+        if (gi < 0) return bc(BODY.LUNG, 0.9);                     // swallowed gas in the lumen
+        // the gut signature: echogenic mucosa, hypoechoic muscularis, echogenic serosa
+        if (gi < GASTRIC.t) return gi < 0.12 || gi > 0.33 ? bc(BODY.VESSELWALL, gi < 0.12 ? 0.55 : 0.65) : bc(BODY.FAT, 0.3);
+      }
+    } else {
       const iv = A.ivc;
       if (sdCapsule(x, y, z, iv.a[0], iv.a[1], iv.a[2], iv.b[0], iv.b[1], iv.b[2], iv.r) < 0) return bc(BODY.VEIN, 0.03);
       if (dHepaticVeins(x, y, z, A) < 0) return bc(BODY.VEIN, 0.03);
@@ -1658,7 +1672,11 @@ export function bodyClassify(x, y, z, A, periOff = 0) {
   // parasternal window and the intercostal window over the apex)
   if (below < -0.5 && periOff === 0) {
     const sac = Math.min(mCore, dAOroot(x, y, z, A) - A.ao.wall, dpa - A.pa.wall);
-    if (sac > LUNG_GAP && isLung(x, y, z)) return bc(BODY.LUNG, 0.9);
+    // (the lingula and left lung lie closer against the sac laterally, behind the
+    // apex and the LV free wall, than in front of the heart)
+    const gl = (x - _HC[0]) * BL[0] + (y - _HC[1]) * BL[1] + (z - _HC[2]) * BL[2];
+    const gap = gl < 0 ? LUNG_GAP : gl > 2.5 ? LUNG_GAP_LAT : LUNG_GAP - (LUNG_GAP - LUNG_GAP_LAT) * gl / 2.5;
+    if (sac > gap && isLung(x, y, z)) return bc(BODY.LUNG, 0.9);
   }
   return bc(BODY.OUT, 0);
 }
@@ -1675,34 +1693,41 @@ function epiGrad(x, y, z, A, e) {
 const FAT_PAD = 0.35;                                    // anterior epicardial fat pad (cm)
 const AORTA_PLEURA = 0.5;                                // pleura this far behind the aortic wall (cm)
 const LUNG_GAP = 1.0;                                    // mediastinal tissue around the sac (cm)
+const LUNG_GAP_LAT = 0.3;                                // ... lateral to the LV
 const _HC = [-1.0, -1.5, 0];                             // mid-heart
 const LUNG_WINDOWS = (() => {
   const apex = [0, LVP.apexY - LVP.wall * LVP.apexWallFrac, 0];
   const crux = lerp3(M0, T0, 0.5);
   const wa = mad(apex, unit(sub(apex, crux)), 2.5);                   // apical window (skin)
   const wp = mad([-0.35, 0.3, 0.35], BODY_AX.A, 7.0);                 // left parasternal window
-  return [wa, wp].map((w) => ({ w, u: unit(sub(_HC, w)), tan: Math.tan(40 * Math.PI / 180) }));
+  return [wa, wp].map((w) => ({ w, u: unit(sub(_HC, w)), tan: Math.tan(32 * Math.PI / 180) }));
 })();
 function isLung(x, y, z) {
   const lb = x * BL[0] + y * BL[1] + z * BL[2] - MIDLINE;
   const ab = -(x * BP[0] + y * BP[1] + z * BP[2]);                     // + anterior
-  if (ab < 0) {
-    // the left pleura/lung wraps the descending aorta posterolaterally: aerated lung
-    // from AORTA_PLEURA behind the aortic wall (the bright pleural line behind it
-    // on the descending-aorta short axis), whatever the acoustic windows say
-    const dx = x - DTA_P[0], dy = y - DTA_P[1], dz = z - DTA_P[2], s = dx * BS[0] + dy * BS[1] + dz * BS[2];
-    const ox = dx - BS[0] * s, oy = dy - BS[1] * s, oz = dz - BS[2] * s;
-    const od = Math.hypot(ox, oy, oz);
-    const pl = ox * (BL[0] * 0.5 + BP[0] * 0.85) + oy * (BL[1] * 0.5 + BP[1] * 0.85) + oz * (BL[2] * 0.5 + BP[2] * 0.85);
-    if (od > DTA_R + AORTA_PLEURA && od < 6 && pl > 0.45 * od) return true;
-    if (Math.hypot(lb, Math.min(0, ab + 1.5)) < 2.8) return false;     // posterior mediastinum (rounded)
-  }
+  // general lung boundary (negative = aerated): everywhere outside the two
+  // acoustic-window cones and, posteriorly, outside the posterior mediastinum
+  let g = ab < 0 ? 2.8 - Math.hypot(lb, Math.min(0, ab + 1.5)) : -1e9;   // posterior mediastinum (rounded)
   for (const W of LUNG_WINDOWS) {
     const vx = x - W.w[0], vy = y - W.w[1], vz = z - W.w[2];
     const al = vx * W.u[0] + vy * W.u[1] + vz * W.u[2];
     if (al <= 0) continue;
     const px = vx - W.u[0] * al, py = vy - W.u[1] * al, pz = vz - W.u[2] * al;
-    if (px * px + py * py + pz * pz < (al * W.tan + 0.5) ** 2) return false;
+    const c = al * W.tan + 1.2 - Math.sqrt(px * px + py * py + pz * pz);
+    if (c > g) g = c;
   }
-  return true;
+  if (ab < 0) {
+    // the left pleura/lung wraps the descending aorta posterolaterally: aerated lung
+    // from AORTA_PLEURA behind the aortic wall (the bright pleural line behind it
+    // on the descending-aorta short axis), whatever the acoustic windows say.
+    // The shell and the general boundary are one pleural surface: a smooth union,
+    // so it curves round the aorta without cusps where the two meet.
+    const dx = x - DTA_P[0], dy = y - DTA_P[1], dz = z - DTA_P[2], s = dx * BS[0] + dy * BS[1] + dz * BS[2];
+    const ox = dx - BS[0] * s, oy = dy - BS[1] * s, oz = dz - BS[2] * s;
+    const od = Math.hypot(ox, oy, oz);
+    const pl = ox * (BL[0] * 0.5 + BP[0] * 0.85) + oy * (BL[1] * 0.5 + BP[1] * 0.85) + oz * (BL[2] * 0.5 + BP[2] * 0.85);
+    const s1 = Math.max(DTA_R + AORTA_PLEURA - od, 0.45 * od - pl, od - 6);
+    return smin(s1, g, 2.5) < 0;
+  }
+  return g < 0;
 }

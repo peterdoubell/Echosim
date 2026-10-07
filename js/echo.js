@@ -45,7 +45,7 @@ function chestWall(f, n, nn) {
 // layer never renders as a solid bright slab. Converted once to amplitude.
 const DB = {
   blood: -60, myo: -28, valve: -15, calc: -4, peri: -24, liver: -26, fat: -36,
-  vwall: -26, vein: -52, soft: -45, lung: -48,
+  vwall: -26, vein: -52, soft: -50, lung: -48,
 };
 const AMP = Object.fromEntries(Object.entries(DB).map(([k, v]) => [k, Math.pow(10, v / 20)]));
 // Legacy linear echogenicity (0..1, tuned for the old power-law display) mapped
@@ -87,10 +87,11 @@ const ALPHA_TGC = 0.38;
 // myocardium ~1.68, fat ~1.38, dense fibrous tissue ~1.8), used for the specular
 // interface echoes. OUTSIDE (mediastinal fat / connective tissue) is set low so
 // the parietal pericardium stands out as the strongest reflector, as on a scan.
+const PERI_K = TISSUE.PERI_LINE, PERI_GAIN = 4.5;    // pericardial interface: gain, cos^4 lobe
 const Z_OF = {
   [TISSUE.OUTSIDE]: 1.62, [TISSUE.MYO]: 1.68, [TISSUE.LV]: 1.61, [TISSUE.RV]: 1.61,
   [TISSUE.LA]: 1.61, [TISSUE.RA]: 1.61, [TISSUE.AORTA]: 1.61, [TISSUE.VALVE]: 1.72,
-  [TISSUE.PERICARDIUM]: 1.53, [TISSUE.LUNG]: 0.6, [TISSUE.PERI_LINE]: 1.85,
+  [TISSUE.PERICARDIUM]: 1.53, [TISSUE.LUNG]: 1.62, [TISSUE.PERI_LINE]: 1.85,
   [TISSUE.LIVER]: 1.66, [TISSUE.VEIN]: 1.61, [TISSUE.FAT]: 1.40, [TISSUE.VWALL]: 1.70,
 };
 
@@ -272,6 +273,9 @@ export class EchoView {
     this._shadowGain = new Float32Array(this._NA * this._NS); // distal attenuation (shadowing)
     this._enhGain = new Float32Array(this._NA * this._NS);    // attenuation x TGC (incl. enhancement)
     this._lungDepth = new Float32Array(this._NA);            // pleural-line depth per beam (or 1e9)
+    this._lungSlope = new Float32Array(this._NA);            // its d(ln depth)/d(angle): incidence
+    this._lungTaper = new Float32Array(this._NA);            // fade toward the ends of the line
+    this._lungGrain = new Float32Array(this._NA);            // coarse lateral granularity
     this._spk = new Float32Array(SW * SH);                   // fully developed speckle (post-PSF)
     this._sI = new Float32Array(SW * SH);                    // scatterer field, in-phase
     this._sQ = new Float32Array(SW * SH);                    // ... and quadrature
@@ -757,7 +761,15 @@ export class EchoView {
         const c2 = c * c;
         const R = K * g / (2 * Zs[idx] + 1e-6);                // reflection coefficient
         const c4 = c2 * c2;                                  // narrow specular lobe: near-parallel walls drop out
-        refl[idx] += GAIN * R * c4 * c4 * (0.75 + 0.5 * this.noise[idx % this.noise.length]);
+        // the parietal pericardium (and the liver capsule / diaphragm it fuses
+        // with) is a dense collagen sheet between soft tissues: the strongest
+        // reflector of a parasternal image, with a broader lobe than a wall-blood
+        // boundary, so it stays the brightest line wherever it is cut obliquely
+        const pk = PERI_K;
+        const peri = kind[idx] === pk || kind[idx - h] === pk || kind[idx + h] === pk ||
+          kind[idx - h * SW] === pk || kind[idx + h * SW] === pk;
+        const lobe = peri ? PERI_GAIN * c4 : GAIN * c4 * c4;
+        refl[idx] += lobe * R * (0.75 + 0.5 * this.noise[idx % this.noise.length]);
       }
     }
   }
@@ -816,11 +828,11 @@ export class EchoView {
         shadow[base + s] = sh;
         if (kind === TISSUE.LV || kind === TISSUE.RV || kind === TISSUE.LA || kind === TISSUE.RA ||
             kind === TISSUE.AORTA || kind === TISSUE.VEIN || kind === TISSUE.PERICARDIUM) lastFluid = depth;
-        // enhancement capped at +6 dB just behind the fluid, easing to +3 dB for
-        // tissue far beyond it (a scanner's TGC/processing keeps a deep organ
-        // from outshining the myocardium)
+        // enhancement capped at +4 dB just behind the fluid, easing to +2.5 dB for
+        // tissue far beyond it (a scanner's TGC/processing keeps a deep organ, or
+        // the soft tissue behind the atria, from outshining the myocardium)
         const past = depth - lastFluid;
-        const cap = past < 3 ? 6 : past > 5 ? 3 : 6 - 3 * (past - 3) * (past - 3) * (6 - past) / 4;
+        const cap = past < 3 ? 4 : past > 5 ? 2.5 : 4 - 1.5 * (past - 3) * (past - 3) * (6 - past) / 4;
         enh[base + s] = Math.pow(10, Math.min(cap, kTgc * depth - att) / 20);
         att += 0.5 * (al === undefined ? 0.5 : al) * kAtt;
       }
@@ -853,6 +865,37 @@ export class EchoView {
         const w = 3 - Math.abs(k); sw += w; sd += w * tmpL[b];
       }
       lungD[a] = sd / sw;
+    }
+    // per-beam pleural incidence (one-sided at the ends of the line, so an end
+    // beam is not taken as normal incidence), a taper that fades the line over
+    // its last ~3 beams wherever it stops inside the sector (no square-cut ends),
+    // and a coarse lateral grain (a real pleural line is granular, not a wire)
+    const slope = this._lungSlope, taper = this._lungTaper, grain = this._lungGrain;
+    const dTh = 2 * half / NA;
+    for (let a = 0; a < NA; a++) {
+      slope[a] = 0; taper[a] = 0;
+      const d0 = lungD[a];
+      if (d0 > 1e8) continue;
+      const l = a > 0 && lungD[a - 1] < 1e8, r = a < NA - 1 && lungD[a + 1] < 1e8;
+      if (l && r) slope[a] = (lungD[a + 1] - lungD[a - 1]) / (2 * dTh * d0);
+      else if (r) slope[a] = (lungD[a + 1] - d0) / (dTh * d0);
+      else if (l) slope[a] = (d0 - lungD[a - 1]) / (dTh * d0);
+      let n = 1;
+      while (n <= 6) {
+        const lo = a - n, hi = a + n;
+        if ((lo >= 0 && lungD[lo] > 1e8) || (hi < NA && lungD[hi] > 1e8)) break;
+        n++;
+      }
+      const t = Math.min(1, (n - 0.5) / 6), sm = t * t * (3 - 2 * t);
+      taper[a] = sm * sm;
+    }
+    for (let a = 0; a < NA; a++) {
+      let sw = 0, sv = 0;
+      for (let k = -2; k <= 2; k++) {
+        let h = Math.imul(a + k + 977, 0x9e3779b1); h ^= h >>> 15; h = Math.imul(h, 0x85ebca6b); h ^= h >>> 13;
+        const w = 3 - Math.abs(k); sw += w; sv += w * ((h >>> 0) / 4294967296);
+      }
+      grain[a] = Math.min(1, Math.max(0, (sv / sw - 0.5) * 2.2 + 0.5));
     }
   }
 
@@ -927,46 +970,68 @@ export class EchoView {
 
   // In-place separable Gaussian convolution of `f` (lateral, then axial), with
   // per-pixel radii from the depth lookup tables; masked pixels are excluded.
+  // Both passes run along the BEAM's own axes, not the screen's: the lateral pass
+  // along the depth arc (perpendicular to the beam through the pixel) and the
+  // axial pass along the beam, so the resolution cell, and the speckle grain it
+  // sets, tilts with the beam and follows the arcs at the edges of the fan.
+  // (Nearest-pixel taps along the rotated axes; the directions are cached.)
   _sepBlur(f, tmp, latLut, axLut, lutK, LN) {
     const w = SW, h = SH, depthBuf = this._depth, mask = this._mask, kern = this._kern;
-    for (let y = 0; y < h; y++) {
-      const row = y * w;
-      for (let x = 0; x < w; x++) {
-        const idx = row + x;
-        if (!mask[idx]) { tmp[idx] = 0; continue; }
-        let li = (depthBuf[idx] * lutK) | 0; if (li >= LN) li = LN - 1;
-        const r = latLut[li];
-        if (r === 0) { tmp[idx] = f[idx]; continue; }
-        const k = kern[r]; let acc = 0, wsum = 0;
-        for (let t = -r; t <= r; t++) {
-          const xx = x + t;
-          if (xx < 0 || xx >= w) continue;
-          const j2 = row + xx;
-          if (!mask[j2]) continue;
-          const wv = k[t + r]; acc += f[j2] * wv; wsum += wv;
+    // per-pixel beam direction, quantised to NB bins over +-90 deg, and for each
+    // bin the integer pixel offsets of every tap along the arc and along the beam
+    const NB = 181, RM = kern.length - 1;
+    if (!this._bBin) {
+      const cx = SW * 0.5, apexY = SH * 0.04;
+      this._bBin = new Uint8Array(w * h);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const th = Math.atan2(x - cx, Math.max(1e-3, y - apexY));
+        this._bBin[y * w + x] = Math.max(0, Math.min(NB - 1, Math.round((th / Math.PI + 0.5) * (NB - 1))));
+      }
+      const L = 2 * RM + 1;
+      this._offLx = new Int16Array(NB * L); this._offLy = new Int16Array(NB * L);
+      this._offAx = new Int16Array(NB * L); this._offAy = new Int16Array(NB * L);
+      for (let b = 0; b < NB; b++) {
+        const th = (b / (NB - 1) - 0.5) * Math.PI, sn = Math.sin(th), cs = Math.cos(th);
+        for (let t = -RM; t <= RM; t++) {
+          const o = b * L + t + RM;
+          this._offLx[o] = Math.round(t * cs); this._offLy[o] = Math.round(-t * sn);   // along the arc
+          this._offAx[o] = Math.round(t * sn); this._offAy[o] = Math.round(t * cs);    // along the beam
         }
-        tmp[idx] = wsum > 0 ? acc / wsum : f[idx];
       }
     }
-    for (let y = 0; y < h; y++) {
-      const row = y * w;
-      for (let x = 0; x < w; x++) {
-        const idx = row + x;
-        if (!mask[idx]) { f[idx] = 0; continue; }
-        let ai = (depthBuf[idx] * lutK) | 0; if (ai >= LN) ai = LN - 1;
-        const r = axLut[ai];
-        if (r === 0) { f[idx] = tmp[idx]; continue; }
-        const k = kern[r]; let acc = 0, wsum = 0;
-        for (let t = -r; t <= r; t++) {
-          const yy = y + t;
-          if (yy < 0 || yy >= h) continue;
-          const j2 = yy * w + x;
-          if (!mask[j2]) continue;
-          const wv = k[t + r]; acc += tmp[j2] * wv; wsum += wv;
+    const bin = this._bBin, L = 2 * RM + 1;
+    const pass = (src, dst, lut, ox, oy) => {
+      for (let y = 0; y < h; y++) {
+        const row = y * w;
+        for (let x = 0; x < w; x++) {
+          const idx = row + x;
+          if (!mask[idx]) { dst[idx] = 0; continue; }
+          let li = (depthBuf[idx] * lutK) | 0; if (li >= LN) li = LN - 1;
+          const r = lut[li];
+          if (r === 0) { dst[idx] = src[idx]; continue; }
+          const k = kern[r], base = bin[idx] * L + RM;
+          let acc = 0, wsum = 0;
+          if (x >= r && x < w - r && y >= r && y < h - r) {     // interior: no bounds tests
+            for (let t = -r; t <= r; t++) {
+              const j2 = idx + oy[base + t] * w + ox[base + t];
+              if (!mask[j2]) continue;
+              const wv = k[t + r]; acc += src[j2] * wv; wsum += wv;
+            }
+          } else {
+            for (let t = -r; t <= r; t++) {
+              const xx = x + ox[base + t], yy = y + oy[base + t];
+              if (xx < 0 || xx >= w || yy < 0 || yy >= h) continue;
+              const j2 = yy * w + xx;
+              if (!mask[j2]) continue;
+              const wv = k[t + r]; acc += src[j2] * wv; wsum += wv;
+            }
+          }
+          dst[idx] = wsum > 0 ? acc / wsum : src[idx];
         }
-        f[idx] = wsum > 0 ? acc / wsum : tmp[idx];
       }
-    }
+    };
+    pass(f, tmp, latLut, this._offLx, this._offLy);
+    pass(tmp, f, axLut, this._offAx, this._offAy);
   }
 
   // Form the displayed B-mode from the PSF-convolved reflectivity: depth
@@ -995,6 +1060,11 @@ export class EchoView {
     const revbGain = (harm ? 0.16 : 1.0) * Math.min(1, (this.nearFieldCm || 0) / 1.4);
     const dTh = 2 * half / this._NA;                 // beam spacing (rad) of the artifact grid
     const spk = this._spk, lungD = this._lungDepth;
+    // pleural echo at normal incidence: about level with the parietal pericardium
+    // on a transthoracic image (which stays the brightest line of a parasternal
+    // view); brighter through the thin oesophageal wall
+    const pleuraAmp = (this.nearFieldCm || 0) < 0.5 ? 0.45 : 0.1;
+    const lSlope = this._lungSlope, lTaper = this._lungTaper, lGrain = this._lungGrain;
     const DRinv = 20 / (this.dynRange || 55);
     // image-quality accumulators (target = myocardium, background = LV blood)
     const NB = 48; const hMyo = new Float32Array(NB), hLv = new Float32Array(NB);
@@ -1031,18 +1101,25 @@ export class EchoView {
             // pleural line (m = 1) smooth and continuous, A-lines fainter and more
             // speckled, over a low grey reverberation haze (air is not echo-free)
             // the pleura is a specular reflector: its echo falls off with the
-            // incidence angle (same cos^4 lobe as the tissue specular term), and it
+            // incidence angle (a cos^6 lobe), and it
             // is blurred axially by the pulse (widening with depth), not a 1-px wire
-            const slope = lungD[ab1] < 1e8 && lungD[ab0] < 1e8 ? (lungD[ab1] - lungD[ab0]) / (dl * dTh) : 0;
-            const ci = 1 / (1 + slope * slope), spec = 0.12 + 0.88 * ci * ci;
+            // (cos^6 with a near-zero floor: a pleura turned toward the beam axis
+            // fades out; it ends by tapering over a few beams, never square-cut)
+            const slope = lSlope[ab0] * (1 - fr) + lSlope[ab1] * fr;
+            const ci = 1 / (1 + slope * slope), spec = 0.02 + 0.98 * ci * ci * ci;
+            const tp = lTaper[ab0] * (1 - fr) + lTaper[ab1] * fr;
+            const gr = 0.6 + 0.8 * (lGrain[ab0] * (1 - fr) + lGrain[ab1] * fr);
             const sig = 0.06 + 0.004 * depth;
             let al = 0, pl = 0;
-            for (let m = 1, amp = 0.55; m <= 4; m++, amp *= 0.45) {
+            for (let m = 1, amp = pleuraAmp; m <= 4; m++, amp *= 0.45) {
               const q = (depth - m * dl) / (sig * (1 + 0.3 * (m - 1))), g = amp * Math.exp(-q * q);
-              if (m === 1) pl = g * spec; else al += g * spec;
+              if (m === 1) pl = g * spec * tp * gr; else al += g * spec * tp;
             }
-            const haze = 0.004 * Math.exp(-(depth - dl) / 4) * (0.4 + 0.6 * spk[idx]);   // ~ -48 dB, below tissue
-            b = b * (1 - w) + w * (0.02 * b + (pl * (0.55 + 0.9 * spk[idx]) + al * (0.5 + 0.8 * spk[idx]) + haze) * gain);
+            // reverberation haze beyond the air (~ -40 dB, below tissue), streaked
+            // along the beams by the same coarse lateral grain as the pleural line
+            const haze = 0.01 * (0.35 + 1.3 * (lGrain[ab0] * (1 - fr) + lGrain[ab1] * fr)) * Math.exp(-(depth - dl) / 4) * (0.4 + 0.6 * spk[idx]);
+            const wa = w * (0.3 + 0.7 * tp);                              // a partial air hit at the ends
+            b = b * (1 - wa) + wa * (0.02 * b + (pl * (0.55 + 0.9 * spk[idx]) + al * (0.5 + 0.8 * spk[idx]) + haze) * gain);
           }
         }
         // subtle near-field reverberation: faint repeating echoes close to the

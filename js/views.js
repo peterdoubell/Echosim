@@ -324,7 +324,7 @@ function tgsaxProbe() {
   // transgastric: probe in the fundus below the heart, looking up through the
   // inferior wall; mid-papillary short axis, lateral wall on the right
   // (the transducer rests on the gastric wall; anatomy.js draws that wall in the
-  // first ~0.6 cm, then the diaphragm and the inferior wall)
+  // first ~0.45 cm, then the diaphragm and the inferior wall)
   const G = LM.GASTRIC;
   return probeFrom(vadd(G.p, vscale(G.n, 4.6)), G.n, [1, 0, 0], 4.6);
 }

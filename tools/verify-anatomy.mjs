@@ -20,9 +20,10 @@
 //
 // Usage: node tools/verify-anatomy.mjs [--verbose]     (exit 0 = all pass)
 import { geometryAt, classify, TISSUE, hemoSummary, membSite, MEMB_T, VSD_RADIUS, shuntLabel, stenosisCw, FLOW } from '../js/cardiac-model.js';
-import { LM, REF, lumenDist, mitralLift, BODY_AX, diaphragmBelow, rwmaBlend } from '../js/anatomy.js';
+import { LM, REF, lumenDist, mitralLift, BODY_AX, diaphragmBelow, rwmaBlend, stomachDist } from '../js/anatomy.js';
 import { MS_AREA } from '../js/hemodynamics.js';
 import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS } from '../js/views.js';
+import { renderBmode, beamSample, speckleAxis } from './bmode.mjs';
 
 const VERBOSE = process.argv.includes('--verbose');
 const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
@@ -600,7 +601,8 @@ SECTION = 'Normal';
     for (let r = 0.05; r <= 0.8; r += 0.05) {
       const q = add(tg.pos, mul(bd, r)), t = classify(q[0], q[1], q[2], GED, {}).tissue;
       if (t === TISSUE.LIVER) liver = Math.min(liver, r);
-      if (r <= 0.5) { n++; if (t === TISSUE.VWALL) wall++; }
+      // the layered wall (echogenic mucosa / serosa, hypoechoic muscularis)
+      if (r <= LM.GASTRIC.t - 0.05) { n++; if (t === TISSUE.VWALL || t === TISSUE.FAT) wall++; }
     }
   }
   assert('TEE', 'TGSAX: no liver within 0.8 cm of the probe', liver > 0.8);
@@ -857,11 +859,140 @@ function erodeSurvivors(S, k, r) {
       }
     }
   }
-  // KNOWN-FAIL (marginal): the gastric-impression face still shows a nearly straight 3 cm
-  // stretch (residual 0.07 vs 0.1 cm) in PSAX-MV at end-systole
+  // KNOWN-FAIL (marginal): the liver's upper (diaphragmatic) face under the heart
+  // still shows a nearly straight 3 cm stretch (residual 0.07 vs 0.1 cm) on the
+  // left of PSAX-MV at end-systole, where the dome sheet is locally flat
   KNOWN = true;
   check('Liver', 'PSAX: straightest 3 cm of liver edge (max line-fit residual)', worst === 1e9 ? 1 : worst, [0.1, 99], 'cm', where);
   KNOWN = false;
+}
+// one stomach, in the left upper quadrant: no extrahepatic wall band (gastric
+// wall or its fat) runs through the liver in the parasternal / subcostal views,
+// and no gastric wall lies right of the midline or near the IVC
+{
+  let worst = 0, where = '';
+  // (epicardial coronary walls, within 2 cm of a cardiac lumen, are not counted)
+  const band = (t) => t === TISSUE.VWALL || t === TISSUE.FAT;
+  for (const [ph, G] of [['ED', GED], ['ES', GES]]) {
+    for (const nm of ['PSAX', 'PSAX_MV', 'RVIT', 'SC_IVC', 'PLAX']) {
+      const v = TTE_VIEWS[nm] || EXTRA_VIEWS[nm];
+      let p = v.probe();
+      if (v.track) { const o = v.track(G.A); p = { ...p, pos: add(p.pos, o) }; }
+      for (let th = -0.66; th <= 0.661; th += 0.02) {
+        const bd = add(mul(p.dir, Math.cos(th)), mul(p.lat, Math.sin(th)));
+        let seenLiver = false, run0 = -1, bandLen = 0;
+        for (let r = 0.5; r <= v.depth; r += 0.05) {
+          const q = add(p.pos, mul(bd, r));
+          let t = classify(q[0], q[1], q[2], G, {}).tissue;
+          if (t === TISSUE.VWALL && Math.min(lumenDist(q[0], q[1], q[2], G.A, 'LV'), lumenDist(q[0], q[1], q[2], G.A, 'RV')) < 2) t = TISSUE.PERI_LINE;
+          if (t === TISSUE.LIVER) {
+            if (seenLiver && run0 >= 0 && bandLen >= 0.3 - 1e-6 && bandLen > worst) { worst = bandLen; where = `${nm} ${ph} beam ${th.toFixed(2)} at ${run0.toFixed(1)} cm`; }
+            seenLiver = true; run0 = -1; bandLen = 0;
+          } else if (seenLiver && (band(t) || t === TISSUE.PERI_LINE)) {
+            if (run0 < 0) run0 = r;
+            if (band(t)) bandLen += 0.05;
+          } else { seenLiver = false; run0 = -1; bandLen = 0; }
+        }
+      }
+    }
+  }
+  check('Liver', 'no wall/fat band >= 0.3 cm with liver on both sides (PSAX, PSAX_MV, RVIT, SC_IVC, PLAX; ED/ES)', worst, [0, 0.29], 'cm', where);
+  const iv = GED.A.ivc, ia = iv.a, ib = iv.b, iu = unit(sub(ib, ia)), il = Math.hypot(...sub(ib, ia));
+  const L = BODY_AX.L, P = BODY_AX.P, I = BODY_AX.I;
+  let right = 0, nearIvc = 0, n = 0;
+  const c0 = [-1.0, -3.0, 0];
+  for (let a = -10; a <= 10; a += 0.25) for (let b = -8; b <= 8; b += 0.25) for (let h = 0; h <= 12; h += 0.25) {
+    const q = add(add(add(c0, mul(L, a)), mul(P, b)), mul(I, h));
+    if (diaphragmBelow(q[0], q[1], q[2]) < -0.4) continue;
+    const sd = stomachDist(q[0], q[1], q[2]);
+    if (sd <= 0 || sd >= LM.GASTRIC.t) continue;
+    const tq = classify(q[0], q[1], q[2], GED, {}).tissue;
+    if (tq !== TISSUE.VWALL && tq !== TISSUE.FAT) continue;
+    n++;
+    if (dot(q, L) - LM.MIDLINE < 0) right++;
+    const s = Math.max(0, Math.min(il, dot(sub(q, ia), iu)));
+    if (Math.hypot(...sub(q, add(ia, mul(iu, s)))) < 2) nearIvc++;
+  }
+  assert('Liver', 'gastric wall drawn (3-D grid below the diaphragm)', n > 200, `${n} voxels`);
+  check('Liver', 'gastric-wall voxels right of the midline', right, [0, 0], '', `of ${n}`);
+  check('Liver', 'gastric-wall voxels within 2 cm of the IVC centreline', nearIvc, [0, 0], '', `of ${n}`);
+}
+// B-mode (headless render of the real image pipeline): the posterior parietal
+// pericardium is the brightest reflector behind the LV in PLAX / PSAX; a pleural
+// line fades as it turns toward the beam axis and tapers out at its ends; the
+// lingula / lung shows at the lateral edges of the apical sector
+{
+  const DR = 55, dB = (g) => g / 255 * DR;              // display grey -> dB (default dynamic range)
+  for (const nm of ['PLAX', 'PSAX']) {
+    const R = renderBmode(nm, ED, {});
+    const diffs = [];
+    for (let th = -0.45; th <= 0.45; th += 0.01) {
+      const S = [];
+      for (let d = 1; ; d += 0.02) { const q = beamSample(R, th, d); if (!q) break; S.push(q); }
+      let k = S.findIndex((q) => q.kind === TISSUE.LV); if (k < 0) continue;
+      while (k < S.length && S[k].kind === TISSUE.LV) k++;
+      const m0 = k; while (k < S.length && S[k].kind === TISSUE.MYO) k++;
+      const m1 = k; if (m1 - m0 < 20) continue;          // a wall >= 0.4 cm thick
+      const p0 = k; while (k < S.length && S[k].kind !== TISSUE.PERI_LINE && k - p0 < 15) k++;
+      if (k >= S.length || S[k].kind !== TISSUE.PERI_LINE) continue;
+      let pk = 0; for (let q = Math.max(0, k - 8); q < Math.min(S.length, k + 12); q++) pk = Math.max(pk, S[q].grey);
+      let sm = 0, n = 0; for (let q = m0 + 3; q < m1 - 8; q++) { sm += S[q].grey; n++; }
+      if (n) diffs.push(dB(pk - sm / n));
+    }
+    diffs.sort((a, b) => a - b);
+    check('B-mode', `${nm}: posterior pericardial peak above the wall (median over beams)`, diffs.length > 5 ? diffs[diffs.length >> 1] : null, [8, 30], 'dB', `${diffs.length} beams`);
+  }
+  const norm = [], steep = [], ends = [];
+  for (const nm of ['SUBCOSTAL', 'SSN', 'PLAX', 'A4C', 'A2C', 'PSAX_MV']) {
+    const R = renderBmode(nm, ED, {}), L = R.lungD, NA = R.NA, dTh = 2 * R.half / NA;
+    const pk = new Float32Array(NA).fill(-1);
+    for (let a = 0; a < NA; a++) {
+      if (L[a] > 1e8) continue;
+      const th = -R.half + (a + 0.5) * dTh;
+      let m = -1, ok = true;
+      for (let d = L[a] - 0.25; d <= L[a] + 0.25; d += 0.02) { const q = beamSample(R, th, d); if (!q || !R.mask[q.idx]) { ok = false; break; } m = Math.max(m, q.grey); }
+      if (!ok) continue;
+      pk[a] = m;
+      const l = a > 0 && L[a - 1] < 1e8, r = a < NA - 1 && L[a + 1] < 1e8;
+      const sl = l && r ? (L[a + 1] - L[a - 1]) / (2 * dTh * L[a]) : r ? (L[a + 1] - L[a]) / (dTh * L[a]) : l ? (L[a] - L[a - 1]) / (dTh * L[a]) : 0;
+      const inc = Math.atan(Math.abs(sl)) * 180 / Math.PI;
+      if (l && r && inc < 25) norm.push(m); else if (l && r && inc > 60) steep.push(m);
+    }
+    // each visible pleural segment: its end beams (where the line stops inside the
+    // sector) against the segment's median
+    for (let a = 0; a < NA; a++) {
+      if (L[a] > 1e8 || (a > 0 && L[a - 1] < 1e8)) continue;
+      let b = a; while (b + 1 < NA && L[b + 1] < 1e8) b++;
+      const seg = []; for (let k = a; k <= b; k++) if (pk[k] >= 0) seg.push(pk[k]);
+      seg.sort((x, y) => x - y);
+      const med = seg.length >= 8 ? seg[seg.length >> 1] : 0;
+      if (med >= 130) {
+        if (a > 0 && pk[a] >= 0) ends.push([nm, a, dB(med - pk[a])]);
+        if (b < NA - 1 && pk[b] >= 0) ends.push([nm, b, dB(med - pk[b])]);
+      }
+      a = b;
+    }
+  }
+  const mean = (v) => v.reduce((x, y) => x + y, 0) / v.length;
+  check('B-mode', 'pleural line: fall-off from < 25 deg to > 60 deg incidence', norm.length && steep.length ? dB(mean(norm) - mean(steep)) : null, [16, 60], 'dB', `${norm.length} / ${steep.length} beams (SUBCOSTAL SSN PLAX A4C A2C PSAX-MV)`);
+  ends.sort((x, y) => x[2] - y[2]);
+  check('B-mode', 'pleural line: end beam below the segment median (weakest end)', ends.length ? ends[0][2] : null, [10, 60], 'dB', ends.length ? `${ends.length} ends, worst ${ends[0][0]} beam ${ends[0][1]}` : '');
+  {
+    // speckle grain follows the beam geometry: the autocorrelation's major axis
+    // lies along the depth arc (perpendicular to the beam), also at the fan edges
+    const R = renderBmode('A4C', ED, {});
+    let worst = 0, where = '';
+    for (const th of [-0.55, -0.3, 0.3, 0.55]) {
+      const a = speckleAxis(R, th, 9);
+      let e = Math.abs(a.ang - a.perp) % 180; if (e > 90) e = 180 - e;
+      if (e >= worst) { worst = e; where = `beam ${(th * 180 / Math.PI).toFixed(0)} deg: ${a.ang.toFixed(0)} vs ${a.perp.toFixed(0)}`; }
+    }
+    check('B-mode', 'A4C speckle major axis vs beam-perpendicular (worst of +-17, +-32 deg)', worst, [0, 10], 'deg', where);
+  }
+  const G0 = GED, S = gridPx(TTE_VIEWS.A4C, G0);
+  let lung = 0;
+  for (let j = 30; j < S.M; j++) for (let i = 0; i < S.N; i++) if (S.g[j * S.N + i] === TISSUE.LUNG) lung++;
+  check('B-mode', 'A4C: lung at the sector edges (beyond 3 cm)', lung * 0.01, [1, 60], 'cm2');
 }
 // subcostal: the heart sits in the mid field behind a few cm of left lobe
 {
