@@ -183,7 +183,9 @@ const TAPSE_REF = 2.5;
 // The LA rises from the mitral annulus roughly in line with the LV long axis
 // (A4C) and lies directly behind the aortic root on the Ao/LA M-mode line (PLAX,
 // PSAX-AV) — "posterior" in the body is +y as much as -z in heart space.
-const A_LA = unit([0.07, 1, 0.13]);
+// (tilted back so the chamber's long axis lies in the four-chamber plane: an
+// apical cut then runs the full annulus-to-roof length at every phase)
+const A_LA = unit([0.07, 1, -0.02]);
 const A_RA = unit([-0.12, 1, 0.08]);
 const LA_FLOOR0 = add(M0, [-0.15, 0, -0.05]);
 const RA_FLOOR0 = add(T0, [0.45, 0.1, -0.2]);
@@ -191,10 +193,14 @@ const LA_ES = { len: 5.0, w1: 1.55, w2: 1.75 };       // A4C major 5.0, (cut) mi
 // the LA body sits back along the Ao/LA line, behind the root (PLAX AP ~3.3 cm)
 const LA_POST = 0.8;
 const RA_ES = { len: 4.0, w1: 2.3, w2: 1.9 };        // A4C major ~4.6, (cut) minor ~3.7
-// Roofs follow 35 % of their annulus's excursion (the atria are not pinned),
+// Roofs follow part of their annulus's excursion (the atria are not pinned),
 // placed so the end-systolic floor-to-roof length is exactly the ES value above.
+// The LA roof follows only 12 %: the annular descent then stretches the LA long
+// axis by ~25 % from minimum to maximum volume — nearly all of its long-axis
+// change (the roof does not piston down toward the annulus as the LA empties).
 const ROOF_FOLLOW = 0.35;
-const LA_ROOF = mad(add(LA_FLOOR0, [0, -(1 - ROOF_FOLLOW) * MAPSE_REF, 0]), A_LA, LA_ES.len);
+const LA_ROOF_FOLLOW = 0.12;
+const LA_ROOF = mad(add(LA_FLOOR0, [0, -(1 - LA_ROOF_FOLLOW) * MAPSE_REF, 0]), A_LA, LA_ES.len);
 // tricuspid hinge: fraction of TAPSE at the annulus centre / septal rim, and the
 // in-plane direction from the septal toward the lateral (free-wall) rim
 const TV_SEPT_FRAC = 0.62, TV_CENTRE_FRAC = 0.609;   // septal rim moves with the mitral annulus (fibrous skeleton); RA floor follows the old centre
@@ -374,10 +380,12 @@ export { CFG };
 // periodic — f(1) === f(0) — with no step or slope break across the wrap.
 //
 // Calibration: these are LINEAR volume-equivalent scale factors, so volume goes
-// as f^3. Peak 1.17 / minimum 0.89 gives a total LA emptying fraction of
-// 1 - 0.89^3/1.17^3 ~= 56 %, split into a passive (conduit) emptying fraction of
-// ~38 % and an active (booster) emptying fraction of ~30 % — normal adult values.
-const A_MIN = 0.89, A_RES = 0.28, A_COND = 0.13, A_BOOST = 0.15;
+// as f^3 (peak 1.17 / minimum 0.86). They are tuned on the DRAWN chamber body
+// (voxel volume without the appendage and the vein tubes, as the ASE LA volume
+// is measured; see tools/verify-atrial-phase.mjs): LAVmax ~51 mL, LAVmin ~22 mL,
+// total emptying fraction ~56 %, passive (conduit) ~33 % and active (booster)
+// ~34 % — normal adult values.
+const A_MIN = 0.86, A_RES = 0.31, A_COND = 0.165, A_BOOST = 0.145;
 const A_PEAK = A_MIN + A_RES;
 
 export function atrialFill(phase) {
@@ -397,7 +405,14 @@ const ATR_GAIN = 1.0;   // uniform (whole-chamber) share of the volume change
 const ATR_REMODEL = 1.6;   // width exponent of the dilatation scale
 const ATR_FREE = 0.5;   // free-wall share: compression along the septal normal
 const ATR_LONG = 0.5;   // roof share: compression along the long axis toward the annulus
-function atrium(floor, roof, es, fill, lateral, widen, post = 0, postDir = null) {
+// The LA empties by annular descent (its long axis, via LA_ROOF_FOLLOW), by its
+// lateral free wall moving in toward the fixed septum (LA_FREE) and by its
+// antero-posterior width (LA_SPLIT puts the whole width change into e2), with no
+// extra long-axis collapse of the roof (LA_LONG 0): from maximum to minimum the
+// A4C major axis shortens ~26 % and the minor ~16 %, so the LA stays an oval
+// taller than wide at its minimum (A4C height / width ~1.1 at end-diastole).
+const LA_FREE = 0.18, LA_LONG = 0, LA_SPLIT = [0, 1];
+function atrium(floor, roof, es, fill, lateral, widen, post = 0, postDir = null, split = null) {
   const ax = sub(roof, floor);
   const len = Math.hypot(ax[0], ax[1], ax[2]);
   const a = mul(ax, 1 / len);
@@ -410,7 +425,9 @@ function atrium(floor, roof, es, fill, lateral, widen, post = 0, postDir = null)
   // chronic atrial dilatation (pressure/volume overload) enlarges the chamber in all
   // three directions: the roof rises away from the annulus and the walls bow out
   const grow = widen > 1 ? Math.pow(widen, ATR_REMODEL) : widen;
-  const w = Math.sqrt(vol * es.len / len) * grow;
+  const W = vol * es.len / len;
+  const w = Math.sqrt(W) * grow;
+  const wa1 = split ? Math.pow(W, split[0]) * grow : w, wa2 = split ? Math.pow(W, split[1]) * grow : w;
   // a dilating atrium balloons laterally (e1 lies in the four-chamber plane) and
   // lengthens, rather than growing backwards out of the 4C plane
   const lenG = len * (widen > 1 ? widen : 1);
@@ -420,7 +437,7 @@ function atrium(floor, roof, es, fill, lateral, widen, post = 0, postDir = null)
   // chamber toward the septal plane (applied in sdAtrium about that plane)
   const f = Math.pow(fill / A_PEAK, 3 * ATR_FREE);
   const g = Math.pow(fill / A_PEAK, 3 * ATR_LONG);
-  return { c, a, e1, e2, rl: lenG / 2 + 0.15, r1: es.w1 * w * lat, r2: es.w2 * w, len: lenG, f, g, fl: floor };
+  return { c, a, e1, e2, rl: lenG / 2 + 0.15, r1: es.w1 * wa1 * lat, r2: es.w2 * wa2, len: lenG, f, g, fl: floor };
 }
 
 // The interatrial septum is a shared wall that barely moves: the atrial volume
@@ -535,7 +552,7 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   // right heart's clock
   const aFillR = mech && mech.phaseRV != null ? atrialFill(mech.phaseRV) : aFill;
   // (the LA body bulges posteriorly, behind the aortic root, beyond its annulus)
-  const la = atrium(add(LA_FLOOR0, [0, dM, 0]), add(LA_ROOF, [0, ROOF_FOLLOW * dM, 0]), LA_ES, aFill, -0.1, laScale, LA_POST, AO_LA_DIR);
+  const la = atrium(add(LA_FLOOR0, [0, dM, 0]), add(LA_ROOF, [0, LA_ROOF_FOLLOW * dM, 0]), LA_ES, aFill, -0.1, laScale, LA_POST, AO_LA_DIR, LA_SPLIT);
   const ra = atrium(add(RA_FLOOR0, [0, -tvDrop, 0]), add(RA_ROOF, [0, -ROOF_FOLLOW * tvDrop, 0]), RA_ES, aFillR, RA_LAT, raScale, RA_POST, RA_AWAY);
   // As the atria empty they shrink about the free walls, not the septum: pull
   // each centre (within the septal plane) toward the fossa so the swept septal
@@ -545,6 +562,8 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
     let t = sub(FOSSA0, E.c); t = sub(t, mul(IAS_N, dot(t, IAS_N)));
     E.c = mad(E.c, t, pull);
   }
+  la.f = Math.pow(aFill / A_PEAK, 3 * LA_FREE);
+  la.g = Math.pow(aFill / A_PEAK, 3 * LA_LONG);
   anchorToSeptum(la, 1, IAS.pen.la);
   anchorToSeptum(ra, -1, IAS.pen.ra);
   ra.f = Math.sqrt(ra.f);   // the thin-walled RA empties less by free-wall collapse (keeps a chamber at ED)
@@ -680,20 +699,20 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
 // groove over the circumflex — the "chicken-wing" morphology (~48%). The narrow
 // neck is why it is THE site of thrombus in atrial fibrillation.
 function laaSegs(la) {
-  // ostium on the ANTERIOR LA wall near the annulus (so the A2C, rotated ~15 deg
-  // lateral of 12 o'clock, cuts the ostium and neck on its anterior side); the
-  // body runs forward and down in the left AV groove over the circumflex,
-  // beneath the PA trunk, and its tip hooks back on itself
-  const u = unit(add(add(mul(la.e1, -0.2), mul(la.e2, 0.95)), mul(la.a, -0.2)));
-  const s = 1 / Math.hypot(dot(u, la.e1) / la.r1, dot(u, la.a) / la.rl, dot(u, la.e2) / la.r2);
-  const o = mad(la.c, u, s * 0.9);
-  const p1 = mad(o, unit([0.3, -0.6, 1]), 1.1);
-  const p2 = mad(p1, unit([0.6, -0.7, 0.8]), 0.9);
-  const p3 = mad(p2, unit([-0.2, -0.5, 0.7]), 0.8);
+  // ostium on the ANTEROLATERAL LA wall, ~1-1.5 cm in front of the LSPV across
+  // the warfarin ridge; the body runs forward and down in the left AV groove over
+  // the circumflex, beneath the PA trunk, and its tip hooks back on itself.
+  // Ostium ~1.7 cm, depth ~3.6 cm (normal adult 1.5-2.5 cm, 2.5-4.5 cm).
+  const u = unit(add(add(mul(la.e1, 0.55), mul(la.e2, 0.8)), mul(la.a, -0.45)));
+  const w = laWall(la, laIn(la), u);
+  const o = mad(w, u, -0.25);
+  const p1 = mad(o, unit([0.35, -0.5, 1]), 1.3);
+  const p2 = mad(p1, unit([0.45, -0.75, 0.6]), 1.2);
+  const p3 = mad(p2, unit([-0.3, -0.6, 0.75]), 1.1);
   return [
-    { a: o, b: p1, r1: 0.5, r2: 0.4 },
-    { a: p1, b: p2, r1: 0.4, r2: 0.33 },
-    { a: p2, b: p3, r1: 0.33, r2: 0.2 },
+    { a: o, b: p1, r1: 0.85, r2: 0.7, w },
+    { a: p1, b: p2, r1: 0.7, r2: 0.55 },
+    { a: p2, b: p3, r1: 0.55, r2: 0.35 },
   ];
 }
 // Right atrial appendage: BROAD-BASED and triangular, wide-mouthed — the key
@@ -705,37 +724,73 @@ function raaSegs(ra) {
 }
 
 // Pulmonary veins draining into the posterior LA, left and right, superior and
-// inferior. Ostia are seated on the live atrial wall (direction `u` from the LA
-// centre); each vein then runs toward its lung (`d`, from the body axes). The
-// right superior vein enters beside the septum, which is why it is the one seen
-// on an A4C for pulmonary-vein Doppler. Ostial calibre ~1.0-1.2 cm.
+// inferior, one at each of the four corners of its posterior wall: the left and
+// right ostia ~3.5-4.5 cm apart with smooth wall between them, the superior and
+// inferior ostia on each side ~1.5-2 cm apart across a carina. Each ostium is
+// found on the live (drawn) atrial wall along a body direction `u` from the
+// chamber's middle, so it stays seated on the wall at every phase; the vein then
+// runs out toward its lung hilum (`d`). The right veins enter just behind the
+// interatrial groove — the right superior vein is the one an A4C shows for
+// pulmonary-vein Doppler. Ostial calibre ~1.0-1.2 cm.
+const pvDir = (l, p, s) => unit(add(add(mul(BL, l), mul(BP, p)), mul(BS, s)));
 const PV_DEF = [
-  { name: 'LSPV', u: [0.72, 0.42, -0.55], d: unit(add(add(mul(BL0, 0.7), mul(BS0, 0.4)), mul(BP0, 0.45))), r: 0.58, len: 2.0 },
-  { name: 'LIPV', u: [0.7, -0.15, -0.7], d: unit(add(add(mul(BL0, 0.7), mul(BS0, -0.35)), mul(BP0, 0.45))), r: 0.52, len: 1.9 },
-  { name: 'RSPV', u: [-0.55, 0.55, -0.62], d: unit(add(add(mul(BL0, -0.7), mul(BS0, 0.4)), mul(BP0, 0.45))), r: 0.6, len: 2.0 },
-  { name: 'RIPV', u: [-0.55, -0.05, -0.83], d: unit(add(add(mul(BL0, -0.7), mul(BS0, -0.35)), mul(BP0, 0.45))), r: 0.55, len: 1.9 },
-].map((v) => ({ ...v, u: unit(v.u) }));
-function laPoint(la, u, f) {
-  // point on the LA ellipsoid surface in (heart-space) direction u, scaled by f
-  const lu = dot(u, la.e1) / la.r1, la_ = dot(u, la.a) / la.rl, lw = dot(u, la.e2) / la.r2;
-  const t = 1 / Math.hypot(lu, la_, lw);
-  return mad(la.c, u, t * f);
+  { name: 'LSPV', u: pvDir(0.85, 0.55, 0.55), d: pvDir(0.85, 0.25, 0.7), r: 0.58, len: 2.2 },
+  { name: 'LIPV', u: pvDir(0.85, 0.6, -0.45), d: pvDir(0.9, 0.35, -0.45), r: 0.52, len: 2.1 },
+  { name: 'RSPV', u: pvDir(-0.9, 0.6, 0.55), d: pvDir(-1, 0.1, 0.45), r: 0.6, len: 2.2 },
+  { name: 'RIPV', u: pvDir(-0.85, 0.7, -0.45), d: pvDir(-0.9, 0.3, -0.45), r: 0.55, len: 2.1 },
+];
+// the drawn atrial wall along a ray: bisection on the atrium SDF (with its
+// septal stretch, free-wall and roof compression), from an interior point
+function laWall(la, o, u) {
+  let lo = 0, hi = 6;
+  for (let i = 0; i < 22; i++) {
+    const m = 0.5 * (lo + hi), q = mad(o, u, m);
+    if (sdAtrium(q[0], q[1], q[2], la, 0) < 0) lo = m; else hi = m;
+  }
+  return mad(o, u, lo);
+}
+// the ellipsoid centre carried through the septal stretch, the free-wall
+// compression about the septal plane and the roof descent: a point inside the
+// DRAWN chamber at every phase (la.c itself lies above a descended roof)
+function laIn(la) {
+  let o = la.sw > 0 ? mad(la.c, la.sn, la.sw / 2) : la.c;
+  if (la.sn && la.f < 0.999) {
+    const sOwn = -dot(sub(o, IAS_P), la.sn);
+    if (sOwn > 0) o = mad(o, la.sn, sOwn * (1 - la.f));
+  }
+  if (la.g < 0.999) {
+    const h = dot(sub(o, la.fl), la.a);
+    if (h > 0) o = mad(o, la.a, -h * (1 - la.g));
+  }
+  return o;
+}
+// middle of the drawn chamber: midpoint of its extent along the three body axes
+function laMid(la) {
+  let o = laIn(la);
+  for (const ax of [BL, BP, BS]) {
+    const p = laWall(la, o, ax), q = laWall(la, o, mul(ax, -1));
+    o = lerp3(p, q, 0.5);
+  }
+  return o;
 }
 function buildPV(la) {
+  const o = laMid(la);
   const veins = PV_DEF.map((v) => {
-    const a = laPoint(la, v.u, 0.82);
-    const b = mad(mad(a, v.u, 0.6), v.d, v.len);
+    const w = laWall(la, o, v.u);
+    const a = mad(w, v.u, -0.3);                               // mouth opens into the lumen
+    const b = mad(mad(w, v.u, 0.3), v.d, v.len);
     const ax = unit(sub(a, b));                               // inflow axis (vein -> atrium)
-    return { name: v.name, r: v.r, a, b, ax };
+    return { name: v.name, r: v.r, a, b, ax, w };
   });
   // the muscular ridge between the LSPV ostium and the LAA ostium — the
   // "warfarin" (coumadin) ridge, a normal structure regularly mistaken for a mass
   // It runs ALONG the lateral wall between the two ostia, so its ends are taken
   // on the atrial surface (directions interpolated between the ostia) rather
   // than on the straight chord, which would cross the cavity.
-  const uL = unit(sub(veins[0].a, la.c)), uA = unit(sub(laaSegs(la)[0].a, la.c));
-  const ridge = { a: laPoint(la, unit(lerp3(uL, uA, 0.3)), 0.97), b: laPoint(la, unit(lerp3(uL, uA, 0.6)), 0.97), r: 0.14 };
-  return { veins, ridge };
+  const aa = laaSegs(la);
+  const uL = unit(sub(veins[0].w, o)), uA = unit(sub(aa[0].w, o));
+  const ridge = { a: laWall(la, o, unit(lerp3(uL, uA, 0.45))), b: laWall(la, o, unit(lerp3(uL, uA, 0.6))), r: 0.14 };
+  return { veins, ridge, mid: o };
 }
 
 // Crista terminalis: the C-shaped muscular ridge from the SVC orifice around the
@@ -1151,20 +1206,36 @@ function dPV(x, y, z, A) {
   }
   return d;
 }
-function dLAlumen(x, y, z, A) {
+const LA_INFLOW = 0.35;
+// the LA opens widely onto the mitral orifice: a short inflow funnel from the
+// annulus into the LA body, so no partition separates them at any phase (it
+// reaches LA_INFLOW of the way to the chamber centre: a full-length rigid
+// cylinder would add a fixed ~15 mL core that never empties). `y` is already
+// corrected for the saddle lift.
+function laInflow(x, y, z, A) {
+  const M = A.lv.M, c = A.la.c, a = A.la.a;
+  const inl = Math.max(0.8, LA_INFLOW * Math.hypot(c[0] - M[0], c[1] - M[1], c[2] - M[2]));
+  return sdCylinder(x, y, z, M[0], M[1] - 0.03, M[2], M[0] + a[0] * inl, M[1] + a[1] * inl, M[2] + a[2] * inl, A.lv.mvR * 0.98);
+}
+// body = true: the chamber body alone, without the appendage and the vein
+// tubes — what the ASE LA volume measures (biplane / 3D LAV excludes the LAA and
+// the pulmonary veins)
+function dLAlumen(x, y, z, A, body = false) {
   const e = sdAtrium(x, y, z, A.la, 0);
-  if (e > 3.2) {                                                     // far away: only the vein tubes matter
+  if (body) {
+    if (e > 3.2) return e;
+  } else if (e > 3.2) {                                                     // far away: only the vein tubes matter
     const v = Math.min(e, dPV(x, y, z, A));
     return v > 1.5 ? v : ssub(v, dAOarchDTA(x, y, z, A) - A.ao.wall - 0.15, 0.2);
   }
-  let d = smin(e, dAppendage(x, y, z, A.la.aa, 0.22), 0.14);       // NARROW neck
-  d = smin(d, dPV(x, y, z, A), 0.4);                                 // veins flare in
+  let d = e;
+  if (!body) {
+    d = smin(d, dAppendage(x, y, z, A.la.aa, 0.22), 0.14);          // NARROW neck
+    d = smin(d, dPV(x, y, z, A), 0.4);                               // veins flare in
+  }
   const M = A.lv.M;                                                  // mitral orifice
-  // the LA opens widely onto the mitral orifice: the inflow runs from the annulus
-  // all the way into the LA body, so no partition separates them at any phase
-  const inl = Math.max(0.8, Math.hypot(A.la.c[0] - M[0], A.la.c[1] - M[1], A.la.c[2] - M[2]));
   const ym = y - mitralLift(x, y, z, A);                             // (saddle deepens in systole)
-  d = smin(d, sdCylinder(x, ym, z, M[0], M[1] - 0.03, M[2], M[0] + A.la.a[0] * inl, M[1] + A.la.a[1] * inl, M[2] + A.la.a[2] * inl, A.lv.mvR * 0.98), 0.6);
+  d = smin(d, laInflow(x, ym, z, A), 0.6);
   d = clipAtAnnulus(d, x, ym, z, M, MV_N, MV_R + 0.6);               // LA ends at the mitral annulus
   const s = iasAt(x, y, z, A);
   d = smax(d, s.s + s.t, 0.12);                                      // cut by the septum
@@ -1309,7 +1380,11 @@ function myoParts(x, y, z, A) {
   // wall — or the septum itself — continues across it), so the part of an
   // atrial ellipsoid that the septum cuts away leaves no phantom muscle behind.
   let tubes = 1e9;
-  const la = sdAtrium(x, y, z, A.la, 0.22), ra = sdAtrium(x, y, z, A.ra, 0.22);
+  let la = sdAtrium(x, y, z, A.la, 0.22);
+  const ra = sdAtrium(x, y, z, A.ra, 0.22);
+  // (the LA wall also covers the mitral inflow funnel, which bulges beyond the
+  // chamber ellipsoid at the annulus: no blood touches the pericardium there)
+  if (la < 1.5) la = smin(la, laInflow(x, y - mitralLift(x, y, z, A), z, A) - 0.22, 0.6);
   const sep = (la < 3.2 || ra < 4.0) ? iasAt(x, y, z, A).s : 0;
   if (la < 3.2) {
     d = smin(d, smin(smax(la, sep - 0.02, 0.1), dAppendage(x, y, z, A.la.aa, 0.22) - 0.15, 0.35), 0.4);
@@ -1353,6 +1428,10 @@ export function lumenDist(x, y, z, A, which) {
     case 'LV': return dLVlumen(x, y, z, A);
     case 'RV': return dRVlumen(x, y, z, A);
     case 'LA': return dLAlumen(x, y, z, A);
+    case 'LA_BODY': return dLAlumen(x, y, z, A, true);
+    case 'LAA': return dAppendage(x, y, z, A.la.aa, 0.22);            // the appendage tube alone
+    case 'PV': return dPV(x, y, z, A);                                 // the four vein tubes alone
+    case 'LV_EPI': return lvEpi(x, y, z, A);                           // LV epicardium (wall + cavity)
     case 'RA': return dRAlumen(x, y, z, A);
     case 'AO': return dAOlumen(x, y, z, A);
     case 'AOROOT': return dAOroot(x, y, z, A);
