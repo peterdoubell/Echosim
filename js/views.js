@@ -168,11 +168,21 @@ function subcostalProbe() {
 // apical windows sit over the apex: a remodelled (longer) LV moves its apex, and
 // the apical window with it, out toward the left axilla / caudally
 const APICAL_TRACK = (A) => [0, A.lv.apexShift || 0, 0];
+// A4C: as the root descends in systole the sonographer's small posterior tilt
+// keeps the plane off it (as at end-diastole), so the root-clearance shell of the
+// atria is never brought into the upper septum as a false crux 'mass'
+const A4C_ROOT_TRACK = 0.25;                         // cm of posterior tilt per cm of root descent
+let _a4cN = null;
+function a4cTrack(A) {
+  if (!_a4cN) _a4cN = a4cProbe().normal;
+  const back = vscale([0, 0, 1], A4C_ROOT_TRACK * (A.lv.A[1] - A0.lv.A[1]));
+  return vadd(APICAL_TRACK(A), vscale(_a4cN, vdot(back, _a4cN)));
+}
 export const TTE_VIEWS = {
   PLAX: { probe: plaxProbe, depth: 16 },
   PSAX: { probe: () => psaxProbe(-3.6), depth: 15 },   // mid-papillary
   PSAX_AV: { probe: psaxAvProbe, depth: 15, track: (A) => [0, 0.8 * (A.lv.A[1] - A0.lv.A[1]), 0] },   // follows the root's descent
-  A4C: { probe: a4cProbe, depth: 17, track: APICAL_TRACK },
+  A4C: { probe: a4cProbe, depth: 17, track: a4cTrack },
   A2C: { probe: a2cProbe, depth: 17, track: APICAL_TRACK },
   SUBCOSTAL: { probe: subcostalProbe, depth: 18 },
 };
@@ -215,6 +225,7 @@ function rvInflowTrack(A) {
 // Subcostal IVC long axis: the IVC running through the liver into the RA, the
 // hepatic veins joining it; cranial (RA) to the right of the screen.
 const SC_IVC_CRANIAL = 15;                        // deg
+const SC_IVC_ROLL = -25;                          // deg
 function subcostalIvcProbe() {
   // transducer at the subxiphoid window (the subcostal 4C skin point), aimed at
   // the IVC ~1.5 cm below its RA junction; the plane contains the IVC axis so the
@@ -228,7 +239,11 @@ function subcostalIvcProbe() {
   // field) instead of in front of the lung bases.
   const tgt = vadd(iv.a, vscale(ax, -0.8));
   const back = inPlane(vadd(BODY_AX.P, vscale(BODY_AX.S, 0.3)), vcross(ax, BODY_AX.P));
-  const perp = norm(vsub(back, vscale(ax, vdot(back, ax))));
+  let perp = norm(vsub(back, vscale(ax, vdot(back, ax))));
+  // rolled about the IVC axis toward the patient's right, so above the caval
+  // orifice the plane runs up through the RA body, clear of the RV in front of it
+  const roll = SC_IVC_ROLL * Math.PI / 180;
+  perp = norm(vadd(vscale(perp, Math.cos(roll)), vscale(vcross(ax, perp), Math.sin(roll))));
   const th = SC_IVC_CRANIAL * Math.PI / 180;
   const dir = norm(vadd(vscale(perp, Math.cos(th)), vscale(ax, Math.sin(th))));
   return chestWallProbe(tgt, dir, ax, 9.0, 6.0);
@@ -251,7 +266,11 @@ export const EXTRA_VIEWS = {
   // fish-mouth in diastole): the probe follows the posterolateral annular
   // excursion (the small tilt a sonographer makes), so the plane stays at the
   // leaflets and never climbs into the posterior AV groove (CS / RA) in systole
-  PSAX_MV: { probe: () => psaxProbe(-0.6), depth: 15, track: (A) => [0, 0.95 * (A.lv.base - A0.lv.base), 0] },
+  // In rheumatic MS the plane sits at the funnel tip (A.msTip, the open fish-mouth
+  // orifice, ~6 deg off perpendicular to the inflow axis) — where the orifice is
+  // planimetered — instead of at the leaflet bodies, which cut the dome obliquely.
+  PSAX_MV: { probe: () => psaxProbe(-0.6), depth: 15,
+    track: (A) => [0, A.msTip ? A.msTip[1] + 0.64 : 0.95 * (A.lv.base - A0.lv.base), 0] },
   RVIT: { probe: rvInflowProbe, depth: 13, track: rvInflowTrack },
   SC_IVC: { probe: subcostalIvcProbe, depth: 18 },
   SSN: { probe: suprasternalProbe, depth: 16 },
@@ -287,7 +306,7 @@ function teeClear(pr) {
   }
   return pr;
 }
-const ME4C_RETRO = 0.4, ME4C_SWING = 10;           // cm, deg
+const ME4C_RETRO = 0.4, ME4C_SWING = 1, ME4C_UP = 2;    // cm, deg, cm
 function me4cProbe() {
   // The plane that cuts the interatrial septum at right angles through the fossa
   // ovalis and runs down to the apex (both atria, the septum and any ASD / PFO in
@@ -300,15 +319,19 @@ function me4cProbe() {
   // in the posterior (larger) part of the RA and the fossa ovalis.
   const Mp = vadd(M, [0, 0, -ME4C_RETRO]), Tp = vadd(T, [0, 0, -ME4C_RETRO]);
   const n = norm(vcross(vsub(Tp, Mp), vsub(APEX, Mp)));
-  const pos = vsub(ESO, vscale(n, vdot(vsub(ESO, Mp), n)));
+  // (the transducer withdrawn ME4C_UP cm up the oesophagus from the LA-level
+  // reference: the beam then runs further down the LV long axis, so the apex is
+  // not foreshortened against the right edge of the sector)
+  const eso = vadd(ESO, vscale(BODY_AX.S, ME4C_UP));
+  const pos = vsub(eso, vscale(n, vdot(vsub(eso, Mp), n)));
   const crux = vscale(vadd(Mp, Tp), 0.5);
   const tgt = vadd(crux, vscale(vsub(APEX, crux), 0.2));
   let dir = norm(vsub(tgt, pos));
   let right = vcross(n, dir);
   if (vdot(right, vsub(M, T)) < 0) right = vscale(right, -1);   // LV on the right
-  // the beam swung ME4C_SWING toward the RA about the transducer (in plane), so
-  // both atria and the whole IAS lie inside the sector rather than the RA being
-  // cropped against its left edge; the apex stays inside the right edge
+  // the beam swung ME4C_SWING toward the RA about the transducer (in plane): just
+  // enough to keep the RA and the fossa inside the left edge while the LV long axis
+  // stays within ~30 deg of the beam and the whole apex well inside the right edge
   const sw = ME4C_SWING * Math.PI / 180;
   dir = norm(vsub(vscale(dir, Math.cos(sw)), vscale(right, Math.sin(sw))));
   const sd = vdot(vsub(tgt, pos), dir);
@@ -324,37 +347,113 @@ function tgsaxProbe() {
   // transgastric: probe in the fundus below the heart, looking up through the
   // inferior wall; mid-papillary short axis, lateral wall on the right
   // (the transducer rests on the gastric wall; anatomy.js draws that wall in the
-  // first ~0.6 cm, then the diaphragm and the inferior wall)
+  // first ~0.45 cm, then the diaphragm and the inferior wall)
   const G = LM.GASTRIC;
   return probeFrom(vadd(G.p, vscale(G.n, 4.6)), G.n, [1, 0, 0], 4.6);
 }
-function melaaProbe() {
-  // the plane through the LAA neck and the LSPV ostium, so the appendage, the
-  // vein and the warfarin ridge between them lie together in the sector
-  const neck = A0.la.aa[0].b, lspv = A0.pv.veins[0].a;
-  const tgt = vscale(vadd(neck, lspv), 0.5);
-  const dir = norm(vsub(tgt, ESO));
-  let right = vsub(neck, lspv);
-  right = vsub(right, vscale(dir, vdot(right, dir)));
-  return teeClear(probeFrom(tgt, dir, right, vdot(vsub(tgt, ESO), dir)));
+// ME LAA (~60-90 deg, turned left): the appendage along its length as a finger
+// on the screen-right of the LA, the LSPV beside it across the warfarin ridge.
+// The plane holds the oesophagus and the LAA ostium; its roll about that line is
+// the one that lays the most appendage lumen in plane while keeping the LSPV
+// ostium within 0.4 cm of it and the least ventricular myocardium in the sector
+// at end-diastole and end-systole (the LV wall swings into a plane grazing the
+// AV groove as the base descends).
+const A_ES = anatomyParams(1, 0, {}, null, 0.42);
+function laaArea(aa, pos, dir, lat, step = 0.15) {
+  // in-plane lumen of the appendage segments (round cones), sampled on the plane
+  let n = 0;
+  const c = aa[1].a;
+  const s0 = vdot(vsub(c, pos), dir), l0 = vdot(vsub(c, pos), lat);
+  for (let a = -3; a <= 3; a += step) for (let b = -3; b <= 3; b += step) {
+    if (s0 + a < 0.3 || Math.abs(l0 + b) > (s0 + a) * 0.75) continue;   // inside the sector
+    const q = vadd(pos, vadd(vscale(dir, s0 + a), vscale(lat, l0 + b)));
+    for (const g of aa) {
+      const ab = vsub(g.b, g.a), t = Math.max(0, Math.min(1, vdot(vsub(q, g.a), ab) / vdot(ab, ab)));
+      const r = g.r1 + (g.r2 - g.r1) * t;
+      if (Math.hypot(...vsub(q, vadd(g.a, vscale(ab, t)))) < r) { n++; break; }
+    }
+  }
+  return n * step * step;
 }
+function myoArea(A, pos, dir, lat, depth, step = 0.25) {
+  let n = 0;
+  for (let d = 0.5; d <= depth; d += step) for (let x = -d * 0.6; x <= d * 0.6; x += step) {
+    const q = vadd(pos, vadd(vscale(dir, d), vscale(lat, x)));
+    if (epiDist(...q, A) < 0 && lumenDist(...q, A, 'LV') > 0 && lumenDist(...q, A, 'LA') > 0) n++;
+  }
+  return n * step * step;
+}
+let _melaa = null;
+// the appendage rides down with the AV plane in systole: the operator follows it
+// (a slight probe flex), so the plane shifts along its normal with the LAA
+function melaaTrack(A) {
+  const p = melaaProbe(), n = p.normal;
+  const c = vscale(vadd(A.la.aa[0].b, A.pv.veins[0].w), 0.5), c0 = vscale(vadd(A0.la.aa[0].b, A0.pv.veins[0].w), 0.5);
+  return vscale(n, vdot(vsub(c, c0), n));
+}
+function melaaProbe() {
+  if (_melaa) return { ..._melaa, pos: _melaa.pos.slice(), target: _melaa.target.slice() };
+  // plane through the oesophagus that best holds the appendage's axis and the
+  // LSPV's (both leave the lateral wall ~1-1.5 cm apart, the ridge between)
+  const aa = A0.la.aa, v = A0.pv.veins[0], o = aa[0].a, tip = aa[2].b;
+  const vAx = norm(vsub(v.b, v.w));
+  const pts = [[o, 2], [aa[0].b, 2], [aa[1].b, 1], [v.w, 2], [vadd(v.w, vscale(vAx, 1.2)), 1]];
+  let best = null;
+  for (let th = 0; th < Math.PI; th += Math.PI / 90) for (let ph = 0; ph < Math.PI; ph += Math.PI / 90) {
+    const n = [Math.sin(th) * Math.cos(ph), Math.sin(th) * Math.sin(ph), Math.cos(th)];
+    let cost = 0;
+    for (const [q, w] of pts) cost += w * vdot(vsub(q, ESO), n) ** 2;
+    if (!best || cost < best.cost) best = { cost, n };
+  }
+  // fine roll about the oesophagus -> appendage line: least ventricular
+  // myocardium in the sector at end-diastole and end-systole, the LSPV kept in plane
+  const ax = norm(vsub(aa[0].b, ESO));
+  let pick = null;
+  for (let deg = -15; deg <= 15; deg += 3) {
+    const n = vrot(best.n, ax, deg * Math.PI / 180);
+    if (Math.abs(vdot(vsub(v.w, ESO), n)) > 0.4) continue;
+    const tgt = vscale(vadd(aa[1].a, vadd(v.w, vscale(vAx, 1.0))), 0.5);
+    const dir = norm(vsub(vsub(tgt, ESO), vscale(n, vdot(vsub(tgt, ESO), n))));
+    const lat = vcross(n, dir);
+    const myo = Math.max(myoArea(A0, ESO, dir, lat, 10), myoArea(A_ES, ESO, dir, lat, 10));
+    const score = laaArea(aa, ESO, dir, lat) - 0.5 * myo;
+    if (!pick || score > pick.score) pick = { score, n, dir, tgt };
+  }
+  const { n, dir, tgt } = pick || { n: best.n, tgt: vscale(vadd(aa[1].a, vadd(v.w, vscale(vAx, 1.0))), 0.5) };
+  const d = dir || norm(vsub(vsub(tgt, ESO), vscale(n, vdot(vsub(tgt, ESO), n))));
+  let right = vcross(n, d);
+  if (vdot(right, vsub(tip, o)) < 0) right = vscale(right, -1);    // appendage tip on screen-right
+  _melaa = teeClear(probeFrom(tgt, d, right, vdot(vsub(tgt, ESO), d)));
+  return melaaProbe();
+}
+let _me2c = null;
 // ME two-chamber (~60-90 deg): LA near field, LV below, the LAA and anterior
 // wall on the right, the inferior wall and coronary sinus on the left.
 function me2cProbe() {
   const tgt = vscale(vadd(M, APEX), 0.5);
-  const dir = norm(vsub(tgt, ESO));
-  // roll the plane about the beam (from the [0.26, 0, 0.97] reference) until the
-  // LAA ostium lies within 0.5 cm of it: the appendage is then on the right of the
-  // screen, while the CS stays on the left
-  const l0 = norm(vsub([0.26, 0, 0.97], vscale(dir, vdot([0.26, 0, 0.97], dir))));
-  const w = vcross(dir, l0);
-  let right = l0;
-  for (let deg = 0; deg <= 40; deg += 1) {
+  const dir0 = norm(vsub(tgt, ESO));
+  const l0 = norm(vsub([0.26, 0, 0.97], vscale(dir0, vdot([0.26, 0, 0.97], dir0))));
+  const w = vcross(dir0, l0);
+  // roll the plane about the beam (from the [0.26, 0, 0.97] reference) to the
+  // angle that lays the most appendage lumen in plane at the worse of
+  // end-diastole and end-systole: the LAA is then a finger on the right of the
+  // screen, while the CS stays on the left; and swing the beam up to 12 deg
+  // toward the appendage within the plane (the apex then sits a little left of
+  // centre), so the LAA lies inside the sector
+  if (_me2c) return { ..._me2c, pos: _me2c.pos.slice(), target: _me2c.target.slice() };
+  let right = l0, dir = dir0, best = -1;
+  for (let deg = -10; deg <= 50; deg += 2) {
     const th = deg * Math.PI / 180;
-    right = vadd(vscale(l0, Math.cos(th)), vscale(w, Math.sin(th)));
-    if (Math.abs(vdot(vsub(A0.la.aa[0].a, tgt), vcross(dir, right))) < 0.48) break;
+    const r = vadd(vscale(l0, Math.cos(th)), vscale(w, Math.sin(th)));
+    for (let sw = 0; sw <= 12; sw += 2) {
+      const d = norm(vadd(vscale(dir0, Math.cos(sw * Math.PI / 180)), vscale(r, Math.sin(sw * Math.PI / 180))));
+      const lat = norm(vsub(r, vscale(d, vdot(r, d))));
+      const a = Math.min(laaArea(A0.la.aa, ESO, d, lat), laaArea(A_ES.la.aa, ESO, d, lat)) - 0.02 * sw;
+      if (a > best + 1e-6) { best = a; right = lat; dir = d; }
+    }
   }
-  return teeClear(probeFrom(tgt, dir, right, vdot(vsub(tgt, ESO), dir)));
+  _me2c = teeClear(probeFrom(vadd(ESO, vscale(dir, vdot(vsub(tgt, ESO), dir))), dir, right, vdot(vsub(tgt, ESO), dir)));
+  return me2cProbe();
 }
 // ME aortic-valve short axis (~30-45 deg): the three cusps en face, the LA in
 // the near field, the RVOT in the far field; NCC beside the interatrial septum.
@@ -367,24 +466,87 @@ function meAvSaxProbe() {
 // ME bicaval (~90-110 deg): the RA with the SVC entering on the right of the
 // screen and the IVC on the left, the interatrial septum and fossa in profile
 // between the LA (near field) and the RA — the view for PFO / sinus venosus ASD.
+// The transducer stays in the oesophagus: it slides along it (BODY_AX.S) or is
+// backed off behind it, and the omniplane plane is turned and rolled about the
+// beam. Of the planes within BICAVAL_FOSSA cm of the fossa ovalis centre (so the
+// fossa membrane is cut and the septum lies between the LA and the RA), the one
+// holding the most of the first 3 cm of BOTH cavae is kept; the beam is then
+// aimed through the LA at the septum just above the fossa.
+const BICAVAL_SLIDE = [-3, 2.5];                 // search along the oesophagus (cm, + = withdrawn)
+const BICAVAL_BACK = 1.5;                        // ... and behind it (cm)
+const BICAVAL_LAT = 1.0;                         // ... and across it, left/right (cm)
+const BICAVAL_FOSSA = 0.45;                      // fossa centre within this of the plane (cm)
+const BICAVAL_AIM = 1.2;                         // beam aimed this far above the fossa (cm)
+const BICAVAL_HALF = 0.45;                       // (its axis within this share of its radius of the plane)
+const BICAVAL_CAVA = 2.2;                        // each cava's first 3 cm: at least this much in plane (cm)
+const BICAVAL_SEPT_W = 1.0;                      // septal length traded 1:1 for caval length
+let _bicaval = null;
 function meBicavalProbe() {
-  // ~90-110 deg: from the oesophagus behind the LA through the fossa region into
-  // the RA, the plane holding the IVC (screen-left) -> SVC (screen-right) axis,
-  // rolled ~15 deg about the beam so the ascending aorta stays out of the sector.
-  // the plane through the oesophagus and both caval orifices (a point 1.5 cm into
-  // each vessel keeps the tubes in plane), IVC screen-left, SVC screen-right
-  const sv = vadd(A0.svc.a, vscale(norm(vsub(A0.svc.b, A0.svc.a)), 1.5));
-  const iv = vadd(A0.ivc.a, vscale(norm(vsub(A0.ivc.b, A0.ivc.a)), 1.5));
-  // and the fossa ovalis, so the septum lies between the LA (near field) and the RA
-  const fos = LM.IAS.fossaC;
-  const n = norm(vcross(vsub(sv, iv), vsub(fos, iv)));
-  const pos = vsub(ESO, vscale(n, vdot(vsub(ESO, fos), n)));
-  const cav = vscale(vadd(sv, iv), 0.5);
-  const tgt = vadd(vscale(cav, 0.5), vscale(fos, 0.5));
-  const dir = norm(vsub(tgt, pos));
-  let up = vsub(sv, iv);
-  up = norm(vsub(up, vscale(dir, vdot(up, dir))));
-  return teeClear(probeFrom(tgt, dir, up, vdot(vsub(tgt, pos), dir)));
+  if (!_bicaval) {
+    const along = (V, t) => vadd(V.a, vscale(norm(vsub(V.b, V.a)), t));
+    const fos = LM.IAS.fossaC;
+    // in-plane share of a cava's first 3 cm (its axis within ~half a radius of
+    // the plane); 0 when the orifice itself is out of plane
+    const inPl = (V, pos, n) => {
+      let l = 0;
+      for (let t = 0; t <= 3.001; t += 0.1) {
+        if (Math.abs(vdot(vsub(along(V, t), pos), n)) < V.r * BICAVAL_HALF) l += 0.1;
+        else if (t < 0.5) return 0;
+      }
+      return l;
+    };
+    // septum in plane: length of the line where the plane crosses the septal
+    // plane that has LA blood on one side and RA blood on the other
+    const N = LM.IAS_N;
+    const septLen = (pos, n) => {
+      const L = norm(vcross(n, N));
+      let q0 = vsub(fos, vscale(n, vdot(vsub(fos, pos), n)));
+      q0 = vsub(q0, vscale(N, vdot(vsub(q0, LM.IAS_P), N)));
+      let l = 0;
+      for (let t = -4; t <= 4; t += 0.1) {
+        const q = vadd(q0, vscale(L, t));
+        if (lumenDist(...vsub(q, vscale(N, 0.3)), A0, 'LA') < 0 && lumenDist(...vadd(q, vscale(N, 0.3)), A0, 'RA') < 0) l += 0.1;
+      }
+      return l;
+    };
+    const cands = [], fallback = [];
+    for (let s = BICAVAL_SLIDE[0]; s <= BICAVAL_SLIDE[1] + 1e-9; s += 0.25) {
+      for (let b = 0; b <= BICAVAL_BACK + 1e-9; b += 0.25) for (let lt = -BICAVAL_LAT; lt <= BICAVAL_LAT + 1e-9; lt += 0.5) {
+        const pos = vadd(vadd(vadd(ESO, vscale(BODY_AX.S, s)), vscale(BODY_AX.P, b)), vscale(BODY_AX.L, lt));
+        const r0 = norm(vsub(fos, pos));
+        const e2 = vcross(r0, norm(vcross(r0, BODY_AX.S)));
+        for (let ta = -0.15; ta <= 0.151; ta += 0.01) {
+          const ax = norm(vadd(r0, vscale(e2, ta)));          // an in-plane ray near the fossa
+          const a1 = norm(vcross(ax, BODY_AX.S)), a2 = vcross(ax, a1);
+          for (let ph = 0; ph < Math.PI; ph += 0.02) {
+            const n = vadd(vscale(a1, Math.cos(ph)), vscale(a2, Math.sin(ph)));
+            const fo = Math.abs(vdot(vsub(fos, pos), n));
+            if (fo > BICAVAL_FOSSA) continue;
+            const cv = Math.min(inPl(A0.svc, pos, n), inPl(A0.ivc, pos, n));
+            if (cv >= BICAVAL_CAVA) cands.push({ cv, fo, b, pos, n });
+            else if (!fallback.length || cv > fallback[0].cv) fallback[0] = { cv, fo, b, pos, n };
+          }
+        }
+      }
+    }
+    // among those holding enough of both cavae, the longest septum (then the
+    // fossa nearest the plane, the probe nearest the oesophagus)
+    let best = null;
+    if (!cands.length) cands.push(...fallback);
+    for (const c of cands) {
+      c.sc = Math.min(c.cv, 2.5) + BICAVAL_SEPT_W * septLen(c.pos, c.n) - 0.3 * c.fo - 0.05 * c.b;
+      if (!best || c.sc > best.sc) best = c;
+    }
+    const { pos, n } = best;
+    const onPlane = (q) => vsub(q, vscale(n, vdot(vsub(q, pos), n)));
+    const up = norm(vsub(onPlane(A0.svc.a), onPlane(A0.ivc.a)));
+    const tgt = vadd(onPlane(fos), vscale(up, BICAVAL_AIM));
+    const dir = norm(vsub(tgt, pos));
+    let right = vcross(n, dir);
+    if (vdot(right, up) < 0) right = vscale(right, -1);                     // SVC screen-right
+    _bicaval = teeClear(probeFrom(tgt, dir, right, vdot(vsub(tgt, pos), dir)));
+  }
+  return { ..._bicaval, pos: _bicaval.pos.slice(), target: _bicaval.target.slice() };
 }
 // ME RV inflow-outflow (~60-75 deg): RA and tricuspid on the left, the RV
 // wrapping round the aortic valve to the RVOT and pulmonary valve on the right.
@@ -430,7 +592,7 @@ export const TEE_VIEWS = {
   TGSAX: { probe: tgsaxProbe, depth: 12 },
   // Mid-oesophageal left-atrial-appendage view: the plane CONTAINS the appendage's
   // long axis, so the narrow ostium, neck and hooked lobes lie in-plane.
-  MELAA: { probe: melaaProbe, depth: 10 },
+  MELAA: { probe: melaaProbe, depth: 10, track: melaaTrack },
 };
 
 export const ALL_VIEWS = { ...TTE_VIEWS, ...EXTRA_VIEWS, ...TEE_VIEWS };

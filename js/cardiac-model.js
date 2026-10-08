@@ -220,26 +220,50 @@ export function rvPhase(phase) {
 }
 
 // Valve opening 0..1, driven by the modelled transvalvular FLOW so the leaflets
-// open exactly when blood starts to cross and shut when it stops (the valve
-// events — AVO, AVC, MVO, MVC — and the isovolumic periods all come from the
-// circulation). An AV valve swings wide on the E wave, drifts half-shut in
-// diastasis and reopens on the A wave; a semilunar valve opens fully in early
-// ejection and floats toward closure as flow decelerates. The right-heart valves
-// are passed the right heart's own snapshot (rvPhase), so they open and close
-// on its clock.
-function valveOpening(name, hd, path) {
-  const s = hd.sum;
-  let o;
-  if (VALVES[name].opensInDiastole) {
-    const q = hd.Qmv;
-    o = q > 1 ? 0.3 + 0.7 * clamp(q / (0.55 * s.QmvMax), 0, 1) : 0.02;
-  } else {
-    const q = hd.Qao;
-    o = q > 1 ? 0.35 + 0.65 * clamp(q / (0.35 * s.QaoMax), 0, 1) : 0.02;
-  }
+// open when blood starts to cross and shut as it stops (the valve events — AVO,
+// AVC, MVO, MVC — and the isovolumic periods all come from the circulation). An
+// AV valve swings wide on the E wave, drifts toward closure in diastasis and
+// reopens on the A wave; a semilunar valve opens fully in early ejection and
+// floats toward closure as flow decelerates. The motion is continuous, never a
+// one-frame step: a smooth map of the flow read slightly ahead (the leaflets
+// answer the pressure gradient, which leads the inertial flow — further on the
+// way down, so they are all but shut as forward flow ends), then a first-order
+// lag. Closure takes ~20-40 ms, and the leaflets cross 10 % open within a few
+// ms of the flow-defined events (AVO, AVC, MVO, MVC). Pre-computed once
+// per circulation as a periodic trace indexed by phase; the right-heart valves
+// read it on the right heart's own clock (rvPhase).
+const OPEN_N = 960, OPEN_CYCLE = 0.833;                   // samples per cycle; reference cycle (s)
+const OPEN_TAU_OPEN = 0.008, OPEN_TAU_CLOSE = 0.008, OPEN_LEAD_O = 0.007, OPEN_LEAD = 0.011;   // s
+const OPEN_Q_AV = 0.3, OPEN_Q_SL = 0.12;                  // flow (x peak) for a fully open valve
+const _openCache = new WeakMap();
+function openTrace(path) {
+  const sum = hemoSummary(path);
+  let tr = _openCache.get(sum);
+  if (tr) return tr;
+  const qmv = new Float32Array(OPEN_N), qao = new Float32Array(OPEN_N);
+  for (let i = 0; i < OPEN_N; i++) { const h = hemodynamics(i / OPEN_N, path); qmv[i] = h.Qmv; qao[i] = h.Qao; }
+  const L = Math.round(OPEN_LEAD / OPEN_CYCLE * OPEN_N), Lo = Math.round(OPEN_LEAD_O / OPEN_CYCLE * OPEN_N), dt = OPEN_CYCLE / OPEN_N;
+  const build = (q, qFull) => {
+    const tgt = new Float32Array(OPEN_N), out = new Float32Array(OPEN_N);
+    for (let i = 0; i < OPEN_N; i++) tgt[i] = 0.02 + 0.98 * smoothstep(0, qFull, Math.min(q[(i + Lo) % OPEN_N], q[(i + L) % OPEN_N]));
+    let o = tgt[OPEN_N - 1];
+    for (let pass = 0; pass < 2; pass++) for (let i = 0; i < OPEN_N; i++) {   // (2nd pass: periodic steady state)
+      o += (tgt[i] - o) * (1 - Math.exp(-dt / (tgt[i] > o ? OPEN_TAU_OPEN : OPEN_TAU_CLOSE)));
+      out[i] = o;
+    }
+    return out;
+  };
+  tr = { av: build(qmv, OPEN_Q_AV * sum.QmvMax), sl: build(qao, OPEN_Q_SL * sum.QaoMax) };
+  _openCache.set(sum, tr);
+  return tr;
+}
+function valveOpening(name, phase, tr, path) {
+  const arr = VALVES[name].opensInDiastole ? tr.av : tr.sl;
+  const x = (((phase % 1) + 1) % 1) * OPEN_N, i0 = Math.floor(x) % OPEN_N, f = x - Math.floor(x);
+  let o = arr[i0] + (arr[(i0 + 1) % OPEN_N] - arr[i0]) * f;
   // pathology tweaks
   if (path) {
-    if (name === 'aortic' && path.aorticStenosis) o *= 0.28;   // restricted opening
+    if (name === 'aortic' && path.aorticStenosis) o *= AS_OPEN;   // restricted opening
     if (name === 'mitral' && path.mitralStenosis) o *= 0.35;
   }
   return clamp(o, 0, 1);
@@ -320,6 +344,7 @@ export function geometryAt(phase, path = {}) {
   // still times the wall-thickening. The right heart reads the same trace on its
   // own clock (rvPhase); copied out first, as hemodynamics() returns a singleton.
   const phaseRV = rvPhase(phase);
+  const otr = openTrace(path);        // (first: it samples the hemodynamics() singleton)
   const hdR = hemodynamics(phaseRV, path);
   const rvHd = { Qmv: hdR.Qmv, Qao: hdR.Qao, kv: hdR.kv, sum: hdR.sum };
   const kvR = rvHd.kv, kR = clamp(kvR, 0, 1);
@@ -377,11 +402,19 @@ export function geometryAt(phase, path = {}) {
   const laR = [A.la.r1, A.la.rl, A.la.r2];
   const raR = [A.ra.r1, A.ra.rl, A.ra.r2];
   const valves = {
-    mitral: valveOpening('mitral', hd, path),
-    tricuspid: valveOpening('tricuspid', rvHd, path),
-    aortic: valveOpening('aortic', hd, path),
-    pulmonic: valveOpening('pulmonic', rvHd, path),
+    mitral: valveOpening('mitral', phase, otr, path),
+    tricuspid: valveOpening('tricuspid', phaseRV, otr, path),
+    aortic: valveOpening('aortic', phase, otr, path),
+    pulmonic: valveOpening('pulmonic', phaseRV, otr, path),
   };
+
+  // rheumatic MS: the centre of the open funnel tip (the fish-mouth orifice), where
+  // PSAX-MV planimetry is done — the view tracks it (views.js)
+  if (path.mitralStenosis) {
+    const Gt = { A, valves: { mitral: 0.35 }, path };
+    const ta = avTipWorld('mitral', Gt, 1, 0), tp = avTipWorld('mitral', Gt, -1, 0);
+    A.msTip = [(ta[0] + tp[0]) / 2, (ta[1] + tp[1]) / 2, (ta[2] + tp[2]) / 2];
+  }
 
   return {
     phase, k, kick, kv, phaseRV, kRV: kR,
@@ -694,7 +727,9 @@ function avLeafletPoly(P, sgn, q, o, sc, mod) {
   const uP = -Rap * half;
   const w = uA - uP;
   const ah = -P.saddle * (1 - 2 * q2);                      // saddle: atrial at A/P, low at the commissures
-  const uc = uP + P.coapt * w;
+  // rheumatic MS: both thickened leaflets dome, so the fused orifice sits anterior
+  // to the normal (posterior) coaptation line — central in the LV short axis
+  const uc = uP + (mod && mod.ms ? 0.75 : P.coapt) * w;
   // functional (tethered) regurgitation: the papillary muscles pull the
   // coaptation point further into the ventricle (DCM mitral tenting)
   const tent = P.tent + (mod && mod.tent ? mod.tent : 0);
@@ -704,7 +739,7 @@ function avLeafletPoly(P, sgn, q, o, sc, mod) {
   const Lb = Math.sqrt(reach * reach + tent * tent);
   const ovl = P.ovl * half + 0.08;
   let oo = o;
-  if (mod && mod.ms && q2 > 0.2) oo *= 0.12;                // rheumatic commissural fusion
+  if (mod && mod.ms && q2 > mod.msQ2) oo *= 0.12;           // rheumatic commissural fusion
   const ac0 = Math.atan2(tent, reach);                      // shut body angle (tenting)
   const ao = sgn > 0 ? P.openA : P.openP;                   // fully-open body angle
   let alpha = ac0 + (ao - ac0) * oo;
@@ -727,20 +762,25 @@ function avLeafletPoly(P, sgn, q, o, sc, mod) {
   _lp.ut = _lp.ub - sgn * ovl * Math.cos(beta); _lp.at = _lp.ab + ovl * Math.sin(beta);
   if (mod && mod.ms) {
     // planimetry-true orifice: the fused tips sit on an ellipse of AP width msGap
-    // (commissures fused beyond |q| ≈ 0.45), opening with the transmitral flow
+    // (commissures fused beyond |q| ≈ 0.62), opening with the transmitral flow —
+    // the central, medio-laterally elongated "fish-mouth" of the short axis
     const on = o / 0.35 > 1 ? 1 : o / 0.35;
-    const e = 1 - q2 / 0.2;
-    const hg = e > 0 ? 0.5 * mod.msGap * sc * Math.sqrt(e) * on : 0;
-    // rheumatic doming ("hockey stick"): the fused tip sits at the orifice edge,
-    // well into the LV, and the body bellies convexly toward the LV between hinge
-    // and tip instead of running straight (leaflets never cross the orifice)
-    const Lt = Lb + ovl;
-    _lp.ut = uc + sgn * hg;
-    const reachT = Math.abs(_lp.ut - uh);
-    _lp.at = ah + Math.sqrt(Math.max(0.3, Lt * Lt * 0.8 - reachT * reachT)) * (0.35 + 0.65 * on);
-    const bulge = (sgn > 0 ? 0.32 : 0.18) * on;               // anterior leaflet domes most
-    _lp.ub = uh + (_lp.ut - uh) * 0.5 - sgn * bulge * 0.4;
-    _lp.ab = ah + (_lp.at - ah) * 0.62 + bulge;
+    const e = 1 - q2 / mod.msQ2;
+    // (the gap is solved at the live annular size: the orifice area stays the MVA
+    // while the annulus breathes with the LV)
+    const hg = e > 0 ? 0.5 * msGapAt(mod.msA, sc) * Math.sqrt(e) * on : 0;
+    // The fused tips form one PLANAR ring across both leaflets and the fused
+    // commissures (the funnel tip, perpendicular to the inflow axis), so a short
+    // axis cut at the tips shows a closed fish-mouth rather than a broken C.
+    // (sheared along c so the slit runs closer to medial-lateral in the short axis)
+    _lp.ut = uc + sgn * hg + MS_SHEAR * q * P.Ric * sc;
+    _lp.at = MS_DEPTH * sc * (0.35 + 0.65 * on);
+    // Doming: the body runs down toward the LV bowing outward (the anterior
+    // leaflet toward the LVOT/septum) and the restricted tip hooks back in to the
+    // orifice — the "hockey stick" of the long-axis views
+    const bulge = (sgn > 0 ? 0.4 : 0.2) * on;                 // both leaflets dome (anterior most)
+    _lp.ub = uh + (_lp.ut - uh) * 0.4 + sgn * bulge * 0.1;
+    _lp.ab = ah + (_lp.at - ah) * 0.6 + bulge * 0.5;
   }
   if (mod && mod.gap && o < 0.5) {
     // malcoaptation: with a dilated annulus the leaflets no longer meet — the
@@ -782,7 +822,7 @@ function avLeafletHit(P, u, a, c, o, sc, mod, thickMul) {
     if (f > edgeCut) continue;
     const th0 = (sgn > 0 ? P.thickA : P.thickP) * thickMul;
     // thin membrane tapering to the free edge; rheumatic tips are bulbous
-    const th = mod && mod.ms ? th0 * (1.1 + 0.9 * f) : th0 * (1.05 - 0.4 * f);
+    const th = mod && mod.ms ? th0 * (1.05 + MS_TIP_BULB * f) : th0 * (1.05 - 0.4 * f);
     if ((d1 < d2 ? d1 : d2) <= th) return f;
   }
   return -1;
@@ -792,14 +832,30 @@ function avLeafletHit(P, u, a, c, o, sc, mod, thickMul) {
 const PROLAPSE = { mild: 0, moderate: 0.55, severe: 1 };
 // tricuspid malcoaptation gap (cm) in TR, by grade
 const TV_MOD = { mild: { gap: 0.1 }, moderate: { gap: 0.25 }, severe: { gap: 0.45 } };
+// rheumatic MS: open commissural span (|q| < MS_Q), tip bulb growth along the
+// leaflet and the resulting mean tip half-thickness (cm, thickMul 1.9 applied)
+const MS_Q = 0.62, MS_TIP_BULB = 0.9, MS_DEPTH = 1.4;   // MS_DEPTH: open tip ring below the annulus centre
+const MS_SHEAR = 0.4;                                    // tip-ring shear along the commissural axis
+const MS_TIP_T = 0.5 * (AVL.mitral.thickA + AVL.mitral.thickP) * 1.9 * (1.05 + MS_TIP_BULB);
+// AP tip gap (cm) at annular scale sc for an orifice of area msA. The cut at the
+// funnel tip grazes the bulbous tips, so the AP lumen is the tip-centreline gap,
+// while the bulbs, seen end-on at the commissural corners, shorten the slit by
+// ~one tip half-thickness at each end (calibrated against the planimetered
+// area in the tracked PSAX-MV plane, tools/verify-anatomy.mjs).
+function msGapAt(msA, sc) {
+  const halfL = MS_Q * AVL.mitral.Ric * sc - 0.7 * MS_TIP_T;
+  return 2 * msA / (Math.PI * halfL);
+}
 const _modCache = new WeakMap();
 function avMod(path) {
   let m = _modCache.get(path);
   if (!m) {
-    // MS orifice: fused commissures leave an ellipse ~1.45 cm wide (|q| < 0.45);
-    // its AP opening is set so the planimetered area matches the grade's MVA.
+    // MS orifice: fused commissures leave a fish-mouth ~2 cm wide (|q| < 0.62).
+    // Its AP opening (msGapAt) is set so the orifice INSIDE the thickened tips (the
+    // blood area a sonographer planimeters) matches the grade's MVA.
     const msA = MS_AREA[gradeOf(path)] || MS_AREA.severe;
-    m = { ms: !!path.mitralStenosis, msGap: 4 * msA / (Math.PI * 1.45), prolapse: path.mr ? PROLAPSE[gradeOf(path)] : 0,
+    m = { ms: !!path.mitralStenosis, msQ2: MS_Q * MS_Q, msA,
+      prolapse: path.mr ? PROLAPSE[gradeOf(path)] : 0,
       tent: path.dilated && !path.mr ? 0.55 : 0 };
     _modCache.set(path, m);
   }
@@ -822,6 +878,13 @@ function avTipWorld(name, G, sgn, q) {
   return t;
 }
 
+// Semilunar cusp shape (valveTissue): shut-cusp coaptation point downstream of
+// the hinge line (cm), belly sag toward the ventricle (cm), height of the
+// coaptation zone above the coaptation point at the centre (cm), samples of the
+// blended (opening / closing) profile.
+const SL_COAPT = 0.28, SL_SAG = 0.13, SL_COAPT_H = 0.55, SL_N = 16;
+const AS_OPEN = 0.28;                                     // AS: restricted opening (valveOpening)
+const _slA = new Float64Array(SL_N + 1), _slR = new Float64Array(SL_N + 1);
 function valveTissue(px, py, pz, G, path) {
   // apex-anchored contraction descends the AV valve planes with the annulus: a
   // valve at end-diastolic height y maps to apexY + (y−apexY)·lsy (same material
@@ -872,8 +935,8 @@ function valveTissue(px, py, pz, G, path) {
         }
       }
     }
-    if (a < -0.05 || a > cd) continue;                    // only the leaflet span, hinge→edge
-    const t = a <= 0 ? 0 : a / cd;                        // 0 at hinge, 1 at free edge
+    if (a < -0.25 || a > cd + 0.05) continue;             // the cusp span (+ the shut cusp's sag)
+    let t = a <= 0 ? 0 : a / cd;                          // 0 at hinge, 1 at free edge
     // Free-edge orifice radius. AV valves iris symmetrically; the semilunar valves
     // are TRILOBED — three cusps whose orifice bulges toward the commissures and
     // pinches at the cusp centres (the triangular systolic aortic orifice).
@@ -886,15 +949,62 @@ function valveTissue(px, py, pz, G, path) {
       cptr = 0.5 * (Math.cos(k) + 1);                     // 1 at commissures, 0 at cusp centres
       edgeR = open * v.r * (0.58 + 0.42 * cptr);          // triangular orifice
     }
-    // Curved cusp: an S-profile (smoothstep) so it leaves the annulus nearly
-    // parallel to the outflow axis, bellies, then curves in to the free edge —
-    // a real doming/tenting curtain, not a straight cone.
-    // A closing semilunar cusp is a hammock: it hugs the sinus wall and turns
-    // in to the centre only near its free edge, so a short-axis cut above the
-    // coaptation line shows the sinus wall, not a concentric ring of cusp.
-    let s = t * t * (3 - 2 * t);
-    if (isCusp) s += (t * t * t - s) * (1 - open);
-    const shellR = v.r + (edgeR - v.r) * s;               // curved radius at this depth
+    // Cusp profile in the (axial a, radius) half-plane, hinge -> free edge.
+    //  OPEN: a curtain along the sinus — an S-profile (smoothstep) that leaves the
+    //    annulus nearly parallel to the outflow axis, bellies, then curves in to
+    //    the free edge. Calcific AS: a straight, rigid cusp of its shut length
+    //    swung about the hinge (thick, bright, barely mobile — not a dome).
+    //  SHUT (semilunar): each cusp runs from its hinge inward to a central
+    //    coaptation just downstream of the hinge line, its belly sagging toward
+    //    the ventricle under the diastolic back-pressure (convex toward the
+    //    outflow tract, the sinus pocket on the arterial side); the free edges
+    //    then meet along the commissural lines (seams below).
+    // In between, the two curves blend (sampled, nearest point).
+    const asv = name === 'aortic' && !!path.aorticStenosis;
+    let dist;
+    if (!isCusp) {
+      if (a < -0.05 || a > cd) continue;                  // only the leaflet span, hinge→edge
+      const sc = t * t * (3 - 2 * t);
+      dist = Math.abs(rad - (v.r + (edgeR - v.r) * sc));
+    } else {
+      const oN = asv ? open / AS_OPEN : open;              // opening relative to this valve's full excursion
+      const bl = smoothstep(0.02, 0.45, oN);               // 0 shut .. 1 open shape
+      const rho = rad / v.r;
+      if (bl === 0 && rho <= 1) {
+        // shut: the cusp height is a function of radius (shallow: vertical distance)
+        const tb = 1 - rho;
+        const ac = SL_COAPT * tb - SL_SAG * Math.sin(Math.PI * tb);
+        const sl = (SL_COAPT - SL_SAG * Math.PI * Math.cos(Math.PI * tb)) / v.r;
+        dist = Math.abs(a - ac) / Math.sqrt(1 + sl * sl);
+        t = tb;
+      } else {
+        const eR = edgeR / v.r;
+        // AS: rigid cusp of the shut length, tilted about the hinge to its orifice
+        const aAS = Math.sqrt(Math.max(0, v.r * v.r + SL_COAPT * SL_COAPT - (v.r * (1 - eR)) ** 2));
+        let best = 1e9, bi = 0;
+        for (let i = 0; i <= SL_N; i++) {
+          const ti = i / SL_N;
+          const so = asv ? ti : ti * ti * (3 - 2 * ti);
+          const ao = (asv ? aAS : cd) * ti, ro = (1 + (eR - 1) * so) * v.r;
+          const ac = SL_COAPT * ti - SL_SAG * Math.sin(Math.PI * ti), rc = (1 - ti) * v.r;
+          const ai = ac + (ao - ac) * bl, ri = rc + (ro - rc) * bl;
+          _slA[i] = ai; _slR[i] = ri;
+          const d2 = (a - ai) * (a - ai) + (rad - ri) * (rad - ri);
+          if (d2 < best) { best = d2; bi = i; }
+        }
+        // refine on the two segments either side of the nearest sample
+        t = bi / SL_N;
+        for (let j = Math.max(0, bi - 1); j < Math.min(SL_N, bi + 1); j++) {
+          const ea = _slA[j + 1] - _slA[j], er = _slR[j + 1] - _slR[j];
+          const l2 = ea * ea + er * er || 1e-12;
+          const u = clamp(((a - _slA[j]) * ea + (rad - _slR[j]) * er) / l2, 0, 1);
+          const qa = _slA[j] + ea * u - a, qr = _slR[j] + er * u - rad;
+          const d2 = qa * qa + qr * qr;
+          if (d2 < best) { best = d2; t = (j + u) / SL_N; }
+        }
+        dist = Math.sqrt(best);
+      }
+    }
     // Thin membrane tapering to a fine free edge (thickest at the annular base).
     let th = thick * (0.45 + 0.55 * (1 - t) * (1 - t));
     // Nodulus of Arantius: a fibrous thickening at the CENTRE of each semilunar
@@ -905,17 +1015,25 @@ function valveTissue(px, py, pz, G, path) {
     th += nod;
     // calcific AS: thick (3-5 mm), nodular cusps — calcium masses concentrated at the
     // cusp bodies and bases rather than a thin bright membrane
-    if (name === 'aortic' && path.aorticStenosis) {
+    if (asv) {
       const lump = 0.5 + 0.5 * Math.sin(rx * 7.1 + ry * 5.3 + rz * 6.7);
       th = th * 2.6 + 0.06 + 0.06 * lump * (1 - t * 0.5);
     }
-    let hit = Math.abs(rad - shellR) <= th;
-    // Semilunar commissural coaptation seams: three radial lines meeting centrally
-    // as the cusps shut — the short-axis "Mercedes" Y, and the closure line in LAX.
-    if (!hit && isCusp) {
-      const closed = 1 - open;
+    let hit = dist <= th;
+    // Coaptation zone of the shut semilunar valve: neighbouring cusps' free
+    // edges press together along the three commissural lines, from the cusp
+    // surface up to the free margin, which rises from the central nodules toward
+    // the commissures at the sinus wall — the short-axis "Mercedes" Y, and the
+    // thin central closure line in long axis.
+    if (!hit && isCusp && open < 0.25 * (asv ? AS_OPEN : 1)) {
       const angDist = Math.abs(kh) / 3;                   // angular distance to a commissure
-      if (closed > 0.25 && a > 0.6 * cd && rad < v.r * 0.9 && angDist * rad < 0.07) hit = true;
+      const rho = rad / v.r;
+      if (rho < 0.92 && angDist * rad < 0.07 * (asv ? 1.8 : 1)) {
+        const tb = 1 - rho;
+        const base = SL_COAPT * tb - SL_SAG * Math.sin(Math.PI * tb);
+        const top = SL_COAPT + SL_COAPT_H + rho * (cd - SL_COAPT - SL_COAPT_H);
+        if (a >= base && a <= top) { hit = true; t = 1; }
+      }
     }
     if (!hit) continue;
     let echo = 0.8 + 0.05 * (1 - t) + (nod > 0.03 ? 0.04 : 0); // nodule reads a touch brighter
