@@ -22,7 +22,7 @@
 import { geometryAt, classify, TISSUE, hemoSummary, membSite, MEMB_T, VSD_RADIUS, shuntLabel, stenosisCw, FLOW } from '../js/cardiac-model.js';
 import { LM, REF, lumenDist, mitralLift, BODY_AX, diaphragmBelow, rwmaBlend, stomachDist } from '../js/anatomy.js';
 import { MS_AREA } from '../js/hemodynamics.js';
-import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS } from '../js/views.js';
+import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, ALL_VIEWS as ALL_V } from '../js/views.js';
 import { renderBmode, beamSample, speckleAxis } from './bmode.mjs';
 
 const VERBOSE = process.argv.includes('--verbose');
@@ -632,10 +632,7 @@ SECTION = 'Normal';
   const ridge = mul(add(A0.pv.ridge.a, A0.pv.ridge.b), 0.5);
   check('TEE', 'MELAA: warfarin ridge centre distance from the plane', Math.abs(dot(sub(ridge, la.pos), la.normal)), [0, 0.4]);
   check('TEE', 'MELAA: LSPV ostium distance from the plane', Math.abs(dot(sub(A0.pv.veins[0].a, la.pos), la.normal)), [0, 0.4]);
-  const c2 = TEE_VIEWS.ME2C.probe();
-  for (const [ph, G] of [['ED', GED], ['ES', GES]]) {
-    check('TEE', `ME2C: LAA ostium distance from the plane (${ph})`, Math.abs(dot(sub(G.A.la.aa[0].a, c2.pos), c2.normal)), [0, 0.5]);
-  }
+  // (ME2C: the appendage lumen in plane is checked with the PV / LAA rows below)
   const tg = TEE_VIEWS.TGSAX.probe();
   let liver = 1e9, wall = 0, n = 0;
   for (let th = -0.6; th <= 0.601; th += 0.1) {
@@ -1190,6 +1187,96 @@ function inCapsule(q, v, from = 0) {           // inside a caval tube, beyond `f
 }
 const worstOf = (xs) => xs.reduce((m, v) => (v.val > m.val ? v : m), { val: -1e9 });
 
+// ---- pulmonary veins, left atrial appendage, LA phasic shape ----------------
+// The four veins enter at the four corners of the posterior LA (left and right
+// ostia > 3 cm apart, superior and inferior > 1.2 cm apart across a carina); the
+// appendage is a full-size finger on the anterolateral wall ~1-2 cm in front of
+// the LSPV. In the imaging planes every vein lumen is joined to the LA (no
+// detached round 'cysts'), no vein runs down a beam as a long stalk, and the
+// TEE appendage views lay the appendage along its length.
+SECTION = 'Normal';
+const LA_MAXP = 0.51;                                   // LA maximum (mitral opening)
+const GLM = geometryAt(LA_MAXP, {});
+{
+  const ost = (A, i) => A.pv.veins[i].w || A.pv.veins[i].a;
+  for (const [G, tag, lr] of [[GES, 'ES', 3.0], [GED, 'ED', 2.2]]) {
+    const A = G.A;
+    check('LA', `PV ostia left-right, superior / inferior pair (${tag})`, Math.min(Math.hypot(...sub(ost(A, 0), ost(A, 2))), Math.hypot(...sub(ost(A, 1), ost(A, 3)))), [lr, 6]);
+    check('LA', `PV ostia superior-inferior, left / right side (${tag})`, Math.min(Math.hypot(...sub(ost(A, 0), ost(A, 1))), Math.hypot(...sub(ost(A, 2), ost(A, 3)))), [1.2, 3]);
+    const aa = A.la.aa;
+    check('LA', `LAA ostium to LSPV ostium (${tag})`, Math.hypot(...sub(aa[0].w || aa[0].a, ost(A, 0))), [1.0, 2.0]);
+  }
+  const aa = GED.A.la.aa;
+  check('LA', 'LAA ostium diameter', 2 * aa[0].r1, [1.5, 2.5]);
+  check('LA', 'LAA depth (ostium to tip along the lobes)', aa.reduce((s, g) => s + Math.hypot(...sub(g.b, g.a)), 0), [2.5, 4.5]);
+}
+// classify an in-sector LA cell as vein / appendage (outside the chamber body)
+const laPart = (A, q) => {
+  if (lumenDist(q[0], q[1], q[2], A, 'LA_BODY') <= 0) return 'body';
+  const v = lumenDist(q[0], q[1], q[2], A, 'PV'), a = lumenDist(q[0], q[1], q[2], A, 'LAA');
+  return v < a ? 'pv' : 'laa';
+};
+{
+  // detached vein lumen: LA-class components in the plane that hold vein cells
+  // but no chamber-body cell
+  let worst = { val: 0, tag: '' };
+  for (const vn of ['PSAX_AV', 'A4C', 'A2C']) for (const [G, ph] of [[GED, 'ED'], [GES, 'ES']]) {
+    const S = planeSample(ALL_V[vn], G, {}, 0.1);
+    const { comps } = components(S, (l) => l === TISSUE.LA);
+    for (const c of comps) {
+      let body = 0, pv = 0;
+      for (const k of c) { const p = laPart(G.A, ptK(S, k)); if (p === 'body') body++; else if (p === 'pv') pv++; }
+      if (!body && pv * 0.01 > worst.val) worst = { val: pv * 0.01, tag: `${vn} ${ph}` };
+    }
+  }
+  check('LA', 'detached pulmonary-vein lumen in plane (PSAX-AV, A4C, A2C; ED/ES)', worst.val, [0, 0.05], 'cm2', worst.tag && `worst: ${worst.tag}`);
+  // longest vein run down one beam (apical views): a vein lying along the beam
+  // reads as a dark stalk off the LA roof
+  let run2 = { val: 0, tag: '' };
+  for (const vn of ['A4C', 'A2C', 'A3C']) for (const [G, ph] of [[GED, 'ED'], [GES, 'ES']]) {
+    const V = ALL_V[vn]; let p = V.probe(); if (V.track) p = { ...p, pos: add(p.pos, V.track(G.A)) };
+    for (let th = -0.6; th <= 0.6; th += 0.02) {
+      const bd = add(mul(p.dir, Math.cos(th)), mul(p.lat, Math.sin(th)));
+      let r = 0, best = 0;
+      for (let t = 6; t < V.depth; t += 0.05) {
+        const q = add(p.pos, mul(bd, t));
+        const isPv = classify(q[0], q[1], q[2], G, {}).tissue === TISSUE.LA && laPart(G.A, q) === 'pv';
+        r = isPv ? r + 0.05 : 0; if (r > best) best = r;
+      }
+      if (best > run2.val) run2 = { val: best, tag: `${vn} ${ph}` };
+    }
+  }
+  check('LA', 'longest pulmonary-vein run along one beam (A4C/A2C/A3C; ED/ES)', run2.val, [0, 2.0], 'cm', `worst: ${run2.tag}`);
+}
+{
+  // LA phasic shape: from maximum to minimum the A4C major axis shortens mostly
+  // by annular descent and the minor axis less, so the LA stays an oval taller
+  // than wide at its minimum (end-diastole)
+  const a4ED = atrialDims(GED, 'LA'), a4M = atrialDims(GLM, 'LA');
+  check('LA', 'A4C LA major, minimum / maximum (ED / LA max)', a4ED.major / a4M.major, [0.70, 0.85], '');
+  check('LA', 'A4C LA minor, minimum / maximum (ED / LA max)', a4ED.minor / a4M.minor, [0.78, 0.92], '');
+  check('LA', 'A4C LA height / width at ED', a4ED.major / a4ED.minor, [1.0, 1.6], '');
+}
+SECTION = 'TEE';
+{
+  // the appendage along its length in ME LAA and ME2C, and no ventricular wall
+  // slab across the ME LAA sector as the base descends
+  for (const vn of ['MELAA', 'ME2C']) for (const [G, ph] of [[GED, 'ED'], [GES, 'ES']]) {
+    const S = planeSample(TEE_VIEWS[vn], G, {}, 0.1);
+    const cells = cellsWhere(S, (l, k) => l === TISSUE.LA && laPart(G.A, ptK(S, k)) === 'laa');
+    const H = hull(cells.map((k) => xd(S, k)));
+    let L = 0; for (const a of H) for (const b of H) L = Math.max(L, Math.hypot(a[0] - b[0], a[1] - b[1]));
+    check('TEE', `${vn}: LAA lumen area in plane (${ph})`, areaOf(S, cells), [1.5, 20], 'cm2');
+    // (ME2C is a fixed plane through the LV: the appendage swings ~1 cm through
+    // it with the LA wall, so less of its length lies in plane at end-systole)
+    check('TEE', `${vn}: LAA length in plane (${ph})`, L, [vn === 'ME2C' && ph === 'ES' ? 2.0 : 2.5, 6]);
+    if (vn === 'MELAA') {
+      const myo = cellsWhere(S, (l, k) => { if (l !== TISSUE.MYO) return false; const q = ptK(S, k); return lumenDist(q[0], q[1], q[2], G.A, 'LV_EPI') < 0; });
+      check('TEE', `MELAA: LV myocardium in the sector (${ph})`, areaOf(S, myo), [0, 2], 'cm2');
+    }
+  }
+}
+
 // ---- caval system: SVC -> RA -> IVC is one continuous lumen -----------------
 // (the regression that walled the SVC off from the RA slipped through the
 // single-phase normal-heart checks: sweep every pathology at ED and ES)
@@ -1375,9 +1462,9 @@ for (const [vn, view] of [['A4C', TTE_VIEWS.A4C], ['A2C', TTE_VIEWS.A2C], ['A3C'
   // and A3C: its in-plane area still swings 26-35 % (A2C, where F01 was, is steady)
   KNOWN = vn !== 'A2C';
   check('LA', `${vn}: pericardium area in plane, max/min over 5 phases (normal)`, Math.max(...area) / Math.min(...area), [1, 1.2], '');
-  // KNOWN-FAIL: at some phases the LA blood pool abuts the pericardial line with
-  // no atrial wall between them (A4C/A2C at ED, A3C in late diastole)
-  KNOWN = true;
+  // the atrial wall covers the mitral inflow funnel too, so the LA blood pool
+  // never abuts the pericardial line at the annulus (it did at ED in A4C/A2C)
+  KNOWN = false;
   check('LA', `${vn}: pericardium touching LA blood (normal, eff; 5 phases)`, wt.val, [0, 0.1], 'cm', `worst: ${wt.tag}`);
   KNOWN = false;
 }

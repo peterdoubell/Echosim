@@ -63,19 +63,22 @@ const maxInteriorStep = Math.max(...rows.map((_, i) => (i === N - 1 ? 0 : step(i
 
 // atrial function: volumes at the three landmarks
 // Emptying fractions are measured on the DRAWN chamber (voxel volume of the LA
-// lumen SDF, which includes the septal anchoring and vein mouths), not on the
-// analytic ellipsoid — what a trainee planimeters is what must be physiologic.
-const voxelLA = (p) => {
+// lumen SDF, which includes the septal anchoring and the mitral inflow), not on
+// the analytic ellipsoid — what a trainee planimeters is what must be
+// physiologic. As in the ASE LA volume, the appendage and the pulmonary veins
+// are excluded ('LA_BODY'); the whole lumen with them is reported alongside.
+const voxelLA = (p, which = 'LA_BODY') => {
   const A = geometryAt(p, {}).A, h = 0.2;
   let n = 0;
   for (let x = -7; x < 5; x += h) for (let y = -3; y < 7; y += h) for (let z = -6; z < 4; z += h)
-    if (lumenDist(x, y, z, A, 'LA') < 0) n++;
+    if (lumenDist(x, y, z, A, which) < 0) n++;
   return n * h * h * h;
 };
 const vMax = voxelLA(laMaxP), vMin = voxelLA(laMinP), vPreA = voxelLA(0.84);
 const totalEF = (vMax - vMin) / vMax;
 const passiveEF = (vMax - vPreA) / vMax;
 const activeEF = (vPreA - vMin) / vPreA;
+const wMax = voxelLA(laMaxP, 'LA'), wMin = voxelLA(laMinP, 'LA');
 
 const checks = [
   ['LV minimum is in ventricular systole (0.20-0.44)', lvMinP >= 0.20 && lvMinP <= 0.44, `LV min @ ${lvMinP.toFixed(3)}`],
@@ -90,9 +93,10 @@ const checks = [
   ['LA min is within 0.10 of the LV MAXIMUM (anti-phase)', dphase(laMinP, lvMaxP) <= 0.10, `|LAmin-LVmax| = ${dphase(laMinP, lvMaxP).toFixed(3)}`],
   ['LA and LV volumes are anti-correlated (r < -0.5)', r < -0.5, `pearson r = ${r.toFixed(3)}`],
   ['atrial curve is continuous across the phase wrap', wrapStep <= maxInteriorStep * 1.5, `wrap step ${wrapStep.toExponential(2)} vs max interior ${maxInteriorStep.toExponential(2)}`],
-  ['total LA emptying fraction 45-65 % (voxel)', totalEF >= 0.45 && totalEF <= 0.65, `LAEF = ${(totalEF * 100).toFixed(1)} %, ${vMin.toFixed(0)}-${vMax.toFixed(0)} mL`],
+  ['total LA emptying fraction 50-68 % (voxel, body)', totalEF >= 0.50 && totalEF <= 0.68, `LAEF = ${(totalEF * 100).toFixed(1)} %, ${vMin.toFixed(0)}-${vMax.toFixed(0)} mL (with LAA + veins ${wMin.toFixed(0)}-${wMax.toFixed(0)} mL)`],
+  ['LA minimum volume 15-30 mL, maximum 40-65 mL (voxel, body)', vMin >= 15 && vMin <= 30 && vMax >= 40 && vMax <= 65, `LAVmin ${vMin.toFixed(1)}, LAVmax ${vMax.toFixed(1)} mL`],
   ['passive (conduit) emptying fraction 28-48 %', passiveEF >= 0.28 && passiveEF <= 0.48, `passive EF = ${(passiveEF * 100).toFixed(1)} %`],
-  ['active (booster) emptying fraction 20-40 %', activeEF >= 0.20 && activeEF <= 0.40, `active EF = ${(activeEF * 100).toFixed(1)} %`],
+  ['active (booster) emptying fraction 25-40 %', activeEF >= 0.25 && activeEF <= 0.40, `active EF = ${(activeEF * 100).toFixed(1)} %`],
 ];
 
 let fails = 0;
