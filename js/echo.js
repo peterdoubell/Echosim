@@ -109,6 +109,7 @@ const VIEW_WHITELIST = {
   A2C: ['LV', 'LA', 'MV', 'LAA', 'CS', 'DAo'],
   A3C: ['LV', 'LA', 'MV', 'AV', 'Ao'],
   SUBCOSTAL: ['LV', 'RV', 'LA', 'RA', 'Liver'],
+  SSN: ['Asc Ao', 'Arch', 'RPA', 'LA', 'DAo'],
 };
 // Fixed anatomical label anchors beyond the chamber centroids (heart space).
 const _mid = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
@@ -1230,6 +1231,18 @@ export class EchoView {
     if (G.A && G.A.cs) items.push(['CS', G.A.cs[1].b]);
     // subcostal: the liver is the near-field acoustic window along the beam
     if (this.viewName === 'SUBCOSTAL') items.push(['Liver', [probe.pos[0] + probe.dir[0] * 3.2, probe.pos[1] + probe.dir[1] * 3.2, probe.pos[2] + probe.dir[2] * 3.2]]);
+    // suprasternal: the ascending aorta, the arch summit and the RPA where the plane cuts it
+    if (this.viewName === 'SSN') {
+      items.push(['Asc Ao', LM.AO_ASC_TOP], ['Arch', LM.AO_ARCH_MID]);
+      if (G.A && G.A.pa) {
+        // (the RPA is its first two branch segments: the dip onto the LA roof, then to the hilum)
+        const off = (q) => (q[0] - probe.pos[0]) * probe.normal[0] + (q[1] - probe.pos[1]) * probe.normal[1] + (q[2] - probe.pos[2]) * probe.normal[2];
+        for (const [a, b] of G.A.pa.branch.slice(0, 2)) {
+          const oa = off(a), ob = off(b);
+          if (oa * ob < 0) { const t = oa / (oa - ob); items.push(['RPA', [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]]); break; }
+        }
+      }
+    }
     // aortic-valve short axis: name the three cusps (R/L/N-coronary) at their centroids
     if (this.viewName === 'PSAX_AV') for (const c of AORTIC_CUSPS) items.push([c.name, c.p]);
     // LAA view: label the appendage body (mid-lobe of the appendage chain)

@@ -162,12 +162,21 @@ const avFrame = (deg, r, h) => {
 // the tricuspid side (~10 o'clock) to it — the RV "wraps" the aorta.
 const PV0 = avFrame(58, 3.05, 1.25);
 const PV_R = 1.1;                                    // annulus d 2.2
-// Main PA runs superiorly, posteriorly and to the left to bifurcate ~3.5 cm
-// above the LA (the RPA then passes behind the ascending aorta, over the LA roof).
-const U_PA = unit(add(add(mul(BS, 0.7), mul(BP, 0.9)), mul(BL, 0.25)));
-const PA_BIF = mad(PV0, U_PA, 3.8);
-// the RPA passes to the right BEHIND the ascending aorta and SVC, beneath the arch
-const U_RPA = unit(add(add(mul(BODY_AX.R, 0.85), mul(BP, 0.45)), mul(BS, -0.35)));
+// Main PA: from the pulmonary valve it courses POSTERIORLY along the left of the
+// aortic root (screen-right in PSAX-AV) to bifurcate at about the depth of the
+// LA, just above its roof (the RPA then passes behind the ascending aorta, over
+// the LA roof) — the PSAX-AV view of the trunk, its bifurcation and the RPA.
+const U_PA = unit(add(add(mul(BS, 0.1), BP), mul(BL, 0.1)));
+const PA_BIF = mad(PV0, U_PA, 4.4);
+// the RPA passes to the right BEHIND the ascending aorta and SVC, beneath the arch:
+// it leaves the underside of the bifurcation and dips onto the LA roof (where the
+// suprasternal plane cuts it, the LA a few mm beneath), then runs level to the
+// right hilum over the right upper pulmonary vein (two segments)
+const U_RPA = unit(add(add(mul(BODY_AX.R, 0.85), mul(BP, 0.45)), mul(BS, -0.5)));
+const U_RPA2 = unit(add(add(mul(BODY_AX.R, 0.85), mul(BP, 0.45)), mul(BS, 0.1)));
+const RPA_O = mad(PA_BIF, BS, -0.8);
+const RPA_M = mad(RPA_O, U_RPA, 1.0);
+const RPA_E = mad(RPA_M, U_RPA2, 4.4 - 1.0);
 const U_LPA = unit(add(add(mul(BL, 0.6), mul(BP, 0.7)), mul(BS, 0.25)));
 // (the infundibulum is separated from the LVOT / aortic root by the muscular
 // outlet septum, so on PLAX its centre lies ~3.4 cm in front of the aortic-root
@@ -180,6 +189,7 @@ const RVOT_PTS = [avFrame(132, 3.4, -1.0), avFrame(90, 4.1, 0.5), mad(PV0, U_PA,
 // Lengths/widths are the END-SYSTOLIC (maximum) values measured clinically.
 const MAPSE_REF = 1.55;                              // cm, from the circulation (see anatomyParams)
 const TAPSE_REF = 2.5;
+const RV_APEX_CREEP = 0.1;                           // RV apical endocardium: basal creep per cm of TAPSE
 // The LA rises from the mitral annulus roughly in line with the LV long axis
 // (A4C) and lies directly behind the aortic root on the Ao/LA M-mode line (PLAX,
 // PSAX-AV) — "posterior" in the body is +y as much as -z in heart space.
@@ -192,7 +202,7 @@ const RA_FLOOR0 = add(T0, [0.45, 0.1, -0.2]);
 const LA_ES = { len: 5.0, w1: 1.55, w2: 1.75 };       // A4C major 5.0, (cut) minor ~4.0, PLAX AP ~3.4
 // the LA body sits back along the Ao/LA line, behind the root (PLAX AP ~3.3 cm)
 const LA_POST = 0.8;
-const RA_ES = { len: 4.0, w1: 2.3, w2: 1.9 };        // A4C major ~4.6, (cut) minor ~3.7
+const RA_ES = { len: 4.0, w1: 2.15, w2: 1.9 };       // A4C major ~4.6, (cut) minor ~4.1, area ~17.9 cm2
 // Roofs follow part of their annulus's excursion (the atria are not pinned),
 // placed so the end-systolic floor-to-roof length is exactly the ES value above.
 // The LA roof follows only 12 %: the annular descent then stretches the LA long
@@ -256,40 +266,93 @@ const CAVA = {
 // just right of the sternum, not far out to the right)
 // beyond the STJ the ascending aorta runs almost straight up, just right of the
 // sternum (a body-fixed direction, independent of the root's tilt)
-const U_ASC = unit(add(add(mul(BS, 0.85), mul(BODY_AX.R, 0.15)), mul(BODY_AX.A, 0.35)));
+const U_ASC = unit(add(add(mul(BS, 0.85), mul(BODY_AX.R, 0.15)), mul(BODY_AX.A, 0.2)));
 const AO_STJ = mad(A0, U_AO, 2.1);
-const AO_ASC_TOP = mad(AO_STJ, U_ASC, 4.2);
+// The ascending aorta leaves the sino-tubular junction along the root axis and
+// turns onto its cranial course at a constant rate over ASC_BEND cm (one evenly
+// curved tube, no kink at the STJ), then runs straight to the top
+const ASC_BEND = 3.0, ASC_LEN = 4.6;
+const ASC_PTS = (() => {
+  const th = Math.acos(Math.max(-1, Math.min(1, dot(U_AO, U_ASC))));
+  const w = unit(sub(U_ASC, mul(U_AO, Math.cos(th))));        // U_AO -> U_ASC rotation, in their plane
+  const n = 12, ds = ASC_LEN / n, pts = [AO_STJ];
+  let p = AO_STJ;
+  for (let i = 0; i < n; i++) {
+    const a = th * Math.min(1, (i + 0.5) * ds / ASC_BEND);  // direction at the step's midpoint
+    p = add(p, mul(add(mul(U_AO, Math.cos(a)), mul(w, Math.sin(a))), ds));
+    pts.push(p);
+  }
+  return pts;
+})();
+const AO_ASC_TOP = ASC_PTS[ASC_PTS.length - 1];
 // (posterolateral-left of the oesophagus, which lies directly against the LA)
 const DTA_P = add(add(add(LA_FLOOR0, mul(BP, 4.7)), mul(BL, 0.22)), mul(BS, -0.6));
-const DTA_TOP = mad(DTA_P, BS, 7.0);
+// (a cubic Hermite curve, for the arch below)
+const hermite = (p0, t0, p1, t1, t) => {
+  const t2 = t * t, t3 = t2 * t;
+  const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
+  return [0, 1, 2].map((k) => h00 * p0[k] + h10 * t0[k] + h01 * p1[k] + h11 * t1[k]);
+};
+// The descending aorta: vertical below the LA level (DTA_P), its upper part
+// inclined forward and medially to the end of the arch, so the arch's limbs are
+// ~6 cm apart and the descending limb tapers away down and back from the arch.
+const DTA_TOP = add(add(DTA_P, mul(BS, 6.6)), add(mul(BP, -1.8), mul(BL, -1.2)));
 const DTA_BOT = mad(DTA_P, BS, -9.0);
-const AO_ARCH_MID = add(lerp3(AO_ASC_TOP, DTA_TOP, 0.5), mul(BS, 2.0));
 const DTA_R = 1.12;                                   // d 2.25
-// The arch as a smooth Catmull-Rom curve (ascending top -> arch -> descending),
-// tapering from the ascending calibre to the descending, with its three head and
-// neck branches (brachiocephalic, left common carotid, left subclavian) rising
-// from the top — the suprasternal long-axis landmarks.
-const ARCH_SEGS = (() => {
-  const ctl = [mad(AO_ASC_TOP, U_ASC, -1.0), AO_ASC_TOP, AO_ARCH_MID, DTA_TOP, mad(DTA_TOP, BS, -1.5)];
-  const cr = (p0, p1, p2, p3, t) => {
-    const t2 = t * t, t3 = t2 * t;
-    return [0, 1, 2].map((k) => 0.5 * (2 * p1[k] + (p2[k] - p0[k]) * t +
-      (2 * p0[k] - 5 * p1[k] + 4 * p2[k] - p3[k]) * t2 + (3 * p1[k] - p0[k] - 3 * p2[k] + p3[k]) * t3));
-  };
+// The arch: a round candy-cane curve (radius ~3 cm) tangent to the ascending
+// aorta at its top and to the descending aorta at the end of the arch, tapering
+// from the ascending calibre to the descending, with its three head and neck
+// branches (brachiocephalic, left common carotid, left subclavian) fanning from
+// its upper convexity over ~3.5 cm — the suprasternal long-axis landmarks.
+const ARCH_CURVE = (() => {
+  const tIn = U_ASC, tOut = unit(sub(DTA_P, DTA_TOP));
+  const th = Math.acos(Math.max(-1, Math.min(1, dot(tIn, tOut))));
+  const chord = Math.hypot(...sub(DTA_TOP, AO_ASC_TOP));
+  const r = chord / (2 * Math.sin(th / 2));
+  // (Hermite tangents 3.5x the circular-arc Bezier handle 4/3 tan(th/4) r: a
+  // round summit rising ~3.5 cm above the ascending top, not a flat goal-post)
+  const h = 3.5 * (4 / 3) * Math.tan(th / 4) * r;
   const pts = [];
-  for (let i = 1; i < ctl.length - 2; i++) for (let j = 0; j < 6; j++) pts.push(cr(ctl[i - 1], ctl[i], ctl[i + 1], ctl[i + 2], j / 6));
-  pts.push(DTA_TOP);
+  const N = 16;
+  for (let i = 0; i <= N; i++) pts.push(hermite(AO_ASC_TOP, mul(tIn, h), DTA_TOP, mul(tOut, h), i / N));
+  return { pts, r };
+})();
+const AO_ARCH_MID = ARCH_CURVE.pts[ARCH_CURVE.pts.length >> 1];
+const ARCH_HEADS = 3;                                // brachiocephalic, left carotid, left subclavian (last in ARCH_SEGS)
+const ARCH_SEGS = (() => {
+  const pts = ARCH_CURVE.pts;
   const segs = [];
   for (let i = 0; i < pts.length - 1; i++) {
     const f = (i + 0.5) / (pts.length - 1);
     segs.push([pts[i], pts[i + 1], AO.ascR * 0.95 + (DTA_R - AO.ascR * 0.95) * f]);
   }
-  // head and neck vessels from the top of the arch
-  const top = pts[Math.round(pts.length * 0.45)];
+  // head and neck vessels: origins spread along the upper convexity of the arch
+  // (cumulative arc length), each with its own course — the innominate (largest,
+  // first) up and to the right, the left carotid straight up, the left subclavian
+  // up, left and back
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(...sub(pts[i], pts[i - 1])));
+  const at = (s) => {
+    let i = 1;
+    while (i < pts.length - 1 && cum[i] < s) i++;
+    const f = (s - cum[i - 1]) / (cum[i] - cum[i - 1]);
+    return { p: lerp3(pts[i - 1], pts[i], f), t: unit(sub(pts[i], pts[i - 1])) };
+  };
+  const centre = lerp3(lerp3(AO_ASC_TOP, DTA_TOP, 0.5), AO_ARCH_MID, 0.5);
   const along = unit(sub(DTA_TOP, AO_ASC_TOP));
-  for (const [off, r] of [[-1.3, 0.55], [0.0, 0.38], [1.2, 0.42]]) {
-    const o = mad(mad(top, along, off), BS, 0.6);
-    segs.push([o, mad(mad(o, BS, 3.5), along, off * 0.3), r]);
+  // centred on the summit of the arch (its most cranial point)
+  let iTop = 0;
+  for (let i = 1; i < pts.length; i++) if (dot(pts[i], BS) > dot(pts[iTop], BS)) iTop = i;
+  const sMid = cum[iTop];
+  for (const [ds, r, dir, len] of [
+    [-1.5, 0.6, unit(add(add(BS, mul(BODY_AX.R, 0.12)), mul(BODY_AX.A, 0.22))), 3.2],   // brachiocephalic (innominate)
+    [0.0, 0.38, unit(add(BS, mul(along, 0.05))), 3.4],                               // left common carotid
+    [1.5, 0.42, unit(add(add(add(BS, mul(along, 0.3)), mul(BL, 0.05)), mul(BP, 0.15))), 3.2], // left subclavian
+  ]) {
+    const { p } = at(sMid + ds);
+    const out = unit(sub(p, centre));
+    const o = mad(p, out, 0.5);
+    segs.push([o, mad(o, dir, len), r]);
   }
   return segs;
 })();
@@ -547,10 +610,13 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   const push = (lvScale - 1) * LVP.b * 0.9;
   const rvDir = unit([rvB.c[0], 0, rvB.c[2]]);
   const rvApexY = rvB.c[1] - rvB.r[1] - (lvLong - 1) * LVP.len * 0.5;
-  const rvRy = rvB.r[1] * rvpoScale - tapse * 0.5 + (lvLong - 1) * LVP.len * 0.25;
+  // the RV apical endocardium creeps basally in systole (apical trabecular
+  // thickening) as the LV's does, so the LV still forms the apex at end-systole
+  const rvCreep = RV_APEX_CREEP * tapse;
+  const rvRy = rvB.r[1] * rvpoScale - tapse * 0.5 + (lvLong - 1) * LVP.len * 0.25 - rvCreep * 0.5;
   const rvW = rvpoScale * (1 + (lvScale - 1) * 0.35);
   const rv = {
-    c: [rvB.c[0] - (rvpoScale - 1) * 1.2 + rvDir[0] * push, rvApexY + rvRy, rvB.c[2] + (rvpoScale - 1) * 0.6 + rvDir[2] * push],
+    c: [rvB.c[0] - (rvpoScale - 1) * 1.2 + rvDir[0] * push, rvApexY + rvCreep + rvRy, rvB.c[2] + (rvpoScale - 1) * 0.6 + rvDir[2] * push],
     r: [rvB.r[0] * rvS * rvW, rvRy, rvB.r[2] * rvS * rvW],
   };
   // annulus normal, facing the RA, tilted by the lateral-minus-septal excursion
@@ -709,7 +775,7 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
     pa: {
       pv: PVlive,
       main: { a: mad(PVlive, U_PA, -0.1), b: PA_BIF, r1: 1.1 * (1 + (path.rvpo ? 0.35 : 0)), r2: 1.05 * (1 + (path.rvpo ? 0.35 : 0)) },
-      branch: [[PA_BIF, mad(PA_BIF, U_RPA, 4.8), 0.8], [PA_BIF, mad(PA_BIF, U_LPA, 2.8), 0.68]],
+      branch: [[RPA_O, RPA_M, 0.8], [RPA_M, RPA_E, 0.78], [PA_BIF, mad(PA_BIF, U_LPA, 2.8), 0.68]],
       wall: 0.16,
     },
     valves: {
@@ -910,8 +976,17 @@ function buildAorta(A, path) {
     sinusR: sinusR * dil,
     root: { a: mad(A, U_AO, -0.05), b: stj, r1: AO.annR, r2: AO.stjR * dil },
     asc: { a: stj, b: AO_ASC_TOP, r1: AO.stjR * dil, r2: AO.ascR * dil },
+    // the curved ascending tube (STJ -> top), tapering from the STJ to the ascending calibre
+    // (the STJ moves with the root while the top is fixed in the mediastinum: the
+    // curve's points share the STJ's displacement, fading to nothing at the top)
+    ascSegs: (() => {
+      const n = ASC_PTS.length - 1, dS = sub(stj, AO_STJ);
+      const P = ASC_PTS.map((q, k) => mad(q, dS, 1 - k / n));
+      const r = (k) => (AO.stjR + (AO.ascR - AO.stjR) * k / n) * dil;
+      return P.slice(1).map((b, i) => ({ a: P[i], b, r1: r(i), r2: r(i + 1) }));
+    })(),
     arch: ARCH_SEGS,
-    dta: { a: DTA_TOP, b: DTA_BOT, r: DTA_R },
+    dta: { a: DTA_P, b: DTA_BOT, r: DTA_R, top: DTA_TOP },
     wall: 0.2,
   };
 }
@@ -1288,7 +1363,7 @@ function dLAlumen(x, y, z, A, body = false) {
     if (e > 3.2) return e;
   } else if (e > 3.2) {                                                     // far away: only the vein tubes matter
     const v = Math.min(e, dPV(x, y, z, A));
-    return v > 1.5 ? v : ssub(v, dAOarchDTA(x, y, z, A) - A.ao.wall - 0.15, 0.2);
+    return v > 1.5 ? v : clearRPA(ssub(v, dAOarchDTA(x, y, z, A) - A.ao.wall - 0.15, 0.2), x, y, z, A);
   }
   let d = e;
   if (!body) {
@@ -1306,7 +1381,16 @@ function dLAlumen(x, y, z, A, body = false) {
   d = ssub(d, dAOroot(x, y, z, A) - A.ao.wall - 0.22, 0.15);
   // an enlarged LA abuts but never overruns the descending aorta behind it
   d = ssub(d, dAOarchDTA(x, y, z, A) - A.ao.wall - 0.15, 0.2);
-  return d;
+  return clearRPA(d, x, y, z, A);
+}
+// the right pulmonary artery crosses the LA roof and the right pulmonary veins:
+// the roof abuts it (a shallow groove), the blood pools separated by their walls
+function clearRPA(d, x, y, z, A) {
+  if (d > 1.2) return d;
+  const [p, q] = A.pa.branch;
+  const c = Math.min(sdCapsule(x, y, z, p[0][0], p[0][1], p[0][2], p[1][0], p[1][1], p[1][2], p[2]),
+    sdCapsule(x, y, z, q[0][0], q[0][1], q[0][2], q[1][0], q[1][1], q[1][2], q[2]));
+  return ssub(d, c - A.pa.wall - 0.1, 0.1);
 }
 function dRAlumen(x, y, z, A) {
   const e = sdAtrium(x, y, z, A.ra, 0);
@@ -1401,18 +1485,26 @@ function dAOroot(x, y, z, A) {
   const ao = A.ao;
   let d = sdRoundCone(x, y, z, ao.root.a[0], ao.root.a[1], ao.root.a[2], ao.root.b[0], ao.root.b[1], ao.root.b[2], ao.root.r1, ao.root.r2);
   for (let i = 0; i < 3; i++) { const s = ao.sinus[i]; d = smin(d, sdSphere(x, y, z, s[0], s[1], s[2], ao.sinusR), 0.3); }
-  d = smin(d, sdRoundCone(x, y, z, ao.asc.a[0], ao.asc.a[1], ao.asc.a[2], ao.asc.b[0], ao.asc.b[1], ao.asc.b[2], ao.asc.r1, ao.asc.r2), 0.4);
+  let da = 1e9;
+  for (const s of ao.ascSegs) da = Math.min(da, sdRoundCone(x, y, z, s.a[0], s.a[1], s.a[2], s.b[0], s.b[1], s.b[2], s.r1, s.r2));
+  d = smin(d, da, 0.4);
   return d;
 }
 function dAOarchDTA(x, y, z, A) {
   const ao = A.ao;
+  // (the arch is one tube sampled finely along its curve: a plain union, so it keeps
+  // its calibre; the head and neck branches flare into it with a small fillet)
   let d = 1e9;
+  const nArch = ao.arch.length - ARCH_HEADS;
   for (let i = 0; i < ao.arch.length; i++) {
     const s = ao.arch[i];
-    d = smin(d, sdCapsule(x, y, z, s[0][0], s[0][1], s[0][2], s[1][0], s[1][1], s[1][2], s[2]), 0.6);
+    const c = sdCapsule(x, y, z, s[0][0], s[0][1], s[0][2], s[1][0], s[1][1], s[1][2], s[2]);
+    d = i < nArch ? Math.min(d, c) : smin(d, c, 0.3);
   }
   const t = ao.dta;
-  return smin(d, sdCapsule(x, y, z, t.a[0], t.a[1], t.a[2], t.b[0], t.b[1], t.b[2], t.r), 0.6);
+  const dt = Math.min(sdCapsule(x, y, z, t.a[0], t.a[1], t.a[2], t.b[0], t.b[1], t.b[2], t.r),
+    sdCapsule(x, y, z, t.top[0], t.top[1], t.top[2], t.a[0], t.a[1], t.a[2], t.r));
+  return smin(d, dt, 0.6);
 }
 function dAOlumen(x, y, z, A) { return Math.min(dAOroot(x, y, z, A), dAOarchDTA(x, y, z, A)); }
 function dPAlumen(x, y, z, A) {

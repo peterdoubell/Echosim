@@ -168,11 +168,21 @@ function subcostalProbe() {
 // apical windows sit over the apex: a remodelled (longer) LV moves its apex, and
 // the apical window with it, out toward the left axilla / caudally
 const APICAL_TRACK = (A) => [0, A.lv.apexShift || 0, 0];
+// A4C: as the root descends in systole the sonographer's small posterior tilt
+// keeps the plane off it (as at end-diastole), so the root-clearance shell of the
+// atria is never brought into the upper septum as a false crux 'mass'
+const A4C_ROOT_TRACK = 0.25;                         // cm of posterior tilt per cm of root descent
+let _a4cN = null;
+function a4cTrack(A) {
+  if (!_a4cN) _a4cN = a4cProbe().normal;
+  const back = vscale([0, 0, 1], A4C_ROOT_TRACK * (A.lv.A[1] - A0.lv.A[1]));
+  return vadd(APICAL_TRACK(A), vscale(_a4cN, vdot(back, _a4cN)));
+}
 export const TTE_VIEWS = {
   PLAX: { probe: plaxProbe, depth: 16 },
   PSAX: { probe: () => psaxProbe(-3.6), depth: 15 },   // mid-papillary
   PSAX_AV: { probe: psaxAvProbe, depth: 15, track: (A) => [0, 0.8 * (A.lv.A[1] - A0.lv.A[1]), 0] },   // follows the root's descent
-  A4C: { probe: a4cProbe, depth: 17, track: APICAL_TRACK },
+  A4C: { probe: a4cProbe, depth: 17, track: a4cTrack },
   A2C: { probe: a2cProbe, depth: 17, track: APICAL_TRACK },
   SUBCOSTAL: { probe: subcostalProbe, depth: 18 },
 };
@@ -292,7 +302,7 @@ function teeClear(pr) {
   }
   return pr;
 }
-const ME4C_RETRO = 0.4, ME4C_SWING = 10;           // cm, deg
+const ME4C_RETRO = 0.4, ME4C_SWING = 1, ME4C_UP = 2;    // cm, deg, cm
 function me4cProbe() {
   // The plane that cuts the interatrial septum at right angles through the fossa
   // ovalis and runs down to the apex (both atria, the septum and any ASD / PFO in
@@ -305,15 +315,19 @@ function me4cProbe() {
   // in the posterior (larger) part of the RA and the fossa ovalis.
   const Mp = vadd(M, [0, 0, -ME4C_RETRO]), Tp = vadd(T, [0, 0, -ME4C_RETRO]);
   const n = norm(vcross(vsub(Tp, Mp), vsub(APEX, Mp)));
-  const pos = vsub(ESO, vscale(n, vdot(vsub(ESO, Mp), n)));
+  // (the transducer withdrawn ME4C_UP cm up the oesophagus from the LA-level
+  // reference: the beam then runs further down the LV long axis, so the apex is
+  // not foreshortened against the right edge of the sector)
+  const eso = vadd(ESO, vscale(BODY_AX.S, ME4C_UP));
+  const pos = vsub(eso, vscale(n, vdot(vsub(eso, Mp), n)));
   const crux = vscale(vadd(Mp, Tp), 0.5);
   const tgt = vadd(crux, vscale(vsub(APEX, crux), 0.2));
   let dir = norm(vsub(tgt, pos));
   let right = vcross(n, dir);
   if (vdot(right, vsub(M, T)) < 0) right = vscale(right, -1);   // LV on the right
-  // the beam swung ME4C_SWING toward the RA about the transducer (in plane), so
-  // both atria and the whole IAS lie inside the sector rather than the RA being
-  // cropped against its left edge; the apex stays inside the right edge
+  // the beam swung ME4C_SWING toward the RA about the transducer (in plane): just
+  // enough to keep the RA and the fossa inside the left edge while the LV long axis
+  // stays within ~30 deg of the beam and the whole apex well inside the right edge
   const sw = ME4C_SWING * Math.PI / 180;
   dir = norm(vsub(vscale(dir, Math.cos(sw)), vscale(right, Math.sin(sw))));
   const sd = vdot(vsub(tgt, pos), dir);

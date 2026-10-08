@@ -450,21 +450,134 @@ for (const [G, tag] of [[GED, 'ED'], [GES, 'ES']]) {
   }
   check('A4C', `interatrial wall between the atria (${tag}, mean of 3 levels)`, tot / 3, [0.05, 0.6]);
 }
+// A4C: as the root descends in systole the plane must not cut the atria's
+// root-clearance shell (a rounded myocardial 'knob' bulging into the RA from the
+// upper septum): myocardium within 0.6 cm of the aortic-root lumen, in plane
+{
+  const near = (G) => {
+    const g = sectorGrid(TTE_VIEWS.A4C, G, {}, 0.05);
+    let a = 0;
+    for (const c of g.cells.values()) if (c.t === TISSUE.MYO && lumenDist(c.q[0], c.q[1], c.q[2], G.A, 'AOROOT') < 0.6) a += g.h * g.h;
+    return a;
+  };
+  const ed = near(GED), es = near(GES);
+  check('A4C', 'no septal knob: myocardium within 0.6 cm of the root lumen (ES)', es, [0, 0.4], 'cm2', `ED ${ed.toFixed(2)} cm2`);
+}
 // the RPA runs beneath the arch and behind the ascending aorta without being cut
 // by it (or by the atria): its axis stays more than one radius from their lumens
 {
-  const [p0, p1, r] = GED.A.pa.branch[0];
+  // (the RPA is two segments: the dip onto the LA roof, then level to the hilum)
   let mn = 9;
-  for (let t = 0; t <= 1; t += 0.02) {
-    const p = add(p0, mul(sub(p1, p0), t));
-    mn = Math.min(mn, lumenDist(p[0], p[1], p[2], GED.A, 'AO'), lumenDist(p[0], p[1], p[2], GED.A, 'AOROOT'),
-      lumenDist(p[0], p[1], p[2], GED.A, 'LA'), lumenDist(p[0], p[1], p[2], GED.A, 'RA'));
+  for (const [p0, p1, r] of GED.A.pa.branch.slice(0, 2)) {
+    for (let t = 0; t <= 1; t += 0.02) {
+      const p = add(p0, mul(sub(p1, p0), t));
+      mn = Math.min(mn, Math.min(lumenDist(p[0], p[1], p[2], GED.A, 'AO'), lumenDist(p[0], p[1], p[2], GED.A, 'AOROOT'),
+        lumenDist(p[0], p[1], p[2], GED.A, 'LA'), lumenDist(p[0], p[1], p[2], GED.A, 'RA')) - r);
+    }
   }
-  check('Great vessels', 'RPA clear of the aorta and atria (axis clearance - radius)', mn - r, [0.03, 5]);
+  check('Great vessels', 'RPA clear of the aorta and atria (axis clearance - radius)', mn, [0.03, 5]);
 }
 {
   const { st } = viewStats(EXTRA_VIEWS.SSN, GED);
   assert('SSN', 'RPA in cross-section under the arch, LA below it', has(st, 'PA') && has(st, 'LA') && st.PA.d < st.LA.d);
+}
+// the arch is a candy cane, not a goal-post: limbs ~6 cm apart, a round summit,
+// head vessels fanning from its convexity, the RPA seated on the LA roof
+{
+  const ao = GED.A.ao, S = BODY_AX.S;
+  const nHead = 3, archC = ao.arch.slice(0, ao.arch.length - nHead);
+  const cl = [...ao.ascSegs.map((s) => s.a), ...archC.map((s) => s[0]), archC[archC.length - 1][1], ao.dta.a];
+  let iTop = 0;
+  for (let i = 1; i < cl.length; i++) if (dot(cl[i], S) > dot(cl[iTop], S)) iTop = i;
+  const hTop = dot(cl[iTop], S);
+  const atLevel = (from, step, h) => {              // centreline point at height h, walking away from the summit
+    for (let i = from; i + step >= 0 && i + step < cl.length; i += step) {
+      const a = cl[i], b = cl[i + step], ha = dot(a, S), hb = dot(b, S);
+      if ((ha - h) * (hb - h) <= 0) return add(a, mul(sub(b, a), (ha - h) / (ha - hb || 1)));
+    }
+    return null;
+  };
+  const asc2 = atLevel(iTop, -1, hTop - 2), dsc2 = atLevel(iTop, 1, hTop - 2);
+  check('SSN', 'arch limbs: ascending-descending centrelines 2 cm below the summit', asc2 && dsc2 && Math.hypot(...sub(asc2, dsc2)), [4.5, 7]);
+  // circumradius of (ascending 2 cm down, summit, descending 2 cm down)
+  const circR = (a, b, c) => {
+    const A_ = Math.hypot(...sub(b, c)), B_ = Math.hypot(...sub(a, c)), C_ = Math.hypot(...sub(a, b));
+    return (A_ * B_ * C_) / (2 * Math.hypot(...cross(sub(b, a), sub(c, a))));
+  };
+  check('SSN', 'arch radius of curvature (summit +- 2 cm drop)', asc2 && dsc2 && circR(asc2, cl[iTop], dsc2), [2.5, 3.5]);
+  let turn = 0;
+  for (let i = 1; i + 1 < archC.length; i++) {
+    const u = norm(sub(archC[i][1], archC[i][0])), v = norm(sub(archC[i + 1][1], archC[i + 1][0]));
+    turn = Math.max(turn, Math.acos(Math.min(1, dot(u, v))) * 180 / Math.PI);
+  }
+  check('SSN', 'arch: no square corners (max turn per 1/16 of the arch)', turn, [0, 20], 'deg');
+  const heads = ao.arch.slice(-nHead);
+  check('SSN', 'head vessels: origin spread innominate -> left subclavian', Math.hypot(...sub(heads[0][0], heads[2][0])), [3, 4]);
+  let minAng = 180;
+  for (let i = 0; i < nHead; i++) for (let j = i + 1; j < nHead; j++) {
+    const u = norm(sub(heads[i][1], heads[i][0])), v = norm(sub(heads[j][1], heads[j][0]));
+    minAng = Math.min(minAng, Math.acos(Math.min(1, dot(u, v))) * 180 / Math.PI);
+  }
+  check('SSN', 'head vessels fan out (min pairwise angle)', minAng, [15, 60], 'deg');
+  check('SSN', 'innominate is the largest branch', heads[0][2] > heads[1][2] && heads[0][2] > heads[2][2] ? 1 : 0, [1, 1], '');
+  // RPA on the LA roof, in the suprasternal plane: from the RPA's centre where the
+  // plane cuts it, the RPA lumen -> LA lumen distance down the beam (two vessel
+  // walls, ~0.35 cm, and at most a few mm of mediastinum between them)
+  const sp = EXTRA_VIEWS.SSN.probe();
+  for (const [nm, G] of [['ED', GED], ['ES', GES]]) {
+    let c = null, r = 0;
+    for (const [a, b, rr] of G.A.pa.branch.slice(0, 2)) {
+      const o0 = dot(sub(a, sp.pos), sp.normal), o1 = dot(sub(b, sp.pos), sp.normal);
+      if (o0 * o1 <= 0) { c = add(a, mul(sub(b, a), o0 / (o0 - o1))); r = rr; break; }
+    }
+    let gap = 9;
+    if (c) for (let k = 0; k < 400; k++) { const q = add(c, mul(sp.dir, k * 0.01)); if (lumenDist(q[0], q[1], q[2], G.A, 'LA') < 0) { gap = k * 0.01 - r; break; } }
+    check('SSN', `RPA seated on the LA roof (in plane, RPA lumen -> LA lumen down the beam, ${nm})`, gap, [0.2, 0.8]);
+  }
+}
+// PLAX / 3D: one evenly curved tube from the root into the ascending aorta (the
+// former 51 deg point kink at the STJ, between two straight tubes, is gone): it
+// leaves the STJ along the root axis and turns onto its cranial course over ~3 cm,
+// so high PLAX shows several cm of tubular ascending aorta. (The root axis itself
+// is unchanged, ~63 deg from vertical; the turn is spread, not reduced.)
+{
+  const segs = GED.A.ao.ascSegs;
+  // tangent over the first 0.7 cm beyond the STJ
+  let s0 = 0, k0 = 0;
+  for (; k0 < segs.length - 1; k0++) {
+    s0 += Math.hypot(...sub(segs[k0].b, segs[k0].a));
+    if (s0 >= 0.7) break;
+  }
+  const t0 = norm(sub(segs[k0].b, segs[0].a));
+  check('Aorta', 'root -> ascending: no kink at the STJ (root axis vs first 0.7 cm)', Math.acos(Math.min(1, dot(LM.U_AO, t0))) * 180 / Math.PI, [0, 25], 'deg');
+  let worst = 0;
+  for (let i = 1; i < segs.length; i++) {
+    const u = norm(sub(segs[i - 1].b, segs[i - 1].a)), v = norm(sub(segs[i].b, segs[i].a));
+    const L = 0.5 * (Math.hypot(...sub(segs[i - 1].b, segs[i - 1].a)) + Math.hypot(...sub(segs[i].b, segs[i].a)));
+    worst = Math.max(worst, Math.acos(Math.min(1, dot(u, v))) * 180 / Math.PI / L);
+  }
+  check('Aorta', 'ascending aorta: maximum bend rate (even curve, radius >= ~3 cm)', worst, [0, 20], 'deg/cm');
+  // centreline beyond the STJ within 0.6 cm of the PLAX plane (the tube, d 2.8-3, stays cut lengthwise)
+  let inPl = 0;
+  outer: for (const s of segs) {
+    const n = 8, L = Math.hypot(...sub(s.b, s.a));
+    for (let k = 0; k < n; k++) {
+      const q = add(s.a, mul(sub(s.b, s.a), (k + 0.5) / n));
+      if (Math.abs(dot(sub(q, plax.pos), PLAX_N)) < 0.6) inPl += L / n; else break outer;
+    }
+  }
+  check('Aorta', 'tubular ascending aorta in the PLAX plane beyond the STJ', inPl, [2.5, 6]);
+}
+// PSAX-AV: the main PA courses posteriorly down the left of the root (screen
+// right) to a bifurcation in the sector, at or below the aortic-valve depth
+{
+  const v = TTE_VIEWS.PSAX_AV, p = v.probe();
+  const fr = (q) => { const w = sub(q, p.pos); return [dot(w, p.dir), dot(w, p.lat), dot(w, p.normal)]; };
+  const pv = fr(LM.PV), bif = fr(LM.PA_BIF), av = fr(LM.A);
+  check('PSAX-AV', 'PA bifurcation distance from the plane', Math.abs(bif[2]), [0, 1]);
+  check('PSAX-AV', 'main PA descends: bifurcation depth - PV depth', bif[0] - pv[0], [2.5, 5]);
+  check('PSAX-AV', 'PA bifurcation depth - aortic-valve depth', bif[0] - av[0], [0, 3]);
+  check('PSAX-AV', 'PA bifurcation inside the sector (angle off the beam axis)', Math.atan2(bif[1], bif[0]) * 180 / Math.PI, [10, 32], 'deg');
 }
 {
   const { st } = viewStats(EXTRA_VIEWS.A5C, GED);
@@ -521,10 +634,29 @@ for (const [nm, G] of [['ED', GED], ['ES', GES]]) {
     if (c.t === TISSUE.RV) rvY = Math.min(rvY, c.q[1]);
   }
   check('TEE', `ME4C: aortic-root wall in the plane (off the LVOT) (${nm})`, root, [0, 0.2], 'cm2');
-  // KNOWN-FAIL at ES since the annulus rework (base excursion changed the LV length in plane): 0.65 vs 0.8 cm
-  KNOWN = nm === 'ES';
+  // (the RV apical endocardium creeps basally in systole as the LV's does)
   check('TEE', `ME4C: RV lumen ends short of the LV apex (${nm})`, rvY - lvY, [0.8, 3]);
-  KNOWN = false;
+  // the whole LV, apex included, inside the sector; long axis <= 30 deg off the beam
+  const fr = (q) => { const w = sub(q, g.p.pos); return [dot(w, g.p.dir), dot(w, g.p.lat)]; };
+  const ap = fr([0, G.A.lv.apexY - LM.LV.wall * LM.LV.apexWallFrac, 0]), mv = fr(G.A.valves.mitral.c);
+  const apAng = Math.atan2(ap[1], ap[0]), half = 0.66;
+  check('TEE', `ME4C: epicardial apex inside the sector (margin, ${nm})`, ap[0] * Math.sin(half - Math.abs(apAng)), [0.5, 9]);
+  check('TEE', `ME4C: LV long axis angle to the beam (${nm})`, Math.abs(Math.atan2(ap[1] - mv[1], ap[0] - mv[0])) * 180 / Math.PI, [0, 30], 'deg');
+  if (nm === 'ES') {
+    // LV minor dimension across the long axis at 40-60 % of its length
+    const L = Math.hypot(ap[0] - mv[0], ap[1] - mv[1]), ux = [(ap[0] - mv[0]) / L, (ap[1] - mv[1]) / L];
+    let w = 0;
+    for (const f of [0.4, 0.5, 0.6]) {
+      let lo = 9, hi = -9;
+      for (let s2 = -5; s2 <= 5; s2 += 0.05) {
+        const d = mv[0] + (ap[0] - mv[0]) * f - ux[1] * s2, u = mv[1] + (ap[1] - mv[1]) * f + ux[0] * s2;
+        const q = add(add(g.p.pos, mul(g.p.dir, d)), mul(g.p.lat, u));
+        if (classify(q[0], q[1], q[2], G, {}).tissue === TISSUE.LV) { lo = Math.min(lo, s2); hi = Math.max(hi, s2); }
+      }
+      w = Math.max(w, hi - lo);
+    }
+    check('TEE', 'ME4C: LV minor dimension (ES, mid cavity)', w, [2.2, 3.8]);
+  }
 }
 {
   // a secundum ASD opens the two atria into one another in the ME4C
