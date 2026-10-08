@@ -20,7 +20,7 @@
 //
 // Usage: node tools/verify-anatomy.mjs [--verbose]     (exit 0 = all pass)
 import { geometryAt, classify, TISSUE, hemoSummary, membSite, MEMB_T, VSD_RADIUS, shuntLabel, stenosisCw, FLOW } from '../js/cardiac-model.js';
-import { LM, REF, lumenDist, mitralLift, BODY_AX, diaphragmBelow, rwmaBlend, stomachDist } from '../js/anatomy.js';
+import { LM, REF, lumenDist, mitralLift, BODY_AX, diaphragmBelow, rwmaBlend, stomachDist, rapEstimate } from '../js/anatomy.js';
 import { MS_AREA } from '../js/hemodynamics.js';
 import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, ALL_VIEWS as ALL_V } from '../js/views.js';
 import { renderBmode, beamSample, speckleAxis } from './bmode.mjs';
@@ -1611,6 +1611,81 @@ SECTION = 'Pathology';
   check('Stenosis', 'severe AS: CW peak reads severe (>= 4 m/s)', cw.peak, [4.0, 6], 'm/s');
   const cwm = stenosisCw(FLOW.MITRAL_IN, geometryAt(0.6, { mitralStenosis: true }).hemo, { mitralStenosis: true });
   check('Stenosis', 'MS: CW E-wave peak vs modelled peak gradient', cwm.peak, [Math.sqrt(sm.gradientMV / 4) - 0.2, Math.sqrt(sm.gradientMV / 4) + 0.2], 'm/s');
+}
+
+{
+  // F16: severe MS in the tracked PSAX-MV plane (the funnel tip) through diastole —
+  // a central fish-mouth: the blood orifice enclosed by the fused leaflets is
+  // elongated (aspect >= 1.8) roughly medio-laterally, sits within 0.5 cm of the
+  // LV short-axis centroid, and planimeters to the grade's MVA (+/- 15 %)
+  const ph0 = esOf('ms');
+  for (const [tag, ph] of [['mid-diastole', (1 + ph0) / 2], ['late diastole', 0.9], ['ED', 0.99]]) {
+    const S = planeSample(EXTRA_VIEWS.PSAX_MV, geo(ph, 'ms'), PATHS.ms, 0.04, 10);
+    const sec = components(S, (l) => l === TISSUE.LV || l === TISSUE.VALVE).comps.reduce((m, c) => (c.length > m.length ? c : m), []);
+    const inSec = new Set(sec);
+    const lvc = components(S, (l, k) => l === TISSUE.LV && inSec.has(k)).comps.sort((a, b) => b.length - a.length);
+    const o = lvc[1] || [];
+    const cen = (cs) => cs.reduce((m, k) => { const q = xd(S, k); return [m[0] + q[0] / cs.length, m[1] + q[1] / cs.length]; }, [0, 0]);
+    let ar = 0, ang = 90, off = 9, area = areaOf(S, o);
+    if (o.length > 20) {
+      const c = cen(o), cs = cen(sec);
+      let a = 0, b = 0, d = 0;
+      for (const k of o) { const q = xd(S, k), x = q[0] - c[0], y = q[1] - c[1]; a += x * x; b += x * y; d += y * y; }
+      const t = (a + d) / 2, r = Math.sqrt(((a - d) / 2) ** 2 + b * b);
+      ar = Math.sqrt((t + r) / Math.max(1e-9, t - r));
+      ang = Math.abs(0.5 * Math.atan2(2 * b, a - d) * 180 / Math.PI);
+      off = Math.hypot(c[0] - cs[0], c[1] - cs[1]);
+    }
+    check('MS PSAX-MV', `fish-mouth aspect ratio (${tag})`, ar, [1.8, 4], '', `orifice ${area.toFixed(2)} cm2`);
+    check('MS PSAX-MV', `fish-mouth long axis vs medio-lateral (${tag})`, ang, [0, 25], 'deg');
+    check('MS PSAX-MV', `orifice centroid to LV short-axis centroid (${tag})`, off, [0, 0.5]);
+    check('MS PSAX-MV', `planimetered MVA (${tag})`, area, [+(MS_AREA.severe * 0.85).toFixed(2), +(MS_AREA.severe * 1.15).toFixed(2)], 'cm2');
+  }
+}
+
+{
+  // F28: the RA pressure behind the PASP estimate is read off the modelled IVC and
+  // agrees with it — a plethoric (> 2.1 cm, non-collapsing) IVC in TR / PH gives
+  // 15 mmHg, a normal IVC 3 mmHg
+  for (const key of Object.keys(PATHS)) {
+    const iv = geo(0, key).A.ivc, d = 2 * iv.r, rap = rapEstimate(iv);
+    const want = d > 2.1 && iv.collapse < 0.5 ? 15 : d <= 2.1 && iv.collapse > 0.5 ? 3 : 8;
+    const plethoric = !!(PATHS[key].tr || PATHS[key].rvpo);
+    assert('RAP', `${key}: RAP ${rap} mmHg matches the IVC (${d.toFixed(1)} cm, ${Math.round(iv.collapse * 100)} % sniff collapse)`,
+      rap === want && (plethoric ? rap === 15 : rap === 3));
+  }
+  // F29: compensated severe AS is not hypotensive — the LV carries the gradient
+  const sAs = hemoSummary(PATHS.as);
+  check('Haemodynamics', 'severe AS: aortic systolic pressure', sAs.PaoSys, [115, 145], 'mmHg', `${sAs.PaoSys.toFixed(0)}/${sAs.PaoDia.toFixed(0)}`);
+  check('Haemodynamics', 'severe AS: LV systolic pressure', sAs.PlvSys, [180, 220], 'mmHg', `peak gradient ${sAs.gradient.toFixed(0)} mmHg`);
+  // PH: the D-shaped LV is underfilled, and the drawn LV holds the circulation's EDV
+  const sPh = hemoSummary(PATHS.phtn);
+  check('Haemodynamics', 'PH: LV EDV (circulation, underfilled)', sPh.EDV, [80, 105], 'mL', `normal ${sum.EDV.toFixed(0)} mL`);
+  const edvPh = volume(geo(0, 'phtn'), 'LV', LVBOX);
+  check('Haemodynamics', 'PH: geometry EDV vs circulation EDV', Math.abs(edvPh - sPh.EDV) / sPh.EDV * 100, [0, 12], '%', `voxel ${edvPh.toFixed(0)} mL`);
+}
+
+{
+  // F27: commercial-standard extras. First-order coronary branches (diagonals,
+  // obtuse marginals, conus) run as arterial lumen in their epicardial fat; the
+  // innominate vein shows in the suprasternal near field, above the arch
+  for (const ph of [0, ES]) {
+    const G = geo(ph), by = {};
+    for (const sg of G.A.cor) if (sg.name) (by[sg.name] = by[sg.name] || []).push(sg);
+    for (const [nm, ss] of Object.entries(by)) {
+      let n = 0, lum = 0;
+      for (const sg of ss) for (let t = 0; t < 1; t += 0.1) {
+        const q = add(sg.a, mul(sub(sg.b, sg.a), t)); n++;
+        if (classify(q[0], q[1], q[2], G, {}).tissue === TISSUE.AORTA) lum++;
+      }
+      check('Coronaries', `${nm}: centreline in coronary lumen (${ph ? 'ES' : 'ED'})`, lum / n, [0.8, 1], '');
+    }
+  }
+  const S = planeSample(EXTRA_VIEWS.SSN, geo(0), {}, 0.05);
+  const vein = components(S, (l) => l === TISSUE.VEIN).comps.filter((c) => c.length * 0.0025 > 0.15);
+  const vd = vein.length ? Math.min(...vein.map((c) => c.reduce((m, k) => m + xd(S, k)[1], 0) / c.length)) : null;
+  check('SSN', 'innominate vein in the near field (depth of its centroid)', vd, [1.5, 5.5], 'cm',
+    vein.length ? `${(vein[0].length * 0.0025).toFixed(2)} cm2` : 'absent');
 }
 
 // ---- report ------------------------------------------------------------------

@@ -256,7 +256,11 @@ export const EXTRA_VIEWS = {
   // fish-mouth in diastole): the probe follows the posterolateral annular
   // excursion (the small tilt a sonographer makes), so the plane stays at the
   // leaflets and never climbs into the posterior AV groove (CS / RA) in systole
-  PSAX_MV: { probe: () => psaxProbe(-0.6), depth: 15, track: (A) => [0, 0.95 * (A.lv.base - A0.lv.base), 0] },
+  // In rheumatic MS the plane sits at the funnel tip (A.msTip, the open fish-mouth
+  // orifice, ~6 deg off perpendicular to the inflow axis) — where the orifice is
+  // planimetered — instead of at the leaflet bodies, which cut the dome obliquely.
+  PSAX_MV: { probe: () => psaxProbe(-0.6), depth: 15,
+    track: (A) => [0, A.msTip ? A.msTip[1] + 0.64 : 0.95 * (A.lv.base - A0.lv.base), 0] },
   RVIT: { probe: rvInflowProbe, depth: 13, track: rvInflowTrack },
   SC_IVC: { probe: subcostalIvcProbe, depth: 18 },
   SSN: { probe: suprasternalProbe, depth: 16 },

@@ -7,7 +7,7 @@
 // labels, live measurements, and a scrolling spectral-Doppler trace.
 
 import { classify, velocityAt, geometryAt, hemoSummary, TISSUE, VALVE_DEFS, FLOW, AORTIC_CUSPS, shuntLabel, stenosisCw } from './cardiac-model.js';
-import { LM } from './anatomy.js';
+import { LM, rapEstimate } from './anatomy.js';
 import { clamp } from './mathutils.js';
 
 // Human-readable labels for the flow compartment that produced the frame's peak
@@ -1343,10 +1343,11 @@ export class EchoView {
     this.metrics.severityLabel = severityLabel;
     // estimated PA systolic pressure from the peak TR jet: PASP = 4·V_TR² + RAP.
     // Use the model's TR jet velocity (what a CW sweep captures) rather than the
-    // plane-dependent 2-D sample. RAP = 10 mmHg with a dilated/pressure-loaded RV, else 5.
+    // plane-dependent 2-D sample. RAP is read off the modelled IVC (size + sniff
+    // collapse), so the estimate agrees with the plethoric IVC of TR / PH.
     const vTR = (G.hemo && G.hemo.vTRPeak) || 0;
     if (path.tr && vTR > 1.5) {
-      const rap = path.rvpo ? 10 : 5;
+      const rap = rapEstimate(G.A.ivc);
       this.metrics.pasp = 4 * vTR * vTR + rap;
     } else {
       this.metrics.pasp = null;
