@@ -456,10 +456,11 @@ function meAvSaxProbe() {
 // aimed through the LA at the septum just above the fossa.
 const BICAVAL_SLIDE = [-3, 2.5];                 // search along the oesophagus (cm, + = withdrawn)
 const BICAVAL_BACK = 1.5;                        // ... and behind it (cm)
+const BICAVAL_LAT = 1.0;                         // ... and across it, left/right (cm)
 const BICAVAL_FOSSA = 0.45;                      // fossa centre within this of the plane (cm)
 const BICAVAL_AIM = 1.2;                         // beam aimed this far above the fossa (cm)
 const BICAVAL_HALF = 0.45;                       // (its axis within this share of its radius of the plane)
-const BICAVAL_CAVA = 1.6;                        // each cava's first 3 cm: at least this much in plane (cm)
+const BICAVAL_CAVA = 2.2;                        // each cava's first 3 cm: at least this much in plane (cm)
 const BICAVAL_SEPT_W = 1.0;                      // septal length traded 1:1 for caval length
 let _bicaval = null;
 function meBicavalProbe() {
@@ -492,8 +493,8 @@ function meBicavalProbe() {
     };
     const cands = [], fallback = [];
     for (let s = BICAVAL_SLIDE[0]; s <= BICAVAL_SLIDE[1] + 1e-9; s += 0.25) {
-      for (let b = 0; b <= BICAVAL_BACK + 1e-9; b += 0.25) {
-        const pos = vadd(vadd(ESO, vscale(BODY_AX.S, s)), vscale(BODY_AX.P, b));
+      for (let b = 0; b <= BICAVAL_BACK + 1e-9; b += 0.25) for (let lt = -BICAVAL_LAT; lt <= BICAVAL_LAT + 1e-9; lt += 0.5) {
+        const pos = vadd(vadd(vadd(ESO, vscale(BODY_AX.S, s)), vscale(BODY_AX.P, b)), vscale(BODY_AX.L, lt));
         const r0 = norm(vsub(fos, pos));
         const e2 = vcross(r0, norm(vcross(r0, BODY_AX.S)));
         for (let ta = -0.15; ta <= 0.151; ta += 0.01) {
