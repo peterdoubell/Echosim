@@ -220,26 +220,50 @@ export function rvPhase(phase) {
 }
 
 // Valve opening 0..1, driven by the modelled transvalvular FLOW so the leaflets
-// open exactly when blood starts to cross and shut when it stops (the valve
-// events — AVO, AVC, MVO, MVC — and the isovolumic periods all come from the
-// circulation). An AV valve swings wide on the E wave, drifts half-shut in
-// diastasis and reopens on the A wave; a semilunar valve opens fully in early
-// ejection and floats toward closure as flow decelerates. The right-heart valves
-// are passed the right heart's own snapshot (rvPhase), so they open and close
-// on its clock.
-function valveOpening(name, hd, path) {
-  const s = hd.sum;
-  let o;
-  if (VALVES[name].opensInDiastole) {
-    const q = hd.Qmv;
-    o = q > 1 ? 0.3 + 0.7 * clamp(q / (0.55 * s.QmvMax), 0, 1) : 0.02;
-  } else {
-    const q = hd.Qao;
-    o = q > 1 ? 0.35 + 0.65 * clamp(q / (0.35 * s.QaoMax), 0, 1) : 0.02;
-  }
+// open when blood starts to cross and shut as it stops (the valve events — AVO,
+// AVC, MVO, MVC — and the isovolumic periods all come from the circulation). An
+// AV valve swings wide on the E wave, drifts toward closure in diastasis and
+// reopens on the A wave; a semilunar valve opens fully in early ejection and
+// floats toward closure as flow decelerates. The motion is continuous, never a
+// one-frame step: a smooth map of the flow read slightly ahead (the leaflets
+// answer the pressure gradient, which leads the inertial flow — further on the
+// way down, so they are all but shut as forward flow ends), then a first-order
+// lag. Closure takes ~20-40 ms, and the leaflets cross 10 % open within a few
+// ms of the flow-defined events (AVO, AVC, MVO, MVC). Pre-computed once
+// per circulation as a periodic trace indexed by phase; the right-heart valves
+// read it on the right heart's own clock (rvPhase).
+const OPEN_N = 960, OPEN_CYCLE = 0.833;                   // samples per cycle; reference cycle (s)
+const OPEN_TAU_OPEN = 0.008, OPEN_TAU_CLOSE = 0.008, OPEN_LEAD_O = 0.007, OPEN_LEAD = 0.011;   // s
+const OPEN_Q_AV = 0.3, OPEN_Q_SL = 0.12;                  // flow (x peak) for a fully open valve
+const _openCache = new WeakMap();
+function openTrace(path) {
+  const sum = hemoSummary(path);
+  let tr = _openCache.get(sum);
+  if (tr) return tr;
+  const qmv = new Float32Array(OPEN_N), qao = new Float32Array(OPEN_N);
+  for (let i = 0; i < OPEN_N; i++) { const h = hemodynamics(i / OPEN_N, path); qmv[i] = h.Qmv; qao[i] = h.Qao; }
+  const L = Math.round(OPEN_LEAD / OPEN_CYCLE * OPEN_N), Lo = Math.round(OPEN_LEAD_O / OPEN_CYCLE * OPEN_N), dt = OPEN_CYCLE / OPEN_N;
+  const build = (q, qFull) => {
+    const tgt = new Float32Array(OPEN_N), out = new Float32Array(OPEN_N);
+    for (let i = 0; i < OPEN_N; i++) tgt[i] = 0.02 + 0.98 * smoothstep(0, qFull, Math.min(q[(i + Lo) % OPEN_N], q[(i + L) % OPEN_N]));
+    let o = tgt[OPEN_N - 1];
+    for (let pass = 0; pass < 2; pass++) for (let i = 0; i < OPEN_N; i++) {   // (2nd pass: periodic steady state)
+      o += (tgt[i] - o) * (1 - Math.exp(-dt / (tgt[i] > o ? OPEN_TAU_OPEN : OPEN_TAU_CLOSE)));
+      out[i] = o;
+    }
+    return out;
+  };
+  tr = { av: build(qmv, OPEN_Q_AV * sum.QmvMax), sl: build(qao, OPEN_Q_SL * sum.QaoMax) };
+  _openCache.set(sum, tr);
+  return tr;
+}
+function valveOpening(name, phase, tr, path) {
+  const arr = VALVES[name].opensInDiastole ? tr.av : tr.sl;
+  const x = (((phase % 1) + 1) % 1) * OPEN_N, i0 = Math.floor(x) % OPEN_N, f = x - Math.floor(x);
+  let o = arr[i0] + (arr[(i0 + 1) % OPEN_N] - arr[i0]) * f;
   // pathology tweaks
   if (path) {
-    if (name === 'aortic' && path.aorticStenosis) o *= 0.28;   // restricted opening
+    if (name === 'aortic' && path.aorticStenosis) o *= AS_OPEN;   // restricted opening
     if (name === 'mitral' && path.mitralStenosis) o *= 0.35;
   }
   return clamp(o, 0, 1);
@@ -320,6 +344,7 @@ export function geometryAt(phase, path = {}) {
   // still times the wall-thickening. The right heart reads the same trace on its
   // own clock (rvPhase); copied out first, as hemodynamics() returns a singleton.
   const phaseRV = rvPhase(phase);
+  const otr = openTrace(path);        // (first: it samples the hemodynamics() singleton)
   const hdR = hemodynamics(phaseRV, path);
   const rvHd = { Qmv: hdR.Qmv, Qao: hdR.Qao, kv: hdR.kv, sum: hdR.sum };
   const kvR = rvHd.kv, kR = clamp(kvR, 0, 1);
@@ -377,10 +402,10 @@ export function geometryAt(phase, path = {}) {
   const laR = [A.la.r1, A.la.rl, A.la.r2];
   const raR = [A.ra.r1, A.ra.rl, A.ra.r2];
   const valves = {
-    mitral: valveOpening('mitral', hd, path),
-    tricuspid: valveOpening('tricuspid', rvHd, path),
-    aortic: valveOpening('aortic', hd, path),
-    pulmonic: valveOpening('pulmonic', rvHd, path),
+    mitral: valveOpening('mitral', phase, otr, path),
+    tricuspid: valveOpening('tricuspid', phaseRV, otr, path),
+    aortic: valveOpening('aortic', phase, otr, path),
+    pulmonic: valveOpening('pulmonic', phaseRV, otr, path),
   };
 
   return {
@@ -822,6 +847,13 @@ function avTipWorld(name, G, sgn, q) {
   return t;
 }
 
+// Semilunar cusp shape (valveTissue): shut-cusp coaptation point downstream of
+// the hinge line (cm), belly sag toward the ventricle (cm), height of the
+// coaptation zone above the coaptation point at the centre (cm), samples of the
+// blended (opening / closing) profile.
+const SL_COAPT = 0.28, SL_SAG = 0.13, SL_COAPT_H = 0.55, SL_N = 16;
+const AS_OPEN = 0.28;                                     // AS: restricted opening (valveOpening)
+const _slA = new Float64Array(SL_N + 1), _slR = new Float64Array(SL_N + 1);
 function valveTissue(px, py, pz, G, path) {
   // apex-anchored contraction descends the AV valve planes with the annulus: a
   // valve at end-diastolic height y maps to apexY + (y−apexY)·lsy (same material
@@ -872,8 +904,8 @@ function valveTissue(px, py, pz, G, path) {
         }
       }
     }
-    if (a < -0.05 || a > cd) continue;                    // only the leaflet span, hinge→edge
-    const t = a <= 0 ? 0 : a / cd;                        // 0 at hinge, 1 at free edge
+    if (a < -0.25 || a > cd + 0.05) continue;             // the cusp span (+ the shut cusp's sag)
+    let t = a <= 0 ? 0 : a / cd;                          // 0 at hinge, 1 at free edge
     // Free-edge orifice radius. AV valves iris symmetrically; the semilunar valves
     // are TRILOBED — three cusps whose orifice bulges toward the commissures and
     // pinches at the cusp centres (the triangular systolic aortic orifice).
@@ -886,15 +918,62 @@ function valveTissue(px, py, pz, G, path) {
       cptr = 0.5 * (Math.cos(k) + 1);                     // 1 at commissures, 0 at cusp centres
       edgeR = open * v.r * (0.58 + 0.42 * cptr);          // triangular orifice
     }
-    // Curved cusp: an S-profile (smoothstep) so it leaves the annulus nearly
-    // parallel to the outflow axis, bellies, then curves in to the free edge —
-    // a real doming/tenting curtain, not a straight cone.
-    // A closing semilunar cusp is a hammock: it hugs the sinus wall and turns
-    // in to the centre only near its free edge, so a short-axis cut above the
-    // coaptation line shows the sinus wall, not a concentric ring of cusp.
-    let s = t * t * (3 - 2 * t);
-    if (isCusp) s += (t * t * t - s) * (1 - open);
-    const shellR = v.r + (edgeR - v.r) * s;               // curved radius at this depth
+    // Cusp profile in the (axial a, radius) half-plane, hinge -> free edge.
+    //  OPEN: a curtain along the sinus — an S-profile (smoothstep) that leaves the
+    //    annulus nearly parallel to the outflow axis, bellies, then curves in to
+    //    the free edge. Calcific AS: a straight, rigid cusp of its shut length
+    //    swung about the hinge (thick, bright, barely mobile — not a dome).
+    //  SHUT (semilunar): each cusp runs from its hinge inward to a central
+    //    coaptation just downstream of the hinge line, its belly sagging toward
+    //    the ventricle under the diastolic back-pressure (convex toward the
+    //    outflow tract, the sinus pocket on the arterial side); the free edges
+    //    then meet along the commissural lines (seams below).
+    // In between, the two curves blend (sampled, nearest point).
+    const asv = name === 'aortic' && !!path.aorticStenosis;
+    let dist;
+    if (!isCusp) {
+      if (a < -0.05 || a > cd) continue;                  // only the leaflet span, hinge→edge
+      const sc = t * t * (3 - 2 * t);
+      dist = Math.abs(rad - (v.r + (edgeR - v.r) * sc));
+    } else {
+      const oN = asv ? open / AS_OPEN : open;              // opening relative to this valve's full excursion
+      const bl = smoothstep(0.02, 0.45, oN);               // 0 shut .. 1 open shape
+      const rho = rad / v.r;
+      if (bl === 0 && rho <= 1) {
+        // shut: the cusp height is a function of radius (shallow: vertical distance)
+        const tb = 1 - rho;
+        const ac = SL_COAPT * tb - SL_SAG * Math.sin(Math.PI * tb);
+        const sl = (SL_COAPT - SL_SAG * Math.PI * Math.cos(Math.PI * tb)) / v.r;
+        dist = Math.abs(a - ac) / Math.sqrt(1 + sl * sl);
+        t = tb;
+      } else {
+        const eR = edgeR / v.r;
+        // AS: rigid cusp of the shut length, tilted about the hinge to its orifice
+        const aAS = Math.sqrt(Math.max(0, v.r * v.r + SL_COAPT * SL_COAPT - (v.r * (1 - eR)) ** 2));
+        let best = 1e9, bi = 0;
+        for (let i = 0; i <= SL_N; i++) {
+          const ti = i / SL_N;
+          const so = asv ? ti : ti * ti * (3 - 2 * ti);
+          const ao = (asv ? aAS : cd) * ti, ro = (1 + (eR - 1) * so) * v.r;
+          const ac = SL_COAPT * ti - SL_SAG * Math.sin(Math.PI * ti), rc = (1 - ti) * v.r;
+          const ai = ac + (ao - ac) * bl, ri = rc + (ro - rc) * bl;
+          _slA[i] = ai; _slR[i] = ri;
+          const d2 = (a - ai) * (a - ai) + (rad - ri) * (rad - ri);
+          if (d2 < best) { best = d2; bi = i; }
+        }
+        // refine on the two segments either side of the nearest sample
+        t = bi / SL_N;
+        for (let j = Math.max(0, bi - 1); j < Math.min(SL_N, bi + 1); j++) {
+          const ea = _slA[j + 1] - _slA[j], er = _slR[j + 1] - _slR[j];
+          const l2 = ea * ea + er * er || 1e-12;
+          const u = clamp(((a - _slA[j]) * ea + (rad - _slR[j]) * er) / l2, 0, 1);
+          const qa = _slA[j] + ea * u - a, qr = _slR[j] + er * u - rad;
+          const d2 = qa * qa + qr * qr;
+          if (d2 < best) { best = d2; t = (j + u) / SL_N; }
+        }
+        dist = Math.sqrt(best);
+      }
+    }
     // Thin membrane tapering to a fine free edge (thickest at the annular base).
     let th = thick * (0.45 + 0.55 * (1 - t) * (1 - t));
     // Nodulus of Arantius: a fibrous thickening at the CENTRE of each semilunar
@@ -905,17 +984,25 @@ function valveTissue(px, py, pz, G, path) {
     th += nod;
     // calcific AS: thick (3-5 mm), nodular cusps — calcium masses concentrated at the
     // cusp bodies and bases rather than a thin bright membrane
-    if (name === 'aortic' && path.aorticStenosis) {
+    if (asv) {
       const lump = 0.5 + 0.5 * Math.sin(rx * 7.1 + ry * 5.3 + rz * 6.7);
       th = th * 2.6 + 0.06 + 0.06 * lump * (1 - t * 0.5);
     }
-    let hit = Math.abs(rad - shellR) <= th;
-    // Semilunar commissural coaptation seams: three radial lines meeting centrally
-    // as the cusps shut — the short-axis "Mercedes" Y, and the closure line in LAX.
-    if (!hit && isCusp) {
-      const closed = 1 - open;
+    let hit = dist <= th;
+    // Coaptation zone of the shut semilunar valve: neighbouring cusps' free
+    // edges press together along the three commissural lines, from the cusp
+    // surface up to the free margin, which rises from the central nodules toward
+    // the commissures at the sinus wall — the short-axis "Mercedes" Y, and the
+    // thin central closure line in long axis.
+    if (!hit && isCusp && open < 0.25 * (asv ? AS_OPEN : 1)) {
       const angDist = Math.abs(kh) / 3;                   // angular distance to a commissure
-      if (closed > 0.25 && a > 0.6 * cd && rad < v.r * 0.9 && angDist * rad < 0.07) hit = true;
+      const rho = rad / v.r;
+      if (rho < 0.92 && angDist * rad < 0.07 * (asv ? 1.8 : 1)) {
+        const tb = 1 - rho;
+        const base = SL_COAPT * tb - SL_SAG * Math.sin(Math.PI * tb);
+        const top = SL_COAPT + SL_COAPT_H + rho * (cd - SL_COAPT - SL_COAPT_H);
+        if (a >= base && a <= top) { hit = true; t = 1; }
+      }
     }
     if (!hit) continue;
     let echo = 0.8 + 0.05 * (1 - t) + (nod > 0.03 ? 0.04 : 0); // nodule reads a touch brighter
