@@ -84,7 +84,11 @@ function circParams(path) {
   const g = gradeOf(path);
   if (path.aorticStenosis) {                                      // small AVA → LV pressure overload
     p.Rao = ({ mild: 0.068, moderate: 0.125, severe: 0.24 })[g];
-    p.Emax = ({ mild: 2.95, moderate: 3.3, severe: 3.95 })[g];   // compensatory, above normal (2.7)
+    p.Emax = ({ mild: 3.85, moderate: 4.3, severe: 5.15 })[g];   // compensatory, well above normal (2.7)
+    // compensated AS keeps a normal-to-high blood pressure (~120-140/70-80): the
+    // systemic vascular resistance is raised, so the LV (not the aorta) carries
+    // the valve gradient — LV systolic pressure ~190-210 in severe AS
+    p.Rsys *= 1.3;
   }
   if (path.lvh && !path.dilated) { p.Emin = 0.12; }               // stiff, hypertrophied → higher LVEDP
   if (path.dilated) { p.Emax = 0.60; p.Emin = 0.060; p.V0 = 30; p.Rsys = 1.30; p.Cao = 1.4; p.Pla0 = 13; }
@@ -113,6 +117,12 @@ function circParams(path) {
     p.Rmv = ({ mild: 0.043, moderate: 0.078, severe: 0.128 })[g];
     p.Pla0 = ({ mild: 12, moderate: 16, severe: 20 })[g];
     p.aWave = 8;
+  }
+  if (path.rvpo) {
+    // pulmonary hypertension: the failing right heart delivers less to the left
+    // (low LA filling pressure) and the flattened, leftward-shifted septum stiffens
+    // LV filling (ventricular interdependence) — the D-shaped LV is underfilled
+    p.Pla0 = Math.min(p.Pla0, 7); p.Emin *= 1.3;            // LV EDV ~90 mL
   }
   if (path.rwma) { p.Emax = Math.min(p.Emax, 1.8); }              // regional dysfunction → low global contractility
   return p;
@@ -234,7 +244,7 @@ function simulate(path) {
 const _cache = new Map();
 function sig(path) {
   return [path.aorticStenosis, path.lvh, path.dilated, path.mr, path.mitralStenosis,
-    path.rwma ? 1 : 0].map((v) => (v ? 1 : 0)).join('') + ':' + gradeOf(path);
+    path.rwma ? 1 : 0, path.rvpo].map((v) => (v ? 1 : 0)).join('') + ':' + gradeOf(path);
 }
 function solved(path) {
   const key = sig(path);

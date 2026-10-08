@@ -408,6 +408,14 @@ export function geometryAt(phase, path = {}) {
     pulmonic: valveOpening('pulmonic', phaseRV, otr, path),
   };
 
+  // rheumatic MS: the centre of the open funnel tip (the fish-mouth orifice), where
+  // PSAX-MV planimetry is done — the view tracks it (views.js)
+  if (path.mitralStenosis) {
+    const Gt = { A, valves: { mitral: 0.35 }, path };
+    const ta = avTipWorld('mitral', Gt, 1, 0), tp = avTipWorld('mitral', Gt, -1, 0);
+    A.msTip = [(ta[0] + tp[0]) / 2, (ta[1] + tp[1]) / 2, (ta[2] + tp[2]) / 2];
+  }
+
   return {
     phase, k, kick, kv, phaseRV, kRV: kR,
     // instantaneous lumped-parameter circulation state (PV loop, pressures,
@@ -719,7 +727,9 @@ function avLeafletPoly(P, sgn, q, o, sc, mod) {
   const uP = -Rap * half;
   const w = uA - uP;
   const ah = -P.saddle * (1 - 2 * q2);                      // saddle: atrial at A/P, low at the commissures
-  const uc = uP + P.coapt * w;
+  // rheumatic MS: both thickened leaflets dome, so the fused orifice sits anterior
+  // to the normal (posterior) coaptation line — central in the LV short axis
+  const uc = uP + (mod && mod.ms ? 0.75 : P.coapt) * w;
   // functional (tethered) regurgitation: the papillary muscles pull the
   // coaptation point further into the ventricle (DCM mitral tenting)
   const tent = P.tent + (mod && mod.tent ? mod.tent : 0);
@@ -729,7 +739,7 @@ function avLeafletPoly(P, sgn, q, o, sc, mod) {
   const Lb = Math.sqrt(reach * reach + tent * tent);
   const ovl = P.ovl * half + 0.08;
   let oo = o;
-  if (mod && mod.ms && q2 > 0.2) oo *= 0.12;                // rheumatic commissural fusion
+  if (mod && mod.ms && q2 > mod.msQ2) oo *= 0.12;           // rheumatic commissural fusion
   const ac0 = Math.atan2(tent, reach);                      // shut body angle (tenting)
   const ao = sgn > 0 ? P.openA : P.openP;                   // fully-open body angle
   let alpha = ac0 + (ao - ac0) * oo;
@@ -752,20 +762,25 @@ function avLeafletPoly(P, sgn, q, o, sc, mod) {
   _lp.ut = _lp.ub - sgn * ovl * Math.cos(beta); _lp.at = _lp.ab + ovl * Math.sin(beta);
   if (mod && mod.ms) {
     // planimetry-true orifice: the fused tips sit on an ellipse of AP width msGap
-    // (commissures fused beyond |q| ≈ 0.45), opening with the transmitral flow
+    // (commissures fused beyond |q| ≈ 0.62), opening with the transmitral flow —
+    // the central, medio-laterally elongated "fish-mouth" of the short axis
     const on = o / 0.35 > 1 ? 1 : o / 0.35;
-    const e = 1 - q2 / 0.2;
-    const hg = e > 0 ? 0.5 * mod.msGap * sc * Math.sqrt(e) * on : 0;
-    // rheumatic doming ("hockey stick"): the fused tip sits at the orifice edge,
-    // well into the LV, and the body bellies convexly toward the LV between hinge
-    // and tip instead of running straight (leaflets never cross the orifice)
-    const Lt = Lb + ovl;
-    _lp.ut = uc + sgn * hg;
-    const reachT = Math.abs(_lp.ut - uh);
-    _lp.at = ah + Math.sqrt(Math.max(0.3, Lt * Lt * 0.8 - reachT * reachT)) * (0.35 + 0.65 * on);
-    const bulge = (sgn > 0 ? 0.32 : 0.18) * on;               // anterior leaflet domes most
-    _lp.ub = uh + (_lp.ut - uh) * 0.5 - sgn * bulge * 0.4;
-    _lp.ab = ah + (_lp.at - ah) * 0.62 + bulge;
+    const e = 1 - q2 / mod.msQ2;
+    // (the gap is solved at the live annular size: the orifice area stays the MVA
+    // while the annulus breathes with the LV)
+    const hg = e > 0 ? 0.5 * msGapAt(mod.msA, sc) * Math.sqrt(e) * on : 0;
+    // The fused tips form one PLANAR ring across both leaflets and the fused
+    // commissures (the funnel tip, perpendicular to the inflow axis), so a short
+    // axis cut at the tips shows a closed fish-mouth rather than a broken C.
+    // (sheared along c so the slit runs closer to medial-lateral in the short axis)
+    _lp.ut = uc + sgn * hg + MS_SHEAR * q * P.Ric * sc;
+    _lp.at = MS_DEPTH * sc * (0.35 + 0.65 * on);
+    // Doming: the body runs down toward the LV bowing outward (the anterior
+    // leaflet toward the LVOT/septum) and the restricted tip hooks back in to the
+    // orifice — the "hockey stick" of the long-axis views
+    const bulge = (sgn > 0 ? 0.4 : 0.2) * on;                 // both leaflets dome (anterior most)
+    _lp.ub = uh + (_lp.ut - uh) * 0.4 + sgn * bulge * 0.1;
+    _lp.ab = ah + (_lp.at - ah) * 0.6 + bulge * 0.5;
   }
   if (mod && mod.gap && o < 0.5) {
     // malcoaptation: with a dilated annulus the leaflets no longer meet — the
@@ -807,7 +822,7 @@ function avLeafletHit(P, u, a, c, o, sc, mod, thickMul) {
     if (f > edgeCut) continue;
     const th0 = (sgn > 0 ? P.thickA : P.thickP) * thickMul;
     // thin membrane tapering to the free edge; rheumatic tips are bulbous
-    const th = mod && mod.ms ? th0 * (1.1 + 0.9 * f) : th0 * (1.05 - 0.4 * f);
+    const th = mod && mod.ms ? th0 * (1.05 + MS_TIP_BULB * f) : th0 * (1.05 - 0.4 * f);
     if ((d1 < d2 ? d1 : d2) <= th) return f;
   }
   return -1;
@@ -817,14 +832,30 @@ function avLeafletHit(P, u, a, c, o, sc, mod, thickMul) {
 const PROLAPSE = { mild: 0, moderate: 0.55, severe: 1 };
 // tricuspid malcoaptation gap (cm) in TR, by grade
 const TV_MOD = { mild: { gap: 0.1 }, moderate: { gap: 0.25 }, severe: { gap: 0.45 } };
+// rheumatic MS: open commissural span (|q| < MS_Q), tip bulb growth along the
+// leaflet and the resulting mean tip half-thickness (cm, thickMul 1.9 applied)
+const MS_Q = 0.62, MS_TIP_BULB = 0.9, MS_DEPTH = 1.4;   // MS_DEPTH: open tip ring below the annulus centre
+const MS_SHEAR = 0.4;                                    // tip-ring shear along the commissural axis
+const MS_TIP_T = 0.5 * (AVL.mitral.thickA + AVL.mitral.thickP) * 1.9 * (1.05 + MS_TIP_BULB);
+// AP tip gap (cm) at annular scale sc for an orifice of area msA. The cut at the
+// funnel tip grazes the bulbous tips, so the AP lumen is the tip-centreline gap,
+// while the bulbs, seen end-on at the commissural corners, shorten the slit by
+// ~one tip half-thickness at each end (calibrated against the planimetered
+// area in the tracked PSAX-MV plane, tools/verify-anatomy.mjs).
+function msGapAt(msA, sc) {
+  const halfL = MS_Q * AVL.mitral.Ric * sc - 0.7 * MS_TIP_T;
+  return 2 * msA / (Math.PI * halfL);
+}
 const _modCache = new WeakMap();
 function avMod(path) {
   let m = _modCache.get(path);
   if (!m) {
-    // MS orifice: fused commissures leave an ellipse ~1.45 cm wide (|q| < 0.45);
-    // its AP opening is set so the planimetered area matches the grade's MVA.
+    // MS orifice: fused commissures leave a fish-mouth ~2 cm wide (|q| < 0.62).
+    // Its AP opening (msGapAt) is set so the orifice INSIDE the thickened tips (the
+    // blood area a sonographer planimeters) matches the grade's MVA.
     const msA = MS_AREA[gradeOf(path)] || MS_AREA.severe;
-    m = { ms: !!path.mitralStenosis, msGap: 4 * msA / (Math.PI * 1.45), prolapse: path.mr ? PROLAPSE[gradeOf(path)] : 0,
+    m = { ms: !!path.mitralStenosis, msQ2: MS_Q * MS_Q, msA,
+      prolapse: path.mr ? PROLAPSE[gradeOf(path)] : 0,
       tent: path.dilated && !path.mr ? 0.55 : 0 };
     _modCache.set(path, m);
   }

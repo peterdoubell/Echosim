@@ -366,6 +366,46 @@ const ARCH_SEGS = (() => {
   return segs;
 })();
 
+// Left brachiocephalic (innominate) vein: from behind the left sternoclavicular
+// joint it crosses obliquely down and to the right, ANTERIOR to the arch's head
+// and neck branches and just above the arch, to join the right one at the top of
+// the SVC — the vein in the near field of the suprasternal view. Built against the
+// live SVC top; its course is pushed forward until it clears every arch segment.
+const BCV_R = 0.5, BCV_UP = 2.5, BCV_PUSH = 0.5;                      // d ~1 cm; height above the arch summit
+function buildBCV(svc) {
+  const top = svc.b;
+  // the suprasternal (arch) plane: it crosses it in the near field, above the
+  // ascending limb and in front of the brachiocephalic trunk, then runs out of the
+  // plane to the patient's left
+  let n = unit(cross(sub(AO_ASC_TOP, AO_ARCH_MID), sub(DTA_TOP, AO_ARCH_MID)));
+  if (dot(n, BL) < 0) n = mul(n, -1);
+  const up = unit(sub(BS, mul(n, dot(BS, n))));
+  const fwd = unit(sub(sub(AO_ASC_TOP, DTA_TOP), mul(up, dot(sub(AO_ASC_TOP, DTA_TOP), up))));
+  let mid = mad(mad(AO_ARCH_MID, up, BCV_UP), fwd, 1.6);
+  let left = mad(mad(mad(mid, n, 3.0), up, 0.6), fwd, -0.3);
+  // it meets the SVC top from above (the confluence with the right vein)
+  const hi = mad(top, BS, 1.4);
+  const clear = () => {
+    let g = 1e9;
+    for (const [p, q] of [[top, hi], [hi, mid], [mid, left]]) for (let t = 0; t <= 1.001; t += 0.1) {
+      const c = lerp3(p, q, t);
+      for (const [a, b, r] of ARCH_SEGS) g = Math.min(g, sdCapsule(c[0], c[1], c[2], a[0], a[1], a[2], b[0], b[1], b[2], r));
+    }
+    return g;
+  };
+  let it = 0;
+  // clear the head vessels by moving forward along the arch, but at most
+  // BCV_PUSH: further would carry the crossing out of the suprasternal sector
+  // (the vein then lies just in front of the brachiocephalic trunk's origin)
+  for (; it < BCV_PUSH * 10 && clear() < BCV_R + 0.08; it++) { mid = mad(mid, fwd, 0.1); left = mad(left, fwd, 0.1); }
+  return [{ a: top, b: hi, r: BCV_R }, { a: hi, b: mid, r: BCV_R }, { a: mid, b: left, r: BCV_R * 0.9 }];
+}
+function dBCV(x, y, z, A) {
+  let d = 1e9;
+  for (const s of A.bcv) d = Math.min(d, sdCapsule(x, y, z, s.a[0], s.a[1], s.a[2], s.b[0], s.b[1], s.b[2], s.r));
+  return d;
+}
+
 // Body-level references for the diaphragm / liver (subcostal window). The
 // heart's diaphragmatic surface — the LV and RV inferior walls — is flat and
 // runs ALONG the long axis, lying on the central tendon; so locally the
@@ -552,6 +592,13 @@ function anchorToSeptum(E, sgn, pen) {
 // tracks the modelled PV loop; when omitted a kinematic scaling is used (keeps
 // anatomyParams callable standalone). `phase` drives the atrial reservoir curve;
 // it cannot be recovered from k (two-valued in phase) so it is passed explicitly.
+// RA pressure estimated from the IVC as a sonographer does (ASE 2010/2015):
+// diameter <= 2.1 cm collapsing > 50 % on sniff -> 3 mmHg; > 2.1 cm collapsing
+// < 50 % -> 15 mmHg; anything in between -> 8 mmHg.
+export function rapEstimate(ivc) {
+  const d = 2 * ivc.r, small = d <= 2.1, collapses = (ivc.collapse != null ? ivc.collapse : 0.55) > 0.5;
+  return small && collapses ? 3 : !small && !collapses ? 15 : 8;
+}
 export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   // Remodelling: when coupled to the circulation the LV size follows the modelled
   // EDV (eccentric dilatation in DCM / chronic MR, a smaller cavity in concentric
@@ -757,7 +804,10 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
     sa = add(sa, tether);
     return {
       svc: { a: sa, b: mad(sa, sDir, 4.5), r: CAVA.svcR },     // d 1.6
-      ivc: { a: add(ia, tether), b: mad(add(ia, tether), unit(mad(BODY_AX.I, SEPT_V, CAVA.ivcTilt)), 11.0), r: ivcR },
+      // sniff: the IVC halves in calibre with normal RA pressure; plethoric with
+      // raised RA pressure it barely collapses (< 50 %)
+      ivc: { a: add(ia, tether), b: mad(add(ia, tether), unit(mad(BODY_AX.I, SEPT_V, CAVA.ivcTilt)), 11.0), r: ivcR,
+        collapse: (path.rvpo || path.tr) ? 0.2 : 0.55 },
     };
   })();
   // the band's free-wall end moves in with the RV free wall (short-axis shortening)
@@ -779,7 +829,7 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
     // the venae cavae enter the RA's superior and posterior-inferior poles, in
     // line with each other (the ME bicaval axis); the IVC orifice lies ~3 cm
     // from the tricuspid annulus, across the cavotricuspid isthmus
-    svc: cav.svc, ivc: cav.ivc,
+    svc: cav.svc, ivc: cav.ivc, bcv: buildBCV(cav.svc),
     ias: { p: IAS_P, n: IAS_N, tLimbus: IAS.tLimbus, tFossa: iasT, rFossa: IAS.rFossa, fc: IAS.fossaC },
     cs: buildCS(Mbase, add(RA_FLOOR0, [0, -tvDrop, 0])),
     // aortic root: three sinuses of Valsalva around the valve, sino-tubular
@@ -1030,6 +1080,7 @@ function lvEpiRadiusAt(y, L) {
 // the PDA descends the inferior interventricular groove. On echo the ostia are
 // the landmark of the PSAX-AV view (LM at ~4 o'clock off the left cusp, RCA at
 // ~10-11 o'clock off the right cusp). Calibres: LM ~4.5 mm, LAD / RCA ~3.5 mm.
+const CONUS_LIFT = 2.3;                 // conus branch: distance off the RVOT axis (cm)
 function buildCoronaries(L, ao, T, tvN) {
   const segs = [];
   // Each vessel is a Catmull-Rom curve through its control points, subdivided so
@@ -1040,7 +1091,7 @@ function buildCoronaries(L, ao, T, tvN) {
     return [0, 1, 2].map((k) => 0.5 * (2 * p1[k] + (p2[k] - p0[k]) * t +
       (2 * p0[k] - 5 * p1[k] + 4 * p2[k] - p3[k]) * t2 + (3 * p1[k] - p0[k] - 3 * p2[k] + p3[k]) * t3));
   };
-  const chain = (ctl, r0, r1) => {
+  const chain = (ctl, r0, r1, name) => {
     const pts = [ctl[0]];
     for (let i = 0; i < ctl.length - 1; i++) {
       const p0 = ctl[Math.max(0, i - 1)], p3 = ctl[Math.min(ctl.length - 1, i + 2)];
@@ -1050,7 +1101,7 @@ function buildCoronaries(L, ao, T, tvN) {
       const f0 = i / (pts.length - 1), f1 = (i + 1) / (pts.length - 1);
       const a = pts[i], b = pts[i + 1], ra = r0 + (r1 - r0) * f0, rb = r0 + (r1 - r0) * f1;
       const m = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
-      segs.push({ a, b, r1: ra, r2: rb, m, R: Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) / 2 + Math.max(ra, rb) });
+      segs.push({ a, b, r1: ra, r2: rb, m, R: Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) / 2 + Math.max(ra, rb), name });
     }
   };
   const onLV = (angDeg, y, lift) => {
@@ -1069,10 +1120,18 @@ function buildCoronaries(L, ao, T, tvN) {
   for (const f of [0.22, 0.45, 0.68, 0.86]) lad.push(onLV(74 + 8 * f, yb + (L.apexY - yb) * f, 0.24));
   lad.push(onLV(88, L.apexY + 0.5, 0.2));
   chain(lad, 0.2, 0.11);
+  // first-order branches a commercial trainer shows: two diagonals off the LAD over
+  // the anterolateral wall, two obtuse marginals off the circumflex down the lateral
+  // wall, and the conus branch off the proximal RCA over the RVOT
+  const lf = (f) => yb + (L.apexY - yb) * f;
+  chain([lad[2], onLV(58, lf(0.36), 0.24), onLV(38, lf(0.52), 0.22), onLV(28, lf(0.66), 0.2)], 0.13, 0.09, 'D1');
+  chain([lad[3], onLV(62, lf(0.6), 0.23), onLV(46, lf(0.76), 0.21)], 0.12, 0.08, 'D2');
   // circumflex: left AV groove, lateral then posterolateral
   const cx = [bif];
   for (const ang of [50, 25, 0, -25, -50]) cx.push(onLV(ang, yb - 0.25, 0.28));
   chain(cx, 0.18, 0.12);
+  chain([cx[2], onLV(18, lf(0.22), 0.26), onLV(12, lf(0.42), 0.24), onLV(8, lf(0.6), 0.22)], 0.13, 0.09, 'OM1');
+  chain([cx[4], onLV(-32, lf(0.22), 0.26), onLV(-38, lf(0.42), 0.24), onLV(-42, lf(0.56), 0.22)], 0.12, 0.08, 'OM2');
   // RCA from the right-coronary sinus (anterior, 90 deg), round the right AV groove
   const rcaO = mad(axis, dirAt(90), 0.62 + ao.sinusR - 0.12);
   const ea = unit(sub([0, 0, 1], mul(tvN, dot([0, 0, 1], tvN))));          // anterior, in the TV plane
@@ -1083,6 +1142,16 @@ function buildCoronaries(L, ao, T, tvN) {
   const crux = onLV(-128, yb - 0.9, 0.3);
   rca.push(crux);
   chain(rca, 0.19, 0.15);
+  // conus: up and leftward over the RV infundibulum, toward the pulmonary valve
+  const cn0 = mad(rcaO, unit(sub(rca[1], rcaO)), 0.35);
+  // (each point lifted off the RVOT axis onto its epicardial surface)
+  const toPV = unit(sub(PV0, cn0));
+  const ra = RVOT_PTS[1], rb = RVOT_PTS[2], rab = sub(rb, ra), rl2 = dot(rab, rab);
+  const onRvot = (q) => {
+    const t = Math.max(0, Math.min(1, dot(sub(q, ra), rab) / rl2)), c = mad(ra, rab, t);
+    return mad(c, unit(sub(q, c)), CONUS_LIFT);
+  };
+  chain([cn0, onRvot(mad(cn0, toPV, 0.8)), onRvot(mad(cn0, toPV, 1.6))], 0.11, 0.08, 'conus');
   // PDA down the inferior interventricular groove
   const pda = [crux];
   for (const f of [0.25, 0.5, 0.7]) pda.push(onLV(-126, yb + (L.apexY - yb) * f, 0.24));
@@ -1238,7 +1307,16 @@ function dLVlumenS(x, y, z, A, g) {
     d = smin(d, sdFrustum(x, y, z, lo[0], lo[1], lo[2], Av[0] + U_AO[0] * 0.03, Av[1] + U_AO[1] * 0.03, Av[2] + U_AO[2] * 0.03, L.lvotR, AO.annR * 0.97), 0.35);
   }
   // apical trabeculation roughens the endocardium in the apical third
-  if (A.trab && y < L.apexY + 3.2 && d > -0.3 && d < 0.3) d += trabecular(x, y, z, 0.16);
+  if (A.trab && d > -0.3 && d < 0.3) {
+    if (y < L.apexY + 3.2) d += trabecular(x, y, z, 0.16);
+    else if (y < L.apexY + 5.6) {
+      // finer, lower trabeculation up the mid lateral and inferolateral walls
+      // (the free wall stays trabeculated; the septum is smooth)
+      const ang = Math.atan2(z, x);
+      const w = smoothstep(-1.9, -1.4, ang) * (1 - smoothstep(0.6, 1.1, ang)) * (1 - smoothstep(L.apexY + 4.6, L.apexY + 5.6, y));
+      if (w > 0) d += trabecular(x * 1.3, y * 1.3, z * 1.3, 0.08 * w);
+    }
+  }
   return d;
 }
 function lvWallAt(y, A, g, x = 0, z = 0) {
@@ -1869,6 +1947,10 @@ export function bodyClassify(x, y, z, A, periOff = 0) {
   if (dpa < best) { best = dpa; code = BODY.AO; }
   if (dcs < best) { best = dcs; code = BODY.RA; }
   if (code !== BODY.OUT) return bc(code, 0.03);
+  // the innominate vein (outside every cardiac lumen; it ends in the SVC)
+  const dbv = dBCV(x, y, z, A);
+  if (dbv < 0) return bc(BODY.VEIN, 0.03);
+  if (dbv < 0.06 && dra > 0.3) return bc(BODY.VESSELWALL, 0.35);
 
   // myocardium / vessel walls: inside the epicardial body but outside every lumen
   const m = myoParts(x, y, z, A);
