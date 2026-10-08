@@ -192,7 +192,7 @@ const RA_FLOOR0 = add(T0, [0.45, 0.1, -0.2]);
 const LA_ES = { len: 5.0, w1: 1.55, w2: 1.75 };       // A4C major 5.0, (cut) minor ~4.0, PLAX AP ~3.4
 // the LA body sits back along the Ao/LA line, behind the root (PLAX AP ~3.3 cm)
 const LA_POST = 0.8;
-const RA_ES = { len: 4.0, w1: 2.3, w2: 1.9 };        // A4C major ~4.6, (cut) minor ~3.7
+const RA_ES = { len: 4.0, w1: 2.15, w2: 1.9 };        // A4C major ~4.6, (cut) minor ~3.7
 // Roofs follow part of their annulus's excursion (the atria are not pinned),
 // placed so the end-systolic floor-to-roof length is exactly the ES value above.
 // The LA roof follows only 12 %: the annular descent then stretches the LA long
@@ -201,9 +201,18 @@ const RA_ES = { len: 4.0, w1: 2.3, w2: 1.9 };        // A4C major ~4.6, (cut) mi
 const ROOF_FOLLOW = 0.35;
 const LA_ROOF_FOLLOW = 0.12;
 const LA_ROOF = mad(add(LA_FLOOR0, [0, -(1 - LA_ROOF_FOLLOW) * MAPSE_REF, 0]), A_LA, LA_ES.len);
-// tricuspid hinge: fraction of TAPSE at the annulus centre / septal rim, and the
-// in-plane direction from the septal toward the lateral (free-wall) rim
-const TV_SEPT_FRAC = 0.62, TV_CENTRE_FRAC = 0.609;   // septal rim moves with the mitral annulus (fibrous skeleton); RA floor follows the old centre
+// Tricuspid hinge. The septal rim sits on the central fibrous body beside the septal mitral hinge,
+// so it descends with that hinge's share of the mitral excursion — on the LV's
+// clock, whatever the LV does (in DCM it barely moves, and the septal offset is
+// kept). The lateral rim adds the RV free wall's own longitudinal shortening on
+// top (TAPSE, RV clock). Normal ES: septal ~1.2 cm, lateral (TAPSE) ~2.4 cm.
+const TV_SEPT_W = mvWeight(dot(unit([T0[0] - M0[0], 0, T0[2] - M0[2]]), MV_AP));
+const TV_SEPT_REF = TV_SEPT_W * MAPSE_REF / MV_W_MEAN;    // septal-rim descent, normal ES
+const TV_FW = 1.28;                                        // free-wall share of the lateral-rim descent (TAPSE ~2.4)
+const TV_SEPT_FRAC = TV_SEPT_REF / TAPSE_REF;
+// the RA floor (with the coronary sinus and the caval tether) descends with the
+// annulus centre (normal ES descent)
+const RA_FLOOR_ES = TV_SEPT_REF + 0.5 * TV_FW;
 // the RA body lies right-posterior of the aortic root: the non-coronary sinus
 // indents only its anteromedial wall, it does not sit in the chamber's middle
 const RA_POST = 1.0;
@@ -213,7 +222,7 @@ const RA_AWAY = (() => {
   const v = sub(mid, root);
   return unit(sub(v, mul(A_RA, dot(v, A_RA))));
 })();
-const RA_ROOF = mad(add(RA_FLOOR0, [0, -(1 - ROOF_FOLLOW) * TV_CENTRE_FRAC * TAPSE_REF, 0]), A_RA, RA_ES.len);
+const RA_ROOF = mad(add(RA_FLOOR0, [0, -(1 - ROOF_FOLLOW) * RA_FLOOR_ES, 0]), A_RA, RA_ES.len);
 // Interatrial septum: a plane through the crux and the posterior aortic root
 // (the non-coronary sinus abuts it), facing the RA. The atria overlap across it
 // and are CUT by it, so they share one flat septal wall — thin over the fossa
@@ -369,6 +378,7 @@ function onA4C(x, y) {
 }
 // moderator band's free-wall insertion (anterior papillary muscle base)
 const MOD_FW = [-6.2, -4.75, onA4C(-6.2, -4.75)];
+// tricuspid annulus: in-plane direction from the septal toward the lateral (free-wall) rim
 const TV_LAT = (() => {
   const n0 = unit(sub(T0, [-2.3, CFG.rvBody.c[1] - CFG.rvBody.r[1] + 0.6, 1.9]));
   const v = sub(T0, M0);
@@ -530,16 +540,20 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   const LVOTlive = [LVOT0[0] * sS, axialMap(LVOT0[1]), LVOT0[2] * sS];
 
   // RV: apex-anchored too. The tricuspid annulus HINGES rather than translating:
-  // its lateral rim descends toward the RV apex by TAPSE (~2.1 cm) while the
-  // septal rim, tethered to the fibrous skeleton, moves ~45 % of that — so the
-  // annulus centre drops ~0.73 TAPSE and the annular plane tilts toward the free
-  // wall in systole. (TAPSE is, by definition, the lateral-annulus excursion.)
+  // its lateral rim descends toward the RV apex by TAPSE (~2.4 cm) while the
+  // septal rim, tethered to the fibrous skeleton, moves with the septal mitral
+  // hinge (~1.2 cm) — so the annular plane tilts toward the free wall in systole.
+  // (TAPSE is, by definition, the lateral-annulus excursion.)
   // the right heart runs on its own, slightly offset clock (cardiac-model rvPhase:
   // T1 after M1, RV ejection starting earlier and ending later than the LV's)
   const kR = mech && mech.kRV != null ? mech.kRV : k;
-  const rvS = 1 - kR * 0.24;                               // RV short-axis shortening
+  const rvS = 1 - kR * 0.34;                               // RV short-axis shortening (FAC ~45-50 %)
   const tapse = TAPSE_REF * kR;
-  const tvDrop = TV_CENTRE_FRAC * tapse;
+  // tricuspid rims: septal on the fibrous skeleton (the septal mitral hinge's
+  // descent, LV clock); lateral = septal + the free wall's own shortening (RV clock)
+  const tvSep = -TV_SEPT_W * dM;
+  const tvLatDrop = tvSep + TV_FW * kR;
+  const tvDrop = 0.5 * (tvSep + tvLatDrop);                // annulus-centre (and RA floor) descent
   const Tlive = [T0[0], T0[1] - tvDrop, T0[2]];
   const PVlive = mad(PV0, [0, 1, 0], -0.25 * tapse);
   const rvB = CFG.rvBody;
@@ -547,16 +561,16 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   const push = (lvScale - 1) * LVP.b * 0.9;
   const rvDir = unit([rvB.c[0], 0, rvB.c[2]]);
   const rvApexY = rvB.c[1] - rvB.r[1] - (lvLong - 1) * LVP.len * 0.5;
-  const rvRy = rvB.r[1] * rvpoScale - tapse * 0.5 + (lvLong - 1) * LVP.len * 0.25;
+  const rvRy = rvB.r[1] * rvpoScale - tvLatDrop * 0.5 + (lvLong - 1) * LVP.len * 0.25;
   const rvW = rvpoScale * (1 + (lvScale - 1) * 0.35);
   const rv = {
     c: [rvB.c[0] - (rvpoScale - 1) * 1.2 + rvDir[0] * push, rvApexY + rvRy, rvB.c[2] + (rvpoScale - 1) * 0.6 + rvDir[2] * push],
     r: [rvB.r[0] * rvS * rvW, rvRy, rvB.r[2] * rvS * rvW],
   };
   // annulus normal, facing the RA, tilted by the lateral-minus-septal excursion
-  const tvN = unit(mad(unit(sub(Tlive, [-2.3, rvApexY + 0.6, 1.9])), TV_LAT, (1 - TV_SEPT_FRAC) * tapse / (2 * TV_R)));
+  const tvN = unit(mad(unit(sub(Tlive, [-2.3, rvApexY + 0.6, 1.9])), TV_LAT, (tvLatDrop - tvSep) / (2 * TV_R)));
   const tvLat = mad(Tlive, unit(sub(TV_LAT, mul(tvN, dot(TV_LAT, tvN)))), TV_R);   // lateral rim (TAPSE point)
-  const inflow = { c: mad(Tlive, tvN, -1.6), r: [2.25 * rvS * rvpoScale, 1.8, 2.1 * rvS * rvpoScale] };
+  const inflow = { c: mad(Tlive, tvN, -1.6), r: [2.25 * rvS * rvpoScale, 1.8 * (1 - 0.15 * kR), 2.1 * rvS * rvpoScale] };
   const rvot = [
     mad(RVOT_PTS[0], [0, 1, 0], -0.25 * tapse),
     mad(RVOT_PTS[1], [0, 1, 0], -0.25 * tapse),
@@ -620,6 +634,7 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
       c: [0, apexY + LVP.len * lvLong * lsy * 0.5, 0],
       ax: 0, az: 0, apexY,
       sR: sS * lvScale, sL: sL * lvLong, sS, lvScale,
+      radBoost: RAD_BOOST * Math.max(0, 1 - sS),          // regional (inferolateral) radial emphasis
       sRDia: lvScale, sLDia: lvLong,
       wall: lvWall,
       wallDia: LVP.wall * lvWallMul,
@@ -1090,6 +1105,26 @@ function trabecular(x, y, z, amp) {
   const a = Math.sin(x * 5.3 + y * 1.7) * Math.sin(z * 4.9 - y * 2.3) + 0.5 * Math.sin(y * 6.1 + x * 2.9 + z * 3.3);
   return amp * (a > 0.35 ? (a - 0.35) : 0);
 }
+// Regional radial motion. The inferolateral / lateral walls move in further
+// than the septum (PLAX M-mode: posterior-wall excursion ~1 cm, septal ~0.6 cm),
+// so above the apical third the cavity shortens radially a little more on that
+// side than the volume-exact scaling gives: normal PLAX FS ~31 %, and the M-mode
+// (Teichholz) EF agrees with the circulation's. The extra shortening is a share
+// of the short-axis shortening, so a poorly contracting (DCM) LV gets almost
+// none. The lateral wall also THICKENS more than the septum (~50 % vs ~40 %);
+// only the systolic increment is modulated, so the diastolic wall stays uniform.
+const RAD_BOOST = 0.45, RAD_S0 = 3.0, RAD_S1 = 5.5;     // share of (1 - sS); apical-third fade (cm)
+const LAT_ANG = -0.7, THICK_MOD = 0.15;                   // inferolateral-lateral direction (rad); thickening spread
+const lateralWeight = (x, z) => (x || z ? 0.5 + 0.5 * Math.cos(Math.atan2(z, x) - LAT_ANG) : 0.5);
+// radial scale of the LV cavity + wall about the long axis at a point: applied as
+// a stretch of the query point, so the body and the inflow/outflow funnels move
+// in together; it fades out just below the annulus, which keeps its own motion
+function radStretch(x, y, z, L, g) {
+  if (!L.radBoost || g >= 1) return 1;
+  const s = y - L.apexY;
+  const fade = smoothstep(RAD_S0, RAD_S1, s) * (1 - smoothstep(L.M[1] - 1.0, L.M[1] - 0.1, y));
+  return fade > 0 ? 1 - L.radBoost * (1 - g) * lateralWeight(x, z) * fade : 1;
+}
 // LV body cavity only (no funnels), world space.
 function lvBody(x, y, z, A, g) {
   const L = A.lv;
@@ -1114,6 +1149,11 @@ function lvBody(x, y, z, A, g) {
 // Full LV lumen: body + mitral inflow funnel + LV outflow tract.
 function dLVlumen(x, y, z, A) {
   const g = A.lv.rwma ? rwmaBlend(x, y, z, A) : 0;
+  const f = radStretch(x, y, z, A.lv, g);
+  if (f !== 1) return dLVlumenS(x / f, y, z / f, A, g) * f;
+  return dLVlumenS(x, y, z, A, g);
+}
+function dLVlumenS(x, y, z, A, g) {
   let d = lvBody(x, y, z, A, g);
   const L = A.lv, M = L.M, Av = L.A, lo = L.lvot;
   // quick reject: the funnels live in the top 3 cm of the LV
@@ -1126,20 +1166,27 @@ function dLVlumen(x, y, z, A) {
   if (A.trab && y < L.apexY + 3.2 && d > -0.3 && d < 0.3) d += trabecular(x, y, z, 0.16);
   return d;
 }
-function lvWallAt(y, A, g) {
+function lvWallAt(y, A, g, x = 0, z = 0) {
   const L = A.lv;
-  const w = L.wall + (L.wallDia - L.wall) * g;
+  const inc = (L.wall - L.wallDia) * (1 + THICK_MOD * (2 * lateralWeight(x, z) - 1));
+  const w = L.wallDia + inc * (1 - g);
   const dA = L.apexLift * (1 - g);                          // same apical frame as lvBody
   const s = (y - L.apexY - dA) / (L.sL - dA / LVP.len);
   return w * (LVP.apexWallFrac + (1 - LVP.apexWallFrac) * smoothstep(0.0, 3.5, s));
 }
 function lvEpi(x, y, z, A) {
   const g = A.lv.rwma ? rwmaBlend(x, y, z, A) : 0;
+  const f = radStretch(x, y, z, A.lv, g);
+  // (the wall is laid on after the stretch: it keeps its thickness)
+  if (f !== 1) return lvEpiS(x / f, y, z / f, A, g, 1 / f) * f;
+  return lvEpiS(x, y, z, A, g, 1);
+}
+function lvEpiS(x, y, z, A, g, ws) {
   const L = A.lv, M = L.M, Av = L.A, lo = L.lvot;
-  const w = lvWallAt(y, A, g);
+  const w = lvWallAt(y, A, g, x, z) * ws;
   let d = lvBody(x, y, z, A, g) - w;
   if (y > L.apexY + LVP.len * L.sL - 3.6) {
-    const wb = L.wall * 0.8;
+    const wb = L.wall * 0.8 * ws;
     const ym = y - mitralLift(x, y, z, A);
     d = smin(d, sdFrustum(x, ym, z, M[0] * L.sS, M[1] - 1.3, (M[2] + 0.2) * L.sS, M[0], M[1] + 0.12, M[2], 1.8 * L.sS + wb, L.mvR + 0.3), 0.5);
     d = smin(d, sdFrustum(x, y, z, lo[0], lo[1], lo[2], Av[0], Av[1], Av[2], L.lvotR + wb, AO.annR + 0.3), 0.5);

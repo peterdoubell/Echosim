@@ -19,7 +19,7 @@
 // commit that added it: it is printed but does not set the exit code.
 //
 // Usage: node tools/verify-anatomy.mjs [--verbose]     (exit 0 = all pass)
-import { geometryAt, classify, TISSUE, hemoSummary, membSite, MEMB_T, VSD_RADIUS, shuntLabel, stenosisCw, FLOW } from '../js/cardiac-model.js';
+import { geometryAt, classify, TISSUE, hemoSummary, hemodynamics, membSite, MEMB_T, VSD_RADIUS, shuntLabel, stenosisCw, FLOW } from '../js/cardiac-model.js';
 import { LM, REF, lumenDist, mitralLift, BODY_AX, diaphragmBelow, rwmaBlend, stomachDist } from '../js/anatomy.js';
 import { MS_AREA } from '../js/hemodynamics.js';
 import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, ALL_VIEWS as ALL_V } from '../js/views.js';
@@ -40,6 +40,22 @@ const sum = hemoSummary({});
 const ES = sum.tMinVol;                        // minimum LV volume = end-systole
 const GED = geometryAt(ED, {});
 const GES = geometryAt(ES, {});
+// RV end-systole: maximum RV contraction on the right heart's own clock
+const RV_ES = (() => { let ph0 = ES, kMax = -1; for (let ph = 0.38; ph <= 0.56; ph += 0.005) { const k = geometryAt(ph, {}).kRV; if (k > kMax + 1e-6) { kMax = k; ph0 = ph; } } return ph0; })();
+const GRES = geometryAt(RV_ES, {});
+// TV septal-leaflet offset at any phase: the end-diastolic centre-to-centre
+// offset (the REF.tvOffsetNormal convention) plus how much further the septal TV
+// hinge has descended than the septal mitral hinge (the A4C hinges facing each
+// other across the crux, both on the fibrous skeleton)
+function tvSeptOffset(A0, A) {
+  const sept = (B) => { const t = B.valves.tricuspid; return t.c.map((c, i) => 2 * c - t.lat[i]); };
+  const mvSept = (B) => {
+    const u = unit([LM.T[0] - LM.M[0], 0, LM.T[2] - LM.M[2]]), c = B.lv.M, r = B.lv.mvR;
+    const p = [c[0] + u[0] * r, c[1], c[2] + u[2] * r];
+    return p[1] + mitralLift(p[0], p[1], p[2], B);
+  };
+  return (A0.valves.mitral.c[1] - A0.valves.tricuspid.c[1]) + (sept(A0)[1] - sept(A)[1]) - (mvSept(A0) - mvSept(A));
+}
 
 const rows = [];
 let SECTION = 'Normal';                         // report section of the rows that follow
@@ -98,7 +114,28 @@ check('LV', 'LVIDd (PLAX, leaflet tips)', lvEDm && lvEDm.lvid, REF.lviddNormal);
 check('LV', 'LVIDs (PLAX)', lvESm && lvESm.lvid, REF.lvidsNormal);
 check('LV', 'IVSd', lvEDm && lvEDm.ivs, REF.lvWallNormal);
 check('LV', 'PWd', lvEDm && lvEDm.pw, REF.lvWallNormal);
-check('LV', 'fractional shortening', lvEDm && lvESm && (1 - lvESm.lvid / lvEDm.lvid) * 100, [25, 45], '%');
+check('LV', 'fractional shortening', lvEDm && lvESm && (1 - lvESm.lvid / lvEDm.lvid) * 100, [28, 40], '%');
+// the M-mode (Teichholz) EF from the same calipers agrees with the circulation's
+{
+  const teich = (d) => 7 / (2.4 + d) * d * d * d;
+  const efT = lvEDm && lvESm ? (1 - teich(lvESm.lvid) / teich(lvEDm.lvid)) * 100 : null;
+  check('LV', 'Teichholz EF minus circulation EF', efT != null ? efT - sum.EF : null, [-6, 6], 'pts', `Teichholz ${efT && efT.toFixed(1)} %, circulation ${sum.EF.toFixed(1)} %`);
+}
+// regional systolic thickening (mid-ventricular short axis): normal everywhere
+// (> 30 %), the lateral wall thickening more than the septum
+{
+  const wallAt = (G, ang) => {
+    const L = G.A.lv, y = 0.5 * (L.apexY + L.M[1]), d = [Math.cos(ang), 0, Math.sin(ang)];
+    const lv = run(G, [0, y, 0], d, isT(TISSUE.LV), 5);
+    const my = lv && run(G, [0, y, 0], d, isT(TISSUE.MYO), 7, lv[1]);
+    return my && Math.abs(my[0] - lv[1]) < 0.05 ? len(my) : null;
+  };
+  const thick = (ang) => (wallAt(GES, ang) / wallAt(GED, ang) - 1) * 100;
+  const tS = thick(Math.PI), tL = thick(0);               // septum (9 o'clock) / lateral (3 o'clock, clear of the papillaries)
+  check('LV', 'systolic wall thickening, septum (mid SAX)', tS, [30, 70], '%');
+  check('LV', 'systolic wall thickening, lateral (mid SAX)', tL, [35, 75], '%');
+  check('LV', 'lateral minus septal thickening', tL - tS, [3, 30], 'pts');
+}
 
 // LV length (A4C, ED): endocardial apex -> mitral annular midpoint
 const a4c = TTE_VIEWS.A4C.probe();
@@ -299,6 +336,17 @@ check('LA', 'LA volume (voxel, ES)', laV, [30, 70], 'mL', 'LAVI 16-34 mL/m2 x BS
   check('RV', 'RVOT proximal diameter (PSAX-AV)', len(r), [2.1, 3.5]);
 }
 
+// RV fractional area change (ASE/EACVI 2015: normal ~49 %, abnormal < 35 %),
+// planimetered in the drawn image at the RV's own end-systole (the right heart
+// runs on its own, slightly later clock: maximum RV contraction)
+{
+  const rvArea = (view, G) => { const S = planeSample(view, G, {}, 0.08); let n = 0; for (const l of S.lab) if (l === TISSUE.RV) n++; return n * S.step * S.step; };
+  for (const [vn, view, lo] of [['A4C', TTE_VIEWS.A4C, 42], ['ME4C', TEE_VIEWS.ME4C, 42], ['PSAX', TTE_VIEWS.PSAX, 38], ['TGSAX', TEE_VIEWS.TGSAX, 38]]) {
+    const a0 = rvArea(view, GED), a1 = rvArea(view, GRES);
+    check('RV', `RV fractional area change (${vn})`, (1 - a1 / a0) * 100, [lo, 58], '%', `${a0.toFixed(1)} -> ${a1.toFixed(1)} cm2 at RV ES ${RV_ES.toFixed(3)}`);
+  }
+}
+
 // ============================================================================
 // 5. Valves, great vessels, veins, relationships
 // ============================================================================
@@ -308,19 +356,15 @@ check('LA', 'LA volume (voxel, ES)', laV, [30, 70], 'mL', 'LAVI 16-34 mL/m2 x BS
   check('Valves', 'tricuspid annulus (A4C)', 2 * LM.TV_R, [2.8, 4.0]);
   check('Valves', 'TV septal-leaflet apical offset', M[1] - T[1], REF.tvOffsetNormal, 'cm', 'Ebstein if > 0.8 cm/m2');
   // the offset persists through systole: the septal TV hinge descends with the
-  // mitral annulus (both on the fibrous skeleton), the lateral TV rim by TAPSE
-  {
-    const Ms = GES.A.valves.mitral.c, tvS = GES.A.tvSept || null;
-    const dM = GED.A.valves.mitral.c[1] - Ms[1];
-    const sepDrop = LM.TV_SEPT_FRAC * LM.TAPSE_REF;
-    check('Valves', 'TV septal offset persists at ES', (M[1] - T[1]) - (dM - sepDrop), [0.3, 1.2]);
-  }
+  // septal mitral hinge (both on the fibrous skeleton), the lateral TV rim by TAPSE
+  check('Valves', 'TV septal offset persists at ES (septal hinges)', tvSeptOffset(GED.A, GES.A), [0.3, 1.2]);
   const mapse = GED.A.valves.mitral.c[1] - GES.A.valves.mitral.c[1];
-  // TAPSE: excursion of the LATERAL tricuspid annulus toward the RV apex
-  const tl0 = GED.A.valves.tricuspid.lat, tl1 = GES.A.valves.tricuspid.lat;
+  // TAPSE: excursion of the LATERAL tricuspid annulus toward the RV apex, at the
+  // RV's own end-systole
+  const tl0 = GED.A.valves.tricuspid.lat, tl1 = GRES.A.valves.tricuspid.lat;
   const tapse = Math.hypot(tl0[0] - tl1[0], tl0[1] - tl1[1], tl0[2] - tl1[2]);
   check('Valves', 'MAPSE', mapse, [1.0, 2.0]);
-  check('Valves', 'TAPSE', tapse, [1.7, 2.8]);
+  check('Valves', 'TAPSE', tapse, [2.0, 2.8], 'cm', `at RV ES ${RV_ES.toFixed(3)}`);
   const gap = Math.hypot(...sub(GED.A.valves.aortic.c, M)) - LM.MV_R * 0.85 - LM.AO.annR;
   assert('Valves', 'aorto-mitral fibrous continuity (annuli < 0.6 cm apart)', gap < 0.6, `gap ${gap.toFixed(2)} cm`);
   // angle-dependent annular excursion: the live annulus rim (centre + radius
@@ -340,6 +384,101 @@ check('LA', 'LA volume (voxel, ES)', laV, [30, 70], 'mL', 'LAVI 16-34 mL/m2 x BS
   check('Valves', 'aorto-mitral curtain length change ED -> ES', Math.abs(amGap(GES) - amGap(GED)), [0, 0.15]);
   const aoAng = Math.acos(dot(LM.U_AO, Y)) * 180 / Math.PI;
   check('Valves', 'aortoseptal angle (180 - root tilt)', 180 - aoAng, [120, 150], 'deg');
+}
+
+// Shut aortic cusps (ED): each runs from its hinge inward to a central
+// coaptation just downstream of the hinge line, belly sagging toward the LVOT —
+// not a dome lining the sinus wall with the coaptation high in the root. Valve
+// samples are taken in the view plane round the valve and expressed in the root
+// frame (a: downstream of the hinge line, rad: from the root axis).
+{
+  const cuspPx = (view, G, path = {}) => {
+    let p = view.probe();
+    if (view.track) { const o = view.track(G.A); p = { ...p, pos: add(p.pos, o) }; }
+    const vc = G.A.valves.aortic.c, U = LM.U_AO, R = LM.AO.annR;
+    const rel = sub(vc, p.pos), cd = dot(rel, p.dir), cl = dot(rel, p.lat), pts = [];
+    for (let i = -160; i <= 160; i += 2) for (let j = -160; j <= 160; j += 2) {
+      const q = add(add(p.pos, mul(p.dir, cd + j * 0.01)), mul(p.lat, cl + i * 0.01));
+      const d = sub(q, vc), a = dot(d, U), rv = sub(d, mul(U, a)), rad = Math.hypot(...rv);
+      if (rad > R || a < -0.5 || a > 1.4) continue;
+      if (classify(q[0], q[1], q[2], G, path).tissue === TISSUE.VALVE) pts.push({ a, rad, rv });
+    }
+    return pts;
+  };
+  const R = LM.AO.annR;
+  for (const [vn, view] of [['PLAX', TTE_VIEWS.PLAX], ['A3C', ALL_V.A3C], ['MELAX', ALL_V.MELAX]]) {
+    const pts = cuspPx(view, GED);
+    const centre = pts.filter((q) => q.rad < 0.15);
+    const coapt = centre.length ? Math.min(...centre.map((q) => q.a)) : null;
+    check('Valves', `${vn}: shut aortic cusps coapt near the hinge line (ED, downstream)`, coapt, [-0.1, 0.35], 'cm');
+    // the cusp surface (lowest valve sample in each radial band) lies on the
+    // LVOT side of the hinge-coaptation chord, or within 0.2 cm of it
+    let worst = null;
+    for (let r0 = 0.25; r0 < 0.85 * R; r0 += 0.1) {
+      const band = pts.filter((q) => q.rad >= r0 && q.rad < r0 + 0.1);
+      if (!band.length || coapt == null) continue;
+      const ex = Math.min(...band.map((q) => q.a)) - coapt * (1 - (r0 + 0.05) / R);
+      worst = worst == null ? ex : Math.max(worst, ex);
+    }
+    check('Valves', `${vn}: shut cusp bellies on the LVOT side of the hinge-coaptation chord`, worst, [-1, 0.2], 'cm');
+  }
+  {
+    // PSAX-AV: the shut valve reads as the three-line Y — no concentric ring of
+    // cusp tissue between the commissural lines
+    const pts = cuspPx(TTE_VIEWS.PSAX_AV, GED);
+    const cf = { u: LM.E_SCR, w: LM.E_ANT, commOff: Math.PI / 6 };   // (cardiac-model LEAFLETS.aortic frame)
+    const ang = (v) => Math.atan2(dot(v, cf.w), dot(v, cf.u));
+    const comm = [0, 1, 2].map((k) => cf.commOff + k * 2 * Math.PI / 3);
+    const mid = pts.filter((q) => q.rad > 0.3 * R && q.rad < 0.75 * R);
+    const off = mid.filter((q) => {
+      const a0 = ang(q.rv);
+      const dmin = Math.min(...comm.map((c) => { const d = Math.abs(a0 - c) % (2 * Math.PI); return Math.min(d, 2 * Math.PI - d); }));
+      return dmin * q.rad > 0.15;
+    }).length;
+    check('Valves', 'PSAX-AV: shut cusps read as the Y (samples off the commissural lines)', off, [0, 3], '', `${mid.length} cusp samples at 0.3-0.75 annular radii`);
+    const arms = comm.map((c) => mid.filter((q) => { const d = Math.abs(ang(q.rv) - c) % (2 * Math.PI); return Math.min(d, 2 * Math.PI - d) * q.rad < 0.1; }).length);
+    check('Valves', 'PSAX-AV: all three commissural lines drawn (fewest samples per arm)', Math.min(...arms), [4, 1e9], '', arms.join(' / '));
+  }
+  {
+    // mid-systole: the normal cusps open as a curtain along the sinus wall; the
+    // rigid calcific AS cusps stay a straight cone converging on a small orifice
+    const as = { aorticStenosis: true, lvh: true };
+    const midR = (G, path) => {
+      const pts = cuspPx(TTE_VIEWS.PLAX, G, path).filter((q) => q.a > 0.4 && q.a < 0.7);
+      return pts.length ? pts.reduce((t, q) => t + q.rad, 0) / pts.length / R : null;
+    };
+    check('Valves', 'normal: open cusps along the sinus wall (mean radius 0.4-0.7 cm downstream / annulus, mid-systole)', midR(geometryAt(0.2, {}), {}), [0.7, 1.1], '');
+    check('Valves', 'AS: rigid cusps converge in systole (mean radius 0.4-0.7 cm downstream / annulus)', midR(geometryAt(0.2, as), as), [0.2, 0.6], '');
+  }
+}
+
+// Valve motion is continuous: each AV / semilunar valve shuts over 20-40 ms
+// (opening 0.9 -> 0.1) and never jumps by more than 0.15 in 1 ms; the leaflets
+// still cross 10 % open at the flow-defined valve events (MVO/MVC, AVO/AVC)
+{
+  const N = 833;                                          // 1 ms steps of the 0.833 s cycle
+  const op = { mitral: [], aortic: [] }, q = { mitral: [], aortic: [] };
+  for (let i = 0; i < N; i++) {
+    const G = geometryAt(i / N, {});
+    op.mitral.push(G.valves.mitral); op.aortic.push(G.valves.aortic);
+    const h = hemodynamics(i / N, {});
+    q.mitral.push(h.Qmv); q.aortic.push(h.Qao);
+  }
+  const down = (arr, thr) => { const r = []; for (let i = 0; i < N; i++) if (arr[i] > thr && arr[(i + 1) % N] <= thr) r.push(i + 1); return r; };
+  for (const v of ['mitral', 'aortic']) {
+    const t9 = down(op[v], 0.9), t1 = down(op[v], 0.1);
+    const flowOff = down(q[v].map((x) => (x > 1 ? 1 : 0)), 0.5)[0];
+    const t1c = t1[0];
+    const t9c = t9.filter((t) => t <= t1c).pop();
+    check('Valves', `${v} closure time (opening 0.9 -> 0.1)`, t9c != null ? t1c - t9c : null, [20, 40], 'ms');
+    check('Valves', `${v} shut by the end of forward flow (closure minus flow end)`, t1c - flowOff, [-5, 2], 'ms');
+    // ...and opens with the start of forward flow (10 % open)
+    const up = []; for (let i = 0; i < N; i++) if (op[v][i] <= 0.1 && op[v][(i + 1) % N] > 0.1) up.push(i + 1);
+    const flowOn = []; for (let i = 0; i < N; i++) if (q[v][i] <= 1 && q[v][(i + 1) % N] > 1) flowOn.push(i + 1);
+    check('Valves', `${v} opens with forward flow (10 % open minus flow start)`, up.length && flowOn.length ? up[0] - flowOn[0] : null, [-5, 3], 'ms');
+    let m = 0; for (let i = 0; i < N; i++) m = Math.max(m, Math.abs(op[v][(i + 1) % N] - op[v][i]));
+    check('Valves', `${v} opening: largest change in 1 ms`, m, [0, 0.15], '');
+  }
 }
 {
   const pa = GED.A.pa, u = LM.U_PA;
@@ -1500,16 +1639,20 @@ SECTION = 'Pathology';
   // and the aortic valve plane does not move toward the atria
   const D0 = geo(0, 'dcm').A, N0 = geo(0).A;
   for (const [tag, ph] of [['ED', 0], ['ES', esOf('dcm')]]) {
-    // mitral minus tricuspid annular centre height, the offset convention of the
-    // normal-heart check (REF.tvOffsetNormal)
+    // septal TV hinge below the septal mitral hinge (the offset convention of
+    // the normal-heart check): the septal TV hinge rides the fibrous skeleton
+    // with the septal mitral hinge, so the offset holds in systole however
+    // little the DCM base moves (the lateral rim still adds the RV's own TAPSE)
     const A = geo(ph, 'dcm').A;
-    // KNOWN-FAIL at ES (F21/WI6): the tricuspid annulus still descends by the
-    // normal TAPSE while the DCM mitral annulus moves only 0.7 cm, so the fibrous
-    // skeleton shears in systole (ED is base-anchored and passes)
-    KNOWN = ph !== 0;
-    check('DCM', `TV offset below the mitral annulus (M - T, ${tag})`, A.valves.mitral.c[1] - A.valves.tricuspid.c[1], [0.3, 1.2], 'cm',
+    check('DCM', `TV septal offset below the mitral annulus (septal hinges, ${tag})`, tvSeptOffset(D0, A), [0.3, 1.2], 'cm',
       `MAPSE ${(D0.valves.mitral.c[1] - A.valves.mitral.c[1]).toFixed(2)}, TV centre drop ${(D0.valves.tricuspid.c[1] - A.valves.tricuspid.c[1]).toFixed(2)}`);
-    KNOWN = false;
+  }
+  {
+    // ...and the tricuspid annulus centre moves with the skeleton too: its systolic
+    // descent beyond the DCM mitral annulus's is only the free wall's share
+    const A = geo(esOf('dcm'), 'dcm').A;
+    const dT = D0.valves.tricuspid.c[1] - A.valves.tricuspid.c[1], dMv = D0.valves.mitral.c[1] - A.valves.mitral.c[1];
+    check('DCM', 'TV centre descent minus mitral descent (ES)', dT - dMv, [-0.2, 0.9], 'cm', `TV ${dT.toFixed(2)}, MV ${dMv.toFixed(2)}`);
   }
   check('DCM', 'aortic valve plane vs normal at ED (+ = basal)', D0.valves.aortic.c[1] - N0.valves.aortic.c[1], [-1.0, 0.3]);
   check('DCM', 'aortic valve plane ES vs ED (+ = basal)', geo(esOf('dcm'), 'dcm').A.valves.aortic.c[1] - D0.valves.aortic.c[1], [-2.0, 0.05]);
