@@ -256,6 +256,18 @@ function drawLead(ctx, W, H, leadName, secShown, opts = {}) {
   }
 }
 
+// Colour-bar velocity labels: +/- the colour box's Nyquist limit in cm/s (the
+// box depth sets the PRF, so the limit can sit below the slider setting).
+let _cbarNyq = -1;
+function updateColorScale() {
+  const nq = Math.round((echo.colorNyquist || echo.nyquist) * 100);
+  if (nq === _cbarNyq) return;
+  _cbarNyq = nq;
+  const t = document.querySelector('.ds-top'), b = document.querySelector('.ds-bot');
+  if (t) t.textContent = '+' + nq;
+  if (b) b.textContent = '\u2212' + nq;
+}
+
 function drawEcg() {
   drawLead(ecgCtx, ecgCanvas.width, ecgCanvas.height, ecgLead, ECG_SECONDS * 0.62, { label: true });
 }
@@ -315,7 +327,9 @@ function loop(now) {
   echo.depthCm = state.depthCm || 17;
   heart3d.updateProbe(probe, echo.sectorHalf, echo.depthCm);
   heart3d.update(G, state.path, probe, dt || 0.016);
+  echo.rrSec = 60 / (state.hr || 72);
   echo.render(G, state.path, probe, now * 0.001);
+  updateColorScale();
 
   drawEcg();
   drawTwelveLead();

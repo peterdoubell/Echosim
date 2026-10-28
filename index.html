@@ -80,14 +80,15 @@
           <canvas id="echo" width="440" height="500"></canvas>
           <canvas id="echoOverlay" width="440" height="500" aria-hidden="true"></canvas>
         </div>
-        <div class="doppler-scale" title="Colour Doppler: red = flow toward the probe, blue = away">
+        <div class="doppler-scale" title="Colour Doppler scale (cm/s, ± the Nyquist limit): red = flow toward the probe, blue = away">
           <div class="ds-bar"></div>
-          <span class="ds-top">▲</span>
-          <span class="ds-bot">▼</span>
+          <span class="ds-top">+62</span>
+          <span class="ds-unit">cm/s</span>
+          <span class="ds-bot">&minus;62</span>
         </div>
       </div>
       <div class="spectral-wrap">
-        <span class="sp-label">Spectral Doppler (steered gate · 1 cardiac cycle)</span>
+        <span class="sp-label">Spectral Doppler (standard site for the view · 1 cardiac cycle)</span>
         <canvas id="spectral" width="440" height="120"></canvas>
       </div>
     </section>
