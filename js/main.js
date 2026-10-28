@@ -7,6 +7,7 @@ import { geometryAt, hemoSummary, pvLoop, longitudinalStrain, regionalStrain, ea
 // (cardiac-model.js does not re-export REF, so import it directly.)
 import { GRADED, gradeLvef } from './references.js';
 import { buildReport, reportText, fillTemplate, TEMPLATES, TEMPLATE_FOR, DEFAULT_PATIENT } from './report.js';
+import { initFeedback } from './feedback.js';
 import { Heart3D } from './heart3d.js';
 import { EchoView } from './echo.js';
 import { MeasureTool } from './measure.js';
@@ -1028,10 +1029,23 @@ rp('rpDownload').addEventListener('click', () => {
   reportStatus('Downloaded');
 });
 
+// ---- feedback: bug reports and feature requests, emailed via api/feedback.js ----
+const feedback = initFeedback({
+  getContext: () => ({
+    View: state.viewName,
+    Pathology: state.pathKey || 'normal',
+    Phase: state.phase.toFixed(3),
+    'Heart rate': `${state.hr} bpm`,
+    Playing: state.playing ? 'yes' : 'no',
+    'Probe offsets': `az ${state.az}, tilt ${state.tilt}, slide ${state.slide}`,
+    Challenge: challenge.active ? 'on' : 'off',
+  }),
+});
+
 // ---- keyboard shortcuts ----
 window.addEventListener('keydown', (e) => {
   if (/INPUT|SELECT|TEXTAREA/.test(document.activeElement?.tagName || '')) return;
-  if (helpOpen() || reportOpen()) return; // don't let shortcuts fire behind an open modal
+  if (helpOpen() || reportOpen() || feedback.isOpen()) return; // don't let shortcuts fire behind an open modal
   if (e.key === ' ') { e.preventDefault(); playBtn.click(); }
   else if (e.key === 'ArrowLeft') { state.playing = false; playBtn.textContent = '▶ Play'; state.phase = (state.phase - 0.02 + 1) % 1; }
   else if (e.key === 'ArrowRight') { state.playing = false; playBtn.textContent = '▶ Play'; state.phase = (state.phase + 0.02) % 1; }

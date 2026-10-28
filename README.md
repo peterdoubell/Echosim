@@ -68,10 +68,32 @@ node tools/verify-anatomy.mjs   # anatomy audit: ASE dimensions and relationship
                                 # over views, phases and pathologies (open defects tagged KNOWN-FAIL)
 node tools/verify-timing.mjs    # valve timing, heart-rate warping, right-heart offsets
 node tools/verify-report.mjs    # structured echo report: BSE 2020 grading, conclusions, templates, dialog
+node tools/verify-feedback.mjs  # feedback dialog and api/feedback.js (validation, rate limit, fallbacks)
 ```
 
 `docs/ANATOMY.md` describes the anatomical model, the audit and the expert-panel
 review history.
+
+## Feedback (bug reports and feature requests)
+
+The **💬 Feedback** button in the header opens a dialog with *Report a bug* and
+*Request a feature* tabs. Messages are emailed to the maintainer by the Vercel
+function `api/feedback.js`. Bug reports include diagnostics by default: the
+case, view, phase, heart rate, browser, screen, WebGL renderer and recent
+JavaScript errors. The user can see these and switch them off.
+
+Set these in Vercel → Project → Settings → Environment Variables, then redeploy:
+
+| Variable | Purpose |
+|---|---|
+| `FEEDBACK_TO` | Recipient address. It is kept out of the public code. |
+| `RESEND_API_KEY` | API key from [Resend](https://resend.com) (free tier). Without it, the dialog opens the user's own mail app with the message pre-filled, addressed to `FEEDBACK_TO`. |
+| `FEEDBACK_FROM` | Optional sender, e.g. `EchoSim <feedback@your-domain>`. By default Resend's shared sender is used, which only delivers to the address the Resend account was created with. |
+
+If neither variable is set, or the app runs on a static local server, the
+message is copied to the user's clipboard so nothing is lost. The function
+limits each IP to 5 messages per 10 minutes and silently drops bots that fill
+a hidden honeypot field.
 
 ## Honest limits
 
