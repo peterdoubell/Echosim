@@ -519,11 +519,18 @@ export { CFG };
 const A_MIN = 0.86, A_RES = 0.31, A_COND = 0.165, A_BOOST = 0.145;
 const A_PEAK = A_MIN + A_RES;
 
-export function atrialFill(phase) {
+// `amp` (optional, from the circulation: hemodynamics laPhasic) scales the
+// conduit (c) and booster (b) emptying against the normal atrium; the reservoir
+// fill is their sum, so the curve stays periodic and peaks at A_PEAK.
+export function atrialFill(phase, amp = null) {
   const p = phase - Math.floor(phase);          // wrap into [0,1)
   const reservoir = smoothstep(0.00, 0.51, p);
   const conduit   = smoothstep(0.51, 0.69, p);
   const booster   = smoothstep(0.89, 1.00, p);
+  if (amp) {
+    const ac = A_COND * amp.c, ab = A_BOOST * amp.b;
+    return A_PEAK - (ac + ab) * (1 - reservoir) - ac * conduit - ab * booster;
+  }
   return A_MIN + A_RES * reservoir - A_COND * conduit - A_BOOST * booster;
 }
 
@@ -599,6 +606,31 @@ export function rapEstimate(ivc) {
   const d = 2 * ivc.r, small = d <= 2.1, collapses = (ivc.collapse != null ? ivc.collapse : 0.55) > 0.5;
   return small && collapses ? 3 : !small && !collapses ? 15 : 8;
 }
+// Right-heart loading per pathology (shared by the anatomy and the coarse proxies
+// in cardiac-model). rvC scales RV contractility — TAPSE, free-wall (FAC) and
+// outflow shortening: a pressure-overloaded RV in pulmonary hypertension is
+// hypokinetic (TAPSE ~1.1 cm, FAC < 35 %), advanced DCM involves the RV too, and
+// chronic severe MS (post-capillary PH) or severe TR depress it mildly.
+// septum(kR) is the septal flattening toward the LV (0..1 of the LV radius) at RV
+// contraction kR: PRESSURE overload flattens it through the cycle, worst at end-
+// systole (eccentricity index ES > ED); VOLUME overload (severe TR, ASD) flattens
+// it in diastole only, and its systolic recovery is the paradoxical septal motion.
+const gradeKey = (path) => (path.grade === 'mild' || path.grade === 'moderate' ? path.grade : 'severe');
+export function rightHeartLoad(path = {}) {
+  const g = gradeKey(path);
+  const msPH = path.mitralStenosis && g === 'severe';           // secondary (post-capillary) PH
+  const trVol = path.tr && !path.rvpo ? ({ mild: 0, moderate: 0.5, severe: 1 })[g] : 0;
+  const rvC = path.rvpo ? 0.45 : path.dilated ? 0.6 : msPH ? 0.8 : 1 - 0.2 * trVol;
+  // longitudinal (free-wall annular) share: pressure overload hits the long axis
+  // hardest — TAPSE falls to ~1.4 cm (the septal hinge still follows the LV)
+  const rvL = path.rvpo ? 0.22 : rvC;
+  // volume-overload septal pattern: severe TR, secundum ASD
+  const vol = path.asd ? 1 : trVol;
+  const septum = path.rvpo ? (kR) => 0.32 + 0.22 * kR
+    : msPH ? (kR) => 0.06 + 0.12 * kR
+    : vol ? (kR) => 0.3 * vol * (1 - kR) : null;
+  return { rvC, rvL, septum, msPH, trVol };
+}
 export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   // Remodelling: when coupled to the circulation the LV size follows the modelled
   // EDV (eccentric dilatation in DCM / chronic MR, a smaller cavity in concentric
@@ -615,9 +647,11 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   // PSAX (the "D-sign"). rvpoScale enlarges the RV; septFlat clips the LV septum.
   // Volume overload (TR, secundum ASD) dilates the RV and RA too, without the
   // pressure-overload septal flattening; the RA enlarges with any of the three.
-  const rvpoScale = (path.rvpo ? 1.3 : 1) * (path.asd ? 1.22 : path.tr && !path.rvpo ? 1.18 : 1);
-  const raScale = path.rvpo ? 1.3 : path.tr ? 1.35 : path.asd ? 1.25 : 1;
-  const septFlat = path.rvpo ? 0.42 : 0;
+  // severe TR: a dilated RV (RVD1 > 4.1 cm) and RA; severe MS: the RV of its
+  // secondary pulmonary hypertension
+  const RH = rightHeartLoad(path);
+  const rvpoScale = (path.rvpo ? 1.3 : 1) * (path.asd ? 1.22 : path.tr && !path.rvpo ? 1.12 + 0.14 * RH.trVol : RH.msPH ? 1.15 : 1);
+  const raScale = path.rvpo ? 1.3 : path.tr ? 1.35 + 0.05 * RH.trVol : path.asd ? 1.25 : RH.msPH ? 1.12 : 1;
 
   // LV cavity scale: volume-exact from the circulation when coupled.
   const sS = mech ? mech.sShort : 1 - k * 0.28 * contract;
@@ -657,12 +691,14 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   // the right heart runs on its own, slightly offset clock (cardiac-model rvPhase:
   // T1 after M1, RV ejection starting earlier and ending later than the LV's)
   const kR = mech && mech.kRV != null ? mech.kRV : k;
-  const rvS = 1 - kR * 0.34;                               // RV short-axis shortening (FAC ~45-50 %)
-  const tapse = TAPSE_REF * kR;
+  const rvC = RH.rvC;                                      // RV contractility (rightHeartLoad)
+  const rvS = 1 - kR * 0.34 * rvC;                         // RV short-axis shortening (FAC ~45-50 % normal)
+  const tapse = TAPSE_REF * kR * RH.rvL;
+  const septFlat = RH.septum ? RH.septum(kR) : 0;          // phase-dependent septal flattening
   // tricuspid rims: septal on the fibrous skeleton (the septal mitral hinge's
   // descent, LV clock); lateral = septal + the free wall's own shortening (RV clock)
   const tvSep = -TV_SEPT_W * dM;
-  const tvLatDrop = tvSep + TV_FW * kR;
+  const tvLatDrop = tvSep + TV_FW * kR * RH.rvL;
   const tvDrop = 0.5 * (tvSep + tvLatDrop);                // annulus-centre (and RA floor) descent
   const Tlive = [T0[0], T0[1] - tvDrop, T0[2]];
   const PVlive = mad(PV0, [0, 1, 0], -0.25 * tapse);
@@ -683,21 +719,26 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   // annulus normal, facing the RA, tilted by the lateral-minus-septal excursion
   const tvN = unit(mad(unit(sub(Tlive, [-2.3, rvApexY + 0.6, 1.9])), TV_LAT, (tvLatDrop - tvSep) / (2 * TV_R)));
   const tvLat = mad(Tlive, unit(sub(TV_LAT, mul(tvN, dot(TV_LAT, tvN)))), TV_R);   // lateral rim (TAPSE point)
-  const inflow = { c: mad(Tlive, tvN, -1.6), r: [2.25 * rvS * rvpoScale, 1.8 * (1 - 0.15 * kR), 2.1 * rvS * rvpoScale] };
+  const inflow = { c: mad(Tlive, tvN, -1.6), r: [2.25 * rvS * rvpoScale, 1.8 * (1 - 0.15 * kR * rvC), 2.1 * rvS * rvpoScale] };
   const rvot = [
     mad(RVOT_PTS[0], [0, 1, 0], -0.25 * tapse),
     mad(RVOT_PTS[1], [0, 1, 0], -0.25 * tapse),
     mad(RVOT_PTS[2], [0, 1, 0], -0.25 * tapse),
   ];
-  const rvotR = [1.3 * (1 - kR * 0.18) * rvpoScale, 1.1 * (1 - kR * 0.12) * rvpoScale, PV_R * 1.02];
+  const rvotR = [1.3 * (1 - kR * 0.18 * rvC) * rvpoScale, 1.1 * (1 - kR * 0.12 * rvC) * rvpoScale, PV_R * 1.02];
 
   // Atria: sit on the live annuli, fixed roofs, volume from the reservoir curve.
-  const aFill = atrialFill(phase);
+  const aFill = atrialFill(phase, mech && mech.laAmp);
   // the RA empties through the tricuspid, so its reservoir curve follows the
   // right heart's clock
   const aFillR = mech && mech.phaseRV != null ? atrialFill(mech.phaseRV) : aFill;
   // (the LA body bulges posteriorly, behind the aortic root, beyond its annulus)
-  const la = atrium(add(LA_FLOOR0, [0, dM, 0]), add(LA_ROOF, [0, LA_ROOF_FOLLOW * dM, 0]), LA_ES, aFill, -0.1, laScale, LA_POST, AO_LA_DIR, LA_SPLIT);
+  // a stiff (MS) or failing (DCM) atrium stretches less as the annulus descends —
+  // its reservoir strain falls with its phasic function — so its roof follows
+  // the annulus further and the chamber lengthens less
+  const laAmp = mech && mech.laAmp ? (A_COND * mech.laAmp.c + A_BOOST * mech.laAmp.b) / A_RES : 1;
+  const laRoofFollow = 1 - (1 - LA_ROOF_FOLLOW) * Math.min(1, laAmp);
+  const la = atrium(add(LA_FLOOR0, [0, dM, 0]), add(LA_ROOF, [0, laRoofFollow * dM, 0]), LA_ES, aFill, -0.1, laScale, LA_POST, AO_LA_DIR, LA_SPLIT);
   const ra = atrium(add(RA_FLOOR0, [0, -tvDrop, 0]), add(RA_ROOF, [0, -ROOF_FOLLOW * tvDrop, 0]), RA_ES, aFillR, RA_LAT, raScale, RA_POST, RA_AWAY);
   // As the atria empty they shrink about the free walls, not the septum: pull
   // each centre (within the septal plane) toward the fossa so the swept septal
@@ -782,7 +823,8 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
     let away = sub(rr.c, T0); away = unit(sub(away, mul(BS, dot(away, BS))));  // from the TV, level
     // d 1.8 cm; plethoric (~2.5 cm) with raised RA pressure (pulmonary hypertension,
     // severe TR), when its wider wall keeps it a little further off the septum
-    const ivcR = (path.rvpo || path.tr) ? 1.25 : 0.9;
+    // (severe MS with secondary PH: a dilated IVC that still collapses, RAP 8)
+    const ivcR = (path.rvpo || path.tr) ? 1.25 : RH.msPH ? 1.15 : 0.9;
     const ia = seat(mad(mad(mad(rr.c, BS, -(hS + 0.4)), away, 1.0), BP, 1.0), Math.max(CAVA.ivcSd, ivcR + 0.05), CAVA.ivcV);
     // the SVC abuts the aorta without indenting it: slide the orifice back along
     // the septum until its first 3 cm clear the aortic wall
@@ -1270,7 +1312,7 @@ function radStretch(x, y, z, L, g) {
   return fade > 0 ? 1 - L.radBoost * (1 - g) * lateralWeight(x, z) * fade : 1;
 }
 // LV body cavity only (no funnels), world space.
-function lvBody(x, y, z, A, g) {
+function lvBody(x, y, z, A, g, flat = true) {
   const L = A.lv;
   let sL = L.sL;
   // inward apical thickening: the endocardial apex rises by apexLift while the
@@ -1284,7 +1326,7 @@ function lvBody(x, y, z, A, g) {
   if (g > 0) { sR += (grow - sR) * g; sL += (L.sLDia - sL) * g; }
   const rho = Math.sqrt(x * x + z * z) / sR;
   let d = lvProfile(rho, s) * (sR < sL ? sR : sL);
-  if (L.septFlat) {                                        // D-shaped LV (RV overload)
+  if (L.septFlat && flat) {                                // D-shaped LV (RV overload)
     const xp = -LVP.b * sR * (1 - L.septFlat);
     d = Math.max(d, xp - x);
   }
@@ -1327,17 +1369,17 @@ function lvWallAt(y, A, g, x = 0, z = 0) {
   const s = (y - L.apexY - dA) / (L.sL - dA / LVP.len);
   return w * (LVP.apexWallFrac + (1 - LVP.apexWallFrac) * smoothstep(0.0, 3.5, s));
 }
-function lvEpi(x, y, z, A) {
+function lvEpi(x, y, z, A, flat = true) {
   const g = A.lv.rwma ? rwmaBlend(x, y, z, A) : 0;
   const f = radStretch(x, y, z, A.lv, g);
   // (the wall is laid on after the stretch: it keeps its thickness)
-  if (f !== 1) return lvEpiS(x / f, y, z / f, A, g, 1 / f) * f;
-  return lvEpiS(x, y, z, A, g, 1);
+  if (f !== 1) return lvEpiS(x / f, y, z / f, A, g, 1 / f, flat) * f;
+  return lvEpiS(x, y, z, A, g, 1, flat);
 }
-function lvEpiS(x, y, z, A, g, ws) {
+function lvEpiS(x, y, z, A, g, ws, flat = true) {
   const L = A.lv, M = L.M, Av = L.A, lo = L.lvot;
   const w = lvWallAt(y, A, g, x, z) * ws;
-  let d = lvBody(x, y, z, A, g) - w;
+  let d = lvBody(x, y, z, A, g, flat) - w;
   if (y > L.apexY + LVP.len * L.sL - 3.6) {
     const wb = L.wall * 0.8 * ws;
     const ym = y - mitralLift(x, y, z, A);
@@ -1385,7 +1427,14 @@ function dRVlumen(x, y, z, A) {
     const rr = Math.sqrt(Math.max(0, tx * tx + ty * ty + tz * tz - h * h));
     if (rr < TV_R + 0.5) d = smax(d, h, 0.1);
   }
-  d = ssub(d, lvEpi(x, y, z, A), A.rvCarve);
+  const epi = lvEpi(x, y, z, A);
+  if (A.lv.septFlat && rvBodyD(x, y, z, A, 1.2) < 0) {
+    // the flattened septum is displaced, not thickened: the RV cavity follows it
+    // into the space the LV gave up (inside the unflattened epicardium, outside
+    // the flattened one), next to the RV body
+    d = smin(d, smax(lvEpi(x, y, z, A, false), -epi, 0.1), 0.3);
+  }
+  d = ssub(d, epi, A.rvCarve);
   // the infundibulum is separated from the aortic root by the aortic wall and
   // the muscular outlet (infundibular) septum, ~0.5 cm in all
   d = ssub(d, dAOroot(x, y, z, A) - A.ao.wall - 0.35, 0.2);
@@ -1886,6 +1935,16 @@ function dHepaticVeins(x, y, z, A) {
     d = Math.min(d, sdCapsule(x, y, z, j[0], j[1], j[2], e[0], e[1], e[2], r1, r2));
   }
   return d;
+}
+// The hepatic veins as segments (confluence a -> far end b, unit axis u, radii),
+// for the flow field (hepatic-vein Doppler). Same construction as above.
+export function hepaticVeinSegs(A) {
+  const ivc = A.ivc;
+  const j = mad(mad(ivc.a, BODY_AX.I, HV_CONF), BL, HV_LEFT);
+  return HV_DEF.map(([l, a, i, r1, r2, len]) => {
+    const u = unit(add(add(mul(BL, l), mul(BODY_AX.A, a)), mul(BODY_AX.I, i)));
+    return { a: j, b: mad(j, u, len), u, r1, r2, len };
+  });
 }
 const HV_CONF = 1.0, HV_LEFT = -0.25;
 // right / middle / left hepatic veins: direction (L, A, I), radius at the

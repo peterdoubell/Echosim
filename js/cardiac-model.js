@@ -15,8 +15,8 @@
 // blood-flow field, and couples everything to the lumped-parameter circulation.
 
 import { clamp, smoothstep, pulse, unit } from './mathutils.js';
-import { anatomyParams, atrialFill, bodyClassify, visceralDist, lumenDist, mitralLift, buildRwma, rwmaWeight, BODY, CFG, LM, BODY_AX } from './anatomy.js';
-import { hemodynamics, hemoSummary, pvLoop, gradeOf, eaRatio, MS_AREA } from './hemodynamics.js';
+import { anatomyParams, rightHeartLoad, hepaticVeinSegs, atrialFill, bodyClassify, visceralDist, lumenDist, mitralLift, buildRwma, rwmaWeight, BODY, CFG, LM, BODY_AX } from './anatomy.js';
+import { hemodynamics, hemoSummary, pvLoop, gradeOf, eaRatio, MS_AREA, laPhasic } from './hemodynamics.js';
 
 // Re-export the lumped-parameter circulation API so echo.js / the UI can read the
 // PV loop and instantaneous haemodynamics through cardiac-model (the single model
@@ -54,6 +54,7 @@ export const FLOW = {
   ASD_JET: 8,     // atrial septal defect LA -> RA
   TR_JET: 9,      // tricuspid regurgitation RV -> RA
   PV_FLOW: 10,    // pulmonary-vein flow into the LA (reverses in severe MR)
+  HV_FLOW: 11,    // hepatic-vein flow toward the RA (reverses in systole in severe TR)
 };
 
 // ---------------------------------------------------------------------------
@@ -234,7 +235,7 @@ export function rvPhase(phase) {
 // read it on the right heart's own clock (rvPhase).
 const OPEN_N = 960, OPEN_CYCLE = 0.833;                   // samples per cycle; reference cycle (s)
 const OPEN_TAU_OPEN = 0.008, OPEN_TAU_CLOSE = 0.008, OPEN_LEAD_O = 0.007, OPEN_LEAD = 0.011;   // s
-const OPEN_Q_AV = 0.3, OPEN_Q_SL = 0.12;                  // flow (x peak) for a fully open valve
+const OPEN_Q_AV = 0.2, OPEN_Q_SL = 0.12;                  // flow (x peak) for a fully open valve
 const _openCache = new WeakMap();
 function openTrace(path) {
   const sum = hemoSummary(path);
@@ -277,14 +278,41 @@ function valveOpening(name, phase, tr, path) {
 // track physiology: AS = same SV forced through a small AVA -> high velocity.
 // ---------------------------------------------------------------------------
 const AVA_NORM = 3.0, AVA_AS = 0.6;   // aortic (LVOT/valve) effective orifice area
-const MVA_NORM = 5.0;                 // mitral effective orifice area (MS: hemodynamics.js MS_AREA)
+// mitral effective orifice area for the INSTANTANEOUS inflow velocity v = Qmv / A
+// (MS: hemodynamics.js MS_AREA, Bernoulli): the E and A peaks, their ratio and the
+// E-wave deceleration all come straight from the modelled transmitral flow
+const MVA_NORM = 4.0;
 const ET_EJECT = 0.33, T_FILL = 0.37; // systolic ejection / diastolic filling time (s)
-const K_AO = 1.56, K_MV = 2.2;        // peak/mean profile factors (peak ≈ k·mean)
+const K_AO = 1.56;                    // peak/mean profile factor (peak ≈ k·mean)
+
+// Tricuspid regurgitation: present with path.tr, and as the functional TR of the
+// secondary (post-capillary) pulmonary hypertension of severe MS. Peak (m/s)
+// encodes the RV-RA systolic gradient: ~4.3 in pulmonary hypertension (PASP ~80),
+// ~3.4 in severe MS (PASP ~55 with RAP 8); isolated severe TR at a normal PA
+// pressure runs LOWER (~2.5), its gradient blunted by the large RA v-wave.
+export function trPeak(path = {}) {
+  const RH = rightHeartLoad(path);
+  if (path.tr) return path.rvpo ? 4.3 : 3.0 - 0.5 * RH.trVol;
+  return RH.msPH ? 3.4 : 0;
+}
+// TR jet envelope (0..1) on the right heart's clock: holosystolic (TV closure at
+// the QRS to TV opening ~0.50). With pressure overload it is the rounded,
+// mid-systolic-peaking parabola of a high RV-RA gradient; in severe (torrential)
+// TR it peaks EARLY (~30 % into systole) and decays almost linearly as the RA
+// v-wave equalises the pressures (the triangular "V-wave cutoff" envelope).
+export function trEnvelope(phaseRV, path = {}) {
+  const round = pulse(0.02, 0.48, phaseRV);
+  const w = path.tr && !path.rvpo ? rightHeartLoad(path).trVol : 0;
+  if (!w) return round;
+  const u = (((phaseRV % 1) + 1) % 1 - 0.02) / 0.46;
+  const tri = u <= 0 || u >= 1 ? 0 : smoothstep(0, 0.27, u) * Math.pow(clamp((1 - u) / 0.73, 0, 1), 0.85);
+  return round + (tri - round) * w;
+}
 
 // Build the per-frame haemodynamic snapshot the flow field reads. Returns a
 // FRESH object (never the hemodynamics() singleton) so two geometryAt() results
 // — e.g. echo's end-diastolic and end-systolic geometries — never alias.
-function hemoFrame(hd, path, rvHd) {
+function hemoFrame(hd, path, rvHd, phaseRV) {
   const s = hd.sum;
   // effective orifice area follows the severity grade (continuity: same SV through
   // a smaller area → higher velocity), so the Doppler peak and BSE band both track it.
@@ -299,27 +327,31 @@ function hemoFrame(hd, path, rvHd) {
   // (Bernoulli), so the trace, the mean gradient, the LAP and the planimetered
   // MVA (MS_AREA) all describe the same valve
   const vMitPeak = path.mitralStenosis ? Math.sqrt(Math.max(0, s.gradientMV) / 4)
-    : K_MV * s.forwardSV / (MVA_NORM * T_FILL) / 100;
-  const vMRPeak = Math.sqrt(Math.max(0, s.PlvSys - s.PlaAtSys) / 4);
+    : s.QmvMax / (MVA_NORM * 100);
+  // MR: the jet velocity IS the instantaneous LV-LA gradient (Bernoulli), so its
+  // envelope rises through isovolumic contraction and is blunted in late systole
+  // as the LA v-wave climbs (asymmetric in severe MR)
+  const vMRPeak = Math.sqrt(Math.max(0, s.mrGradMax) / 4);
   // TR jet peak (m/s) encodes RV systolic pressure: high with pressure overload
   // (pulmonary hypertension), moderate for isolated TR. Feeds the PASP estimate.
-  const vTRPeak = path.tr ? (path.rvpo ? 4.3 : 3.0) : 0;
+  const vTRPeak = trPeak(path);
   // instantaneous 0..1 envelopes from the modelled flow waveform (carry E/A,
   // ejection and regurgitant timing) so velocityAt only multiplies scalars.
   const ejAo = s.QaoMax > 0 ? clamp(hd.Qao / s.QaoMax, 0, 1) : 0;
   const ejMv = s.QmvMax > 0 ? clamp(hd.Qmv / s.QmvMax, 0, 1) : 0;
-  const ejMr = s.QmrMax > 0 ? clamp(hd.Qmr / s.QmrMax, 0, 1) : 0;
+  const ejMr = hd.Qmr > 0.5 && vMRPeak > 0 ? clamp(Math.sqrt(Math.max(0, hd.Plv - hd.Pla) / 4) / vMRPeak, 0, 1) : 0;
   // right-heart envelopes (tricuspid inflow, RV outflow) on the right heart's clock
   const r = rvHd || hd;
   const ejTv = s.QmvMax > 0 ? clamp(r.Qmv / s.QmvMax, 0, 1) : 0;
   const ejPv = s.QaoMax > 0 ? clamp(r.Qao / s.QaoMax, 0, 1) : 0;
+  const ejTr = vTRPeak > 0 ? trEnvelope(phaseRV != null ? phaseRV : hd.phase, path) : 0;
   return {
     Plv: hd.Plv, Pao: hd.Pao, Vlv: hd.Vlv, Pla: hd.Pla,
     Qao: hd.Qao, Qmv: hd.Qmv, Qmr: hd.Qmr, rho: hd.rho, kv: hd.kv,
     EDV: s.EDV, ESV: s.ESV, SV: s.SV, EF: s.EF, forwardSV: s.forwardSV,
     regurgFraction: s.regurgFraction, gradient: s.gradient,
     PlvSys: s.PlvSys, PaoSys: s.PaoSys, PaoDia: s.PaoDia,
-    vAoPeak, vMitPeak, vMRPeak, vTRPeak, ejAo, ejMv, ejMr, ejTv, ejPv,
+    vAoPeak, vMitPeak, vMRPeak, vTRPeak, ejAo, ejMv, ejMr, ejTv, ejPv, ejTr,
   };
 }
 
@@ -386,15 +418,16 @@ export function geometryAt(phase, path = {}) {
   // wall thickens as the short axis shrinks (approx. muscle-volume conservation)
   const lvWall = BASE.lv.wall * lvWallMul * clamp(1 / sShort, 1, 1.7);
 
+  const rvC = rightHeartLoad(path).rvC;   // RV contractility (anatomy.js)
   const rvR = BASE.rv.r.map((r, i) => {
-    const shorten = i === 1 ? 0.12 : 0.26;
+    const shorten = (i === 1 ? 0.12 : 0.26) * rvC;
     return r * (1 - kvR * shorten);
   });
   const rvWall = BASE.rv.wall * (1 + kR * 0.5);
 
   // anatomical SDF bundle (built once here so the chordae apparatus below can
   // hang off the same apex-anchored papillary tips + live valve planes).
-  const A = anatomyParams(k, kick, path, { sShort, sLong, lvWall, lvScale, lvLong, laScale, kRV: kR, phaseRV }, phase);
+  const A = anatomyParams(k, kick, path, { sShort, sLong, lvWall, lvScale, lvLong, laScale, kRV: kR, phaseRV, laAmp: laPhasic(path) }, phase);
 
   // atria: coarse axis-aligned proxies of the live anatomical atria (which sit on
   // their moving annuli and follow the reservoir/conduit/booster curve), so flow
@@ -422,12 +455,17 @@ export function geometryAt(phase, path = {}) {
     // stroke volume, EF, jet peak velocities) — read by the echo measurements,
     // the flow field and the UI PV-loop panel. A fresh snapshot (not the
     // hemodynamics() singleton) so distinct geometries never alias.
-    hemo: hemoFrame(hd, path, rvHd),
+    hemo: hemoFrame(hd, path, rvHd, phaseRV),
     // Coarse per-chamber ellipsoid proxies — used by the velocity field, the
     // on-image labels and the LVIDd/EF measurements. Tissue classification and
     // the 3D surface use the anatomical SDF (G.A) below, not these.
     lv: { c: [BASE.lv.c[0], lvCy, BASE.lv.c[2]], r: lvR, wall: lvWall },
+    // the same proxy at end-diastolic size: the filling stream is gated to it, so a
+    // fixed Doppler gate in the inflow path sees the whole E wave from mitral
+    // opening (when the cavity is still near end-systolic size), not only its tail
+    lvEd: { c: [BASE.lv.c[0], lvApexY + lvR1d, BASE.lv.c[2]], r: [BASE.lv.r[0] * lvScale, lvR1d, BASE.lv.r[2] * lvScale] },
     rv: { c: BASE.rv.c, r: rvR, wall: rvWall },
+    rvEd: { c: BASE.rv.c, r: BASE.rv.r },   // (end-diastolic size: tricuspid inflow gate, as lvEd)
     la: { c: A.la.c, r: laR },
     ra: { c: A.ra.c, r: raR },
     aorta: BASE.aorta,
@@ -1066,6 +1104,19 @@ function pvFlowSpeed(phase, path) {
   return sComp + 0.42 * d - 0.20 * a;
 }
 
+// Hepatic-vein flow speed (m/s, + toward the RA) on the right heart's clock: a
+// systolic S and an early-diastolic D wave toward the heart, with a small atrial
+// reversal. Severe TR blunts and then REVERSES the S wave (the regurgitant
+// volume runs back into the liver) — the ASE-specific sign of severe TR; RV
+// pressure overload deepens the atrial reversal and blunts S.
+function hvFlowSpeed(phaseRV, path) {
+  const s = pulse(0.04, 0.42, phaseRV), d = pulse(0.52, 0.78, phaseRV), a = pulse(0.86, 1.0, phaseRV);
+  const w = path.tr && !path.rvpo ? rightHeartLoad(path).trVol : 0;
+  const sComp = (path.rvpo ? 0.25 : 0.42) * (1 - w) * s - 0.5 * w * s;
+  return sComp + (0.3 + 0.15 * w) * d - (path.rvpo ? 0.32 : 0.16) * a;
+}
+const _hvCache = new WeakMap();
+
 // Off-axis Gaussian falloff: 1 on the centreline, ->0 as perpendicular distance
 // d grows past the stream half-width w.
 function gauss(d, w) {
@@ -1259,6 +1310,13 @@ export function stenosisCw(flow, H, path = {}) {
   if (!H) return _cw;
   if (flow === FLOW.AS_JET && path.aorticStenosis) { _cw.peak = H.vAoPeak; _cw.env = H.ejAo; }
   else if (flow === FLOW.MITRAL_IN && path.mitralStenosis) { _cw.peak = H.vMitPeak; _cw.env = H.ejMv; }
+  // a regurgitant jet is read the same way: CW through it gives the modelled
+  // ventricle-atrium peak (MR; TR Vmax, behind the PASP estimate) along its
+  // envelope, whatever the frame
+  else if (flow === FLOW.MR_JET && H.vMRPeak > 0) { _cw.peak = H.vMRPeak; _cw.env = H.ejMr; }
+  // (TR)
+  // (Vmax, behind the PASP estimate) along its envelope, whatever the frame
+  else if (flow === FLOW.TR_JET && H.vTRPeak > 0) { _cw.peak = H.vTRPeak; _cw.env = H.ejTr; }
   return _cw;
 }
 
@@ -1294,7 +1352,8 @@ export function velocityAt(px, py, pz, G, path = {}) {
     const mW = 1.25 * (1 - 0.5 * clamp(mAlong / 4.5, 0, 1)); // narrows toward apex
     const mShape = gauss(mPerp, mW) * Math.exp(-clamp(mAlong, 0, 6) / 4.5);
     const mSpeed = H.vMitPeak * H.ejMv * mShape;
-    if (inLV && mAlong > -0.3 && mSpeed > 0.01) {
+    const inLVfill = inLV || (G.lvEd && ellip(px, py, pz, G.lvEd.c, G.lvEd.r) <= 1);
+    if (inLVfill && mAlong > -0.3 && mSpeed > 0.01) {
       // superimpose the divergence-free filling vortex: a pure swirl about
       // VORTEX_AXIS (tangential = axis × r_perp) whose magnitude rises then
       // decays with radius (Lamb-Oseen-like), so the inflow curls behind the
@@ -1323,7 +1382,8 @@ export function velocityAt(px, py, pz, G, path = {}) {
     const tW = 1.35 * (1 - 0.5 * clamp(tAlong / 4.5, 0, 1));
     const tShape = gauss(tPerp, tW) * Math.exp(-clamp(tAlong, 0, 6) / 4.5);
     const tSpeed = 0.55 * H.ejTv * tShape;
-    considerFlow(inRV && tAlong > -0.3, AX_TRICUSPID_IN[0], AX_TRICUSPID_IN[1], AX_TRICUSPID_IN[2],
+    const inRVfill = inRV || (G.rvEd && ellip(px, py, pz, G.rvEd.c, G.rvEd.r) <= 1);
+    considerFlow(inRVfill && tAlong > -0.3, AX_TRICUSPID_IN[0], AX_TRICUSPID_IN[1], AX_TRICUSPID_IN[2],
       tSpeed, FLOW.TRICUSPID_IN, false);
   }
 
@@ -1377,16 +1437,16 @@ export function velocityAt(px, py, pz, G, path = {}) {
     regurgJet(px, py, pz, phase, VALVES.mitral.c, path.mr ? AX_MR_ECC : AX_MR, downstream, inLV, MR_JET_PARAMS,
       H.ejMr, H.vMRPeak);
   }
-  if (path.tr) {
+  if (H.vTRPeak > 0) {
     // tricuspid regurgitation: systolic jet RV -> RA, firing into the RA cavity.
     // The TR peak velocity encodes RV systolic pressure: with pressure overload
     // (pulmonary hypertension) the jet runs fast (~4.3 m/s → PASP ~80 mmHg via
     // 4v²+RAP); isolated TR at normal PA pressure runs ~3.0 m/s.
-    const trPeak = path.rvpo ? 4.3 : 3.0;
     const region = ellip(px, py, pz, TR_REGION, [2.3, 2.8, 2.0]) <= 1;
     const aboveTV = _dot3(_sub3([px, py, pz], G.A.valves.tricuspid.c), VALVES.tricuspid.n) > 0.1;
     const downstream = region && iasSide(px, py, pz) > 0 && (inRA || aboveTV);
-    regurgJet(px, py, pz, G.phaseRV != null ? G.phaseRV : phase, VALVES.tricuspid.c, AX_TR, downstream, inRV, TR_JET_PARAMS, null, trPeak);
+    const phR = G.phaseRV != null ? G.phaseRV : phase;
+    regurgJet(px, py, pz, phR, VALVES.tricuspid.c, AX_TR, downstream, inRV, TR_JET_PARAMS, H.ejTr, H.vTRPeak);
   }
   if (path.vsd) {
     // ventricular septal defect: LV -> RV across septum, systole, turbulent core
@@ -1425,6 +1485,27 @@ export function velocityAt(px, py, pz, G, path = {}) {
           const dir = s >= 0 ? 1 : -1;                     // negative = retrograde
           considerFlow(true, v.ax[0] * dir, v.ax[1] * dir, v.ax[2] * dir,
             s < 0 ? -s : s, FLOW.PV_FLOW, false);
+        }
+      }
+    }
+  }
+  // --- hepatic-vein flow (subcostal) ---------------------------------------
+  if (A && A.ivc) {
+    let hv = _hvCache.get(A);
+    if (!hv) { hv = hepaticVeinSegs(A); _hvCache.set(A, hv); }
+    const j = hv[0].a, dx = px - j[0], dy = py - j[1], dz = pz - j[2];
+    if (dx * dx + dy * dy + dz * dz < 42) {               // within ~6.5 cm of the confluence
+      const sp = hvFlowSpeed(G.phaseRV != null ? G.phaseRV : phase, path);
+      if (sp !== 0) {
+        for (let i = 0; i < hv.length; i++) {
+          const v = hv[i];
+          const perp = offAxisDist(px, py, pz, v.a, v.u), t = _axis.along;
+          if (t < 0 || t > v.len) continue;
+          const r = v.r1 + (v.r2 - v.r1) * t / v.len;
+          if (perp > r) continue;
+          const s = sp * gauss(perp, r * 0.9);
+          const dir = s >= 0 ? -1 : 1;                     // + = toward the confluence (RA)
+          considerFlow(true, v.u[0] * dir, v.u[1] * dir, v.u[2] * dir, s < 0 ? -s : s, FLOW.HV_FLOW, false);
         }
       }
     }

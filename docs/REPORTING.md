@@ -426,15 +426,15 @@ your own write-up.
 | Case | Model conclusion |
 |---|---|
 | Normal | Structurally normal heart. Normal biventricular size and systolic function. No significant valve disease. |
-| Aortic stenosis | 1. Severe aortic stenosis (Vmax 4.4 m/s, mean gradient 46 mmHg, AVA 0.74 cm²). 2. LV concentric hypertrophy. |
-| Mitral regurgitation | 1. Severe mitral regurgitation (RF 54%, RVol 81 mL). 2. Severely dilated LV (LVEDVi 119 mL/m²). 3. Dilated left atrium (LAVi 55 mL/m²). |
-| Mitral stenosis | 1. Severe mitral stenosis (MVA 0.98 cm², mean gradient 15.7 mmHg). 2. Dilated left atrium (LAVi 84 mL/m²). |
-| Dilated cardiomyopathy | 1. Severely impaired LV systolic function, LVEF 27%. 2. Severely dilated LV (LVEDVi 138 mL/m²). 3. Moderate functional mitral regurgitation (RF 31%). 4. Dilated left atrium (LAVi 47 mL/m²). |
+| Aortic stenosis | 1. Severe aortic stenosis (Vmax 4.5 m/s, mean gradient 47 mmHg, AVA 0.74 cm²). 2. LV concentric hypertrophy. |
+| Mitral regurgitation | 1. Severe mitral regurgitation (RF 54%, RVol 66 mL). 2. Moderately dilated LV (LVEDVi 102 mL/m²). 3. Dilated left atrium (LAVi 68 mL/m²). |
+| Mitral stenosis | 1. Severe mitral stenosis (MVA 1.00 cm², mean gradient 13.6 mmHg). 2. Dilated left atrium (LAVi 90 mL/m²). 3. Intermediate echocardiographic probability of pulmonary hypertension (TR Vmax 3.4 m/s, PASP ~54 mmHg). |
+| Dilated cardiomyopathy | 1. Severely impaired LV systolic function, LVEF 27%. 2. Severely dilated LV (LVEDVi 129 mL/m²). 3. Moderate functional mitral regurgitation (RF 31%). 4. Dilated left atrium (LAVi 71 mL/m²). 5. Impaired RV systolic function (TAPSE 12 mm, FAC 28%). |
 | Regional wall motion abnormality | 1. Borderline low LV systolic function, LVEF 51%. 2. Regional wall motion abnormality: septal and apical hypokinesis (LAD territory). |
 | Pericardial effusion | 1. Large pericardial effusion (2.5 cm). |
-| Tricuspid regurgitation | 1. Severe tricuspid regurgitation (TR Vmax 3.0 m/s). 2. Intermediate echocardiographic probability of pulmonary hypertension (TR Vmax 3.0 m/s, PASP ~51 mmHg). |
-| Pulmonary hypertension | 1. LV concentric remodelling. 2. High echocardiographic probability of pulmonary hypertension (TR Vmax 4.3 m/s, PASP ~89 mmHg). 3. RV dilatation (RVD1 55 mm). |
-| Atrial septal defect | 1. Secundum ASD. |
+| Tricuspid regurgitation | 1. Severe tricuspid regurgitation (TR Vmax 2.5 m/s). 2. RV dilatation (RVD1 57 mm). |
+| Pulmonary hypertension | 1. LV concentric remodelling. 2. High echocardiographic probability of pulmonary hypertension (TR Vmax 4.3 m/s, PASP ~89 mmHg). 3. RV dilatation (RVD1 55 mm) with impaired RV systolic function (TAPSE 14 mm, FAC 26%). |
+| Atrial septal defect | 1. Secundum ASD. 2. RV dilatation (RVD1 54 mm). |
 | Ventricular septal defect | 1. Restrictive muscular VSD. |
 
 A few reporting points from these cases:
@@ -444,9 +444,14 @@ A few reporting points from these cases:
 - **Pulmonary hypertension.** The LV is small and under-filled, and the septum
   is flattened. "Concentric remodelling" there is a geometry label from RWT,
   not LV disease, so comment on septal shape in the PSAX view.
-- **Tricuspid regurgitation.** Severe TR with only a moderate TR Vmax can
-  underestimate PASP when RA pressure is high. Report the IVC and RAP
-  estimate.
+- **Tricuspid regurgitation.** In severe TR the RA v-wave blunts the RV–RA
+  gradient: the CW envelope is dense, peaks early and is triangular, and its
+  Vmax (2.5 m/s here) can underestimate PASP. Report the IVC and RAP estimate.
+- **Mitral stenosis, right heart.** Look for the secondary pulmonary hypertension: a TR jet
+  (Vmax 3.4 m/s), a mildly dilated RV and a dilated IVC. Measure the pressure
+  half-time on the CW "ski slope" (MVA ≈ 220/PHT).
+- **Dilated cardiomyopathy.** With LAP ~18 mmHg the inflow is restrictive
+  (E/A > 2, DT < 150 ms), not impaired relaxation.
 
 `node tools/verify-report.mjs` checks that every case's conclusion names its
 lesion, that the BSE grading and indexing are correct, and that every template

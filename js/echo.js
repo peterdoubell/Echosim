@@ -23,6 +23,7 @@ const FLOW_LABELS = {
   [FLOW.ASD_JET]: 'ASD jet',
   [FLOW.TR_JET]: 'TR jet',
   [FLOW.PV_FLOW]: 'pulmonary vein',
+  [FLOW.HV_FLOW]: 'hepatic vein',
 };
 
 // Echogenicity of the body wall at fractional depth f (0 = skin, 1 = pleura /
@@ -1359,7 +1360,7 @@ export class EchoView {
     // plane-dependent 2-D sample. RAP is read off the modelled IVC (size + sniff
     // collapse), so the estimate agrees with the plethoric IVC of TR / PH.
     const vTR = (G.hemo && G.hemo.vTRPeak) || 0;
-    if (path.tr && vTR > 1.5) {
+    if (vTR > 1.5) {            // (TR, or the functional TR of severe MS)
       const rap = rapEstimate(G.A.ivc);
       this.metrics.pasp = 4 * vTR * vTR + rap;
     } else {
