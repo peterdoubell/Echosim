@@ -5,7 +5,8 @@ import { geometryAt, hemoSummary, pvLoop, longitudinalStrain, regionalStrain, ea
 // BSE/ASE normal reference ranges — single source of truth for the
 // Measurements thresholds and the displayed "normal band" text.
 // (cardiac-model.js does not re-export REF, so import it directly.)
-import { REF } from './anatomy.js';
+import { GRADED, gradeLvef } from './references.js';
+import { buildReport, reportText, fillTemplate, TEMPLATES, TEMPLATE_FOR, DEFAULT_PATIENT } from './report.js';
 import { Heart3D } from './heart3d.js';
 import { EchoView } from './echo.js';
 import { MeasureTool } from './measure.js';
@@ -76,6 +77,14 @@ const CHECKS = {
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
+// Patient details for indexing and sex-specific reference intervals (the model
+// is one idealised adult; the learner can change the patient it is reported as).
+const patient = (() => {
+  try { const p = JSON.parse(localStorage.getItem('echosim_patient') || 'null'); if (p && p.height) return { ...DEFAULT_PATIENT, ...p }; } catch (e) {}
+  return { ...DEFAULT_PATIENT };
+})();
+let lastMeasure = {};   // the learner's latest caliper / Simpson result, for the report
+
 const state = {
   viewName: 'PLAX',
   baseProbe: VIEWS.PLAX(),
@@ -326,13 +335,16 @@ function loop(now) {
 const VEL_MAX = 2.5;   // m/s
 const GRAD_MAX = 25;   // mmHg
 
-// Render the displayed "normal band" text straight from REF so the shown range
-// always matches the thresholds used to flag abnormal values (one source).
+// The displayed "normal band" text and the abnormal flags both come from the
+// BSE 2020 intervals (js/references.js) for the patient's sex, so the panel,
+// its flags and the structured report always agree (one source).
+const lvNormCm = (key) => { const g = GRADED[key][patient.sex === 'female' ? 'female' : 'male']; return [g.lo / 10, g.bands[0] / 10]; };
 function applyRefText() {
   const cm = (r) => r[0].toFixed(1) + '–' + r[1].toFixed(1) + ' cm';
-  setText('refLvidd', 'normal ' + cm(REF.lviddNormal));
-  setText('refLvids', 'normal ' + cm(REF.lvidsNormal));
-  setText('refEf', 'normal ≥' + REF.efNormal[0] + '%');
+  const sx = patient.sex === 'female' ? '♀' : '♂';
+  setText('refLvidd', `normal ${cm(lvNormCm('lvidd'))} ${sx}`);
+  setText('refLvids', `normal ${cm(lvNormCm('lvids'))} ${sx}`);
+  setText('refEf', 'normal ≥55%');
 }
 
 // mirror echo.metrics into the Measurements panel
@@ -351,16 +363,17 @@ function publishMetrics() {
   // flag every value that falls outside its normal reference range, so the
   // learner sees exactly which measurement is abnormal (not just the EF).
   const warn = (id, bad) => { const el = document.getElementById(id); if (el) el.classList.toggle('warn', !!bad); };
-  // thresholds driven from the REF normal ranges so there's a single source
-  warn('mLvidd', m.lvidd != null && m.lvidd > REF.lviddNormal[1]);
-  warn('mLvids', m.lvids != null && m.lvids > REF.lvidsNormal[1]);
-  warn('mEf', m.ef != null && m.ef < REF.efNormal[0]);
+  // thresholds from the BSE 2020 intervals (the same ones the report grades by)
+  const efBad = m.ef != null && gradeLvef(m.ef).level !== 'normal';
+  const lvdBad = m.lvidd != null && m.lvidd > lvNormCm('lvidd')[1];
+  warn('mLvidd', lvdBad);
+  warn('mLvids', m.lvids != null && m.lvids > lvNormCm('lvids')[1]);
+  warn('mEf', efBad);
   warn('mMapse', m.mapse != null && m.mapse < 10);
   warn('mVel', m.peakVel != null && m.peakVel > VEL_MAX);
   warn('mGrad', m.peakGrad != null && m.peakGrad > GRAD_MAX);
   warn('mEff', m.effusion != null);
-  const anyAbn = (m.ef != null && m.ef < REF.efNormal[0]) || m.effusion != null ||
-    (m.peakVel != null && m.peakVel > VEL_MAX) || (m.lvidd != null && m.lvidd > REF.lviddNormal[1]);
+  const anyAbn = efBad || m.effusion != null || (m.peakVel != null && m.peakVel > VEL_MAX) || lvdBad;
   const flag = document.getElementById('measFlag');
   if (flag) flag.textContent = anyAbn ? '⚠ abnormal' : '';
 
@@ -368,12 +381,10 @@ function publishMetrics() {
   // valve/shunt severity comes straight from the echo engine, beside Peak V
   if (m.severity) setBadge('mVel', 'mVelBadge', m.severityLabel || m.severity, sevLevel(m.severity));
   else setBadge('mVel', 'mVelBadge', '', 'normal');
-  // DCM: derive an EF impairment band (BSE ≥55 normal, 45–54 mild, 36–44 moderate, ≤35 severe)
-  if (m.ef != null && state.path && state.path.dilated) {
-    const band = m.ef >= 55 ? ['normal', 'normal'] : m.ef >= 45 ? ['mild', 'mild']
-      : m.ef >= 36 ? ['moderate', 'moderate'] : ['severe', 'severe'];
-    setBadge('mEf', 'mEfBadge', band[0], band[1]);
-  } else setBadge('mEf', 'mEfBadge', '', 'normal');
+  // impaired EF: the BSE 2020 band (>=55 normal, 50-54 borderline low, 36-49
+  // impaired, <=35 severely impaired — the BSE avoids "mild"/"moderate" here)
+  if (efBad) { const b = gradeLvef(m.ef); setBadge('mEf', 'mEfBadge', b.word, b.level); }
+  else setBadge('mEf', 'mEfBadge', '', 'normal');
 }
 // map an echo-engine severity string to a badge colour class
 function sevLevel(sev) {
@@ -566,6 +577,7 @@ function drawBullseye() {
 
 // learner-measurement readout + live accuracy vs the model's own ground truth
 function publishMeasure(r) {
+  lastMeasure = r || {};
   setText('measDist', r.distCm != null ? r.distCm.toFixed(1) + ' cm' : '—');
   const tag = document.getElementById('measSimpTag');
   const efEl = document.getElementById('measSimpEf');
@@ -913,10 +925,113 @@ helpOverlay.addEventListener('keydown', (e) => {
 });
 try { if (!localStorage.getItem('echosim_seen')) showHelp(); } catch (e) { showHelp(); }
 
+// ---- structured echo report (js/report.js) ----
+// Opens a BSE-style report for the current case: model measurements indexed to
+// the patient's body size and graded against the BSE 2020 intervals, findings
+// and conclusion, per-pathology templates for the learner's own write-up, and a
+// short reporting guide. Measuring takes a few hundred ms, cached per case.
+const reportOverlay = document.getElementById('reportOverlay');
+const reportCard = reportOverlay.querySelector('.overlay-card');
+const reportBtn = document.getElementById('reportBtn');
+const REPORT_TITLE = reportBtn ? reportBtn.title : '';
+let reportOpener = null, lastReport = null;
+const reportOpen = () => !reportOverlay.classList.contains('hidden');
+const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+// report grade -> badge colour (low/high/abnormal read as attention, not severity)
+const badgeLevel = (lv) => (lv === 'na' ? '' : lv === 'normal' ? 'normal' : /^(mild|moderate|severe)$/.test(lv) ? lv : 'moderate');
+const rp = (id) => document.getElementById(id);
+
+function readPatient() {
+  const num = (id, lo, hi, d) => { const v = +rp(id).value; return Number.isFinite(v) && v >= lo && v <= hi ? v : d; };
+  patient.sex = rp('rpSex').value === 'female' ? 'female' : 'male';
+  patient.age = num('rpAge', 16, 100, DEFAULT_PATIENT.age);
+  patient.height = num('rpHeight', 120, 220, DEFAULT_PATIENT.height);
+  patient.weight = num('rpWeight', 30, 200, DEFAULT_PATIENT.weight);
+  try { localStorage.setItem('echosim_patient', JSON.stringify(patient)); } catch (e) {}
+  applyRefText();
+}
+function renderReport() {
+  const rep = buildReport(state.path, patient, lastMeasure);
+  lastReport = rep;
+  setText('rpBsa', rep.patient.bsa.toFixed(2));
+  rp('reportTables').innerHTML = rep.rows.map((g) => `<table class="report-table"><caption>${esc(g.title)}</caption>
+    <thead><tr><th scope="col">Measurement</th><th scope="col">Value</th><th scope="col">Indexed</th><th scope="col">Normal</th><th scope="col">Grade</th></tr></thead>
+    <tbody>${g.rows.map((r) => `<tr><th scope="row">${esc(r.label)}</th><td>${esc(r.value)}${r.unit ? ' ' + esc(r.unit) : ''}</td><td>${esc(r.idx || '')}</td><td>${esc(r.ref || '')}</td>
+      <td>${r.word ? `<span class="sev-badge sev-${badgeLevel(r.level)}">${esc(r.word)}</span>` : ''}</td></tr>`).join('')}</tbody></table>`).join('');
+  rp('reportFindings').innerHTML = rep.findings.map((f) => `<dt>${esc(f.section)}</dt><dd>${esc(f.text)}</dd>`).join('');
+  rp('reportConclusion').innerHTML = rep.conclusion.map((c) => `<li>${esc(c)}</li>`).join('');
+  rp('reportLearner').innerHTML = rep.learner.length ? `<h3>Your measurements</h3><ul class="report-learner">${rep.learner.map((l) =>
+    `<li>${esc(l.label)}: <b>${esc(l.value)}</b>${l.truth ? ` — model ${esc(l.truth)}${l.diff != null ? ` (${l.diff >= 0 ? '+' : ''}${l.diff.toFixed(0)}; ${Math.abs(l.diff) <= l.tol ? 'within' : 'outside'} ±${l.tol} test–retest)` : ''}` : ''}</li>`).join('')}</ul>` : '';
+  rp('reportSrc').textContent = `Reference intervals: ${rep.source}. Patient ${patient.sex}, BSA ${rep.patient.bsa.toFixed(2)} m² (Mosteller).`;
+}
+function showReportTab(name) {
+  reportOverlay.querySelectorAll('[data-rtab]').forEach((b) => { const on = b.dataset.rtab === name; b.classList.toggle('active', on); b.setAttribute('aria-selected', on ? 'true' : 'false'); });
+  reportOverlay.querySelectorAll('[data-rpanel]').forEach((p) => p.classList.toggle('hidden', p.dataset.rpanel !== name));
+}
+function openReport() {
+  if (challenge.active) return;
+  reportOpener = document.activeElement;
+  rp('rpSex').value = patient.sex; rp('rpAge').value = patient.age; rp('rpHeight').value = patient.height; rp('rpWeight').value = patient.weight;
+  const sel = rp('rpTemplate');
+  if (!sel.options.length) sel.innerHTML = Object.entries(TEMPLATES).map(([k, t]) => `<option value="${k}">${esc(t.name)}</option>`).join('');
+  sel.value = TEMPLATE_FOR[state.pathKey] || 'blank';
+  reportOverlay.classList.remove('hidden');
+  rp('reportTables').innerHTML = '<p class="report-hint">Measuring…</p>';
+  rp('reportClose').focus();
+  // let the dialog paint before the (synchronous) model measurements run
+  setTimeout(() => { renderReport(); }, 30);
+}
+function hideReport() {
+  reportOverlay.classList.add('hidden');
+  const back = reportOpener || reportBtn;
+  if (back && typeof back.focus === 'function') back.focus();
+  reportOpener = null;
+}
+if (reportBtn) reportBtn.addEventListener('click', openReport);
+rp('reportClose').addEventListener('click', hideReport);
+reportOverlay.addEventListener('click', (e) => { if (e.target === reportOverlay) hideReport(); });
+reportOverlay.addEventListener('keydown', (e) => {
+  if (!reportOpen()) return;
+  if (e.key === 'Escape') { e.preventDefault(); hideReport(); return; }
+  if (e.key === 'Tab') {
+    const focusables = [...reportCard.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')].filter((el) => el.offsetParent !== null);
+    if (!focusables.length) return;
+    const first = focusables[0], last = focusables[focusables.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+});
+reportOverlay.querySelectorAll('[data-rtab]').forEach((b) => b.addEventListener('click', () => showReportTab(b.dataset.rtab)));
+['rpSex', 'rpAge', 'rpHeight', 'rpWeight'].forEach((id) => rp(id).addEventListener('change', () => { readPatient(); renderReport(); }));
+rp('rpInsert').addEventListener('click', () => {
+  if (!lastReport) return;
+  const ta = rp('rpWriteUp');
+  const text = fillTemplate(rp('rpTemplate').value, lastReport);
+  ta.value = ta.value.trim() ? `${ta.value.trimEnd()}\n\n${text}` : text;
+  ta.focus();
+});
+const reportStatus = (t) => { setText('rpStatus', t); setTimeout(() => setText('rpStatus', ''), 2500); };
+rp('rpCopy').addEventListener('click', async () => {
+  if (!lastReport) return;
+  const text = reportText(lastReport, rp('rpWriteUp').value);
+  try { await navigator.clipboard.writeText(text); reportStatus('Copied to clipboard'); }
+  catch (e) { reportStatus('Copy blocked by the browser — use Download'); }
+});
+rp('rpDownload').addEventListener('click', () => {
+  if (!lastReport) return;
+  const blob = new Blob([reportText(lastReport, rp('rpWriteUp').value)], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `echosim-report-${state.pathKey || 'case'}.txt`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  reportStatus('Downloaded');
+});
+
 // ---- keyboard shortcuts ----
 window.addEventListener('keydown', (e) => {
   if (/INPUT|SELECT|TEXTAREA/.test(document.activeElement?.tagName || '')) return;
-  if (helpOpen()) return; // don't let shortcuts fire behind the open help modal
+  if (helpOpen() || reportOpen()) return; // don't let shortcuts fire behind an open modal
   if (e.key === ' ') { e.preventDefault(); playBtn.click(); }
   else if (e.key === 'ArrowLeft') { state.playing = false; playBtn.textContent = '▶ Play'; state.phase = (state.phase - 0.02 + 1) % 1; }
   else if (e.key === 'ArrowRight') { state.playing = false; playBtn.textContent = '▶ Play'; state.phase = (state.phase + 0.02) % 1; }
@@ -1054,6 +1169,8 @@ challengeBtn.addEventListener('click', () => {
   challengeBtn.classList.toggle('active', challenge.active);
   challengeBtn.textContent = challenge.active ? '✕ Exit challenge' : '🎯 Challenge mode';
   document.getElementById('pathology').disabled = challenge.active;
+  // the report names the lesion, so it is unavailable while a case is being guessed
+  if (reportBtn) { reportBtn.disabled = challenge.active; reportBtn.title = challenge.active ? 'The echo report is unavailable in challenge mode (it would give the answer away)' : REPORT_TITLE; }
   // hide the severity control during a challenge — its state would leak the lesion
   if (severityCtl) severityCtl.classList.add('hidden');
   if (challenge.active) { challenge.score = 0; challenge.total = 0; _seed = 20260707 + Math.floor(state.phase * 99999); newCase(); }

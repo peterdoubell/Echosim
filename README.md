@@ -49,6 +49,13 @@ dynamically-refocused receive limb), tissue harmonic imaging with its honest
 penetration penalty, finite elevational slice thickness giving genuine
 partial-volume averaging, persistence, and a frame rate reported as measured.
 
+**Reporting** — a structured echo report for every case (📝 in the
+Measurements panel): measurements taken from the model, each graded against the
+sex-specific BSE 2020 reference intervals and indexed to the patient's BSA or
+height; findings structure by structure; a numbered conclusion; and fill-in
+templates for writing your own report and comparing. The full guide, reference
+tables and templates are in [`docs/REPORTING.md`](docs/REPORTING.md).
+
 ## Verifying it
 
 ```bash
@@ -60,6 +67,7 @@ node tools/verify-atrial-phase.mjs  # atrio-ventricular phase relationship
 node tools/verify-anatomy.mjs   # anatomy audit: ASE dimensions and relationships, swept
                                 # over views, phases and pathologies (open defects tagged KNOWN-FAIL)
 node tools/verify-timing.mjs    # valve timing, heart-rate warping, right-heart offsets
+node tools/verify-report.mjs    # structured echo report: BSE 2020 grading, conclusions, templates, dialog
 ```
 
 `docs/ANATOMY.md` describes the anatomical model, the audit and the expert-panel
