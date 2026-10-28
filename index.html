@@ -33,6 +33,7 @@
       </div>
       <button id="twelveBtn" class="lead-btn" title="Show the full 12-lead ECG">12-Lead</button>
       <div class="phase-label"><span id="phaseName">—</span><small id="hrReadout">72 bpm</small></div>
+      <button id="pathwayBtn" class="lead-btn" data-open-pathway title="BSE accreditation learning pathway: modules, practice cases and a mock exam">🎓 Pathway</button>
       <button id="feedbackBtn" class="lead-btn" title="Report a bug or request a feature">💬 Feedback</button>
       <button id="helpBtn" class="help-btn" title="Show help & keyboard shortcuts" aria-label="Help">?</button>
     </div>
@@ -318,6 +319,7 @@
           <button data-diff="hard" class="seg-btn" aria-pressed="false">Hard</button>
         </div>
         <button id="challengeBtn" class="wide">🎯 Challenge mode</button>
+        <button class="wide" data-open-pathway title="Learn, practise and test for BSE TTE accreditation">🎓 BSE accreditation pathway</button>
       </div>
     </aside>
   </main>
@@ -395,6 +397,26 @@
         <span id="rpStatus" class="report-status" role="status" aria-live="polite"></span>
       </div>
     </div>
+  </div>
+
+  <!-- learning pathway for BSE TTE accreditation revision (js/pathway.js, js/pathway-ui.js) -->
+  <div id="pathwayOverlay" class="overlay hidden">
+    <div class="overlay-card pathway-card" role="dialog" aria-modal="true" aria-labelledby="pathwayTitle">
+      <button id="pathwayClose" class="overlay-x" aria-label="Close">×</button>
+      <h2 id="pathwayTitle">BSE accreditation pathway <small>Transthoracic echo revision · learn, practise, test</small></h2>
+      <div class="pw-progress"><div class="pw-bar" aria-hidden="true"><span id="pwBar"></span></div><span id="pwProgressText"></span></div>
+      <div class="pw-layout">
+        <nav id="pwNav" class="pw-nav" aria-label="Pathway modules"></nav>
+        <div id="pwMain" class="pw-main"></div>
+      </div>
+    </div>
+  </div>
+  <!-- shown while a case question is being watched in the simulator -->
+  <div id="pwCaseBar" class="pw-casebar hidden" role="region" aria-label="Pathway case question">
+    <div class="pw-cb-head"><b id="pwCbTitle"></b><span id="pwCbTimer"></span></div>
+    <p id="pwCbQ"></p>
+    <div id="pwCbOpts" class="pw-cb-opts"></div>
+    <button id="pwCbBack">↩ Back to the pathway</button>
   </div>
 
   <!-- bug report / feature request: emailed to the maintainer via api/feedback.js -->
