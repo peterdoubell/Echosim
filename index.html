@@ -184,15 +184,16 @@
       <div class="ctl-group">
         <h3>Measurements <span id="measFlag" class="grp-flag"></span></h3>
         <div class="metrics" id="metrics">
-          <div><span>LVIDd</span><b id="mLvidd">—</b><small class="ref" id="refLvidd">normal 3.9–5.9 cm</small></div>
-          <div><span>LVIDs</span><b id="mLvids">—</b><small class="ref" id="refLvids">normal 2.2–4.1 cm</small></div>
+          <div><span>LVIDd</span><b id="mLvidd">—</b><small class="ref" id="refLvidd">normal 3.7–5.6 cm ♂</small></div>
+          <div><span>LVIDs</span><b id="mLvids">—</b><small class="ref" id="refLvids">normal 2.2–4.1 cm ♂</small></div>
           <div><span>EF</span><span class="mval"><b id="mEf">—</b></span><small class="ref" id="refEf">normal ≥55%</small></div>
           <div title="Mitral annular plane systolic excursion — a longitudinal-function marker"><span>MAPSE</span><b id="mMapse">—</b><small class="ref">normal ≥10 mm</small></div>
           <div><span>Peak V <em id="mVelLabel" class="peak-label"></em></span><span class="mval"><b id="mVel">—</b></span><small class="ref">normal &lt;2.5 m/s</small></div>
           <div><span>ΔP peak</span><b id="mGrad">—</b><small class="ref">normal &lt;25 mmHg</small></div>
           <div><span>Effusion</span><b id="mEff">—</b><small class="ref">none normal</small></div>
         </div>
-        <small class="bse-note">Calibrated to BSE/ASE reference ranges. Also: IVS/wall 0.6–1.2 cm · LA diam. 3.0–4.0 cm · aortic root &lt;3.7 cm.</small>
+        <small class="bse-note">Graded against the BSE 2020 reference intervals (sex-specific). The full measurement set, indexed to body size, is in the echo report.</small>
+        <button id="reportBtn" class="wide small" title="Open a structured BSE-style echo report for this case, with reference intervals, report templates and a reporting guide">📝 Echo report &amp; templates</button>
       </div>
 
       <div class="ctl-group">
@@ -335,6 +336,63 @@
       <p class="cite-note">Measurements &amp; severity thresholds are calibrated to BSE/ASE reference ranges.<br />
         <small>Source: British Society of Echocardiography chamber quantification &amp; valve assessment guidelines, 2020–2022.</small></p>
       <button id="helpGot" class="wide primary">Got it</button>
+    </div>
+  </div>
+
+  <!-- structured echo report: measurements, reference intervals, templates, guide -->
+  <div id="reportOverlay" class="overlay hidden">
+    <div class="overlay-card report-card" role="dialog" aria-modal="true" aria-labelledby="reportTitle">
+      <button id="reportClose" class="overlay-x" aria-label="Close">×</button>
+      <h2 id="reportTitle">Echo report <small>BSE-style transthoracic report · simulated patient, teaching only</small></h2>
+      <div class="report-patient" role="group" aria-label="Patient details">
+        <label>Sex <select id="rpSex"><option value="male">Male</option><option value="female">Female</option></select></label>
+        <label>Age <input id="rpAge" type="number" min="16" max="100" step="1" /> y</label>
+        <label>Height <input id="rpHeight" type="number" min="120" max="220" step="1" /> cm</label>
+        <label>Weight <input id="rpWeight" type="number" min="30" max="200" step="1" /> kg</label>
+        <span class="rp-bsa">BSA <b id="rpBsa">—</b> m²</span>
+      </div>
+      <div class="report-tabs seg" role="tablist" aria-label="Report sections">
+        <button class="seg-btn active" role="tab" aria-selected="true" data-rtab="report" id="rtab-report">Report</button>
+        <button class="seg-btn" role="tab" aria-selected="false" data-rtab="write" id="rtab-write">Write your report</button>
+        <button class="seg-btn" role="tab" aria-selected="false" data-rtab="guide" id="rtab-guide">Reporting guide</button>
+      </div>
+      <div class="report-body">
+        <section class="rtab-panel" data-rpanel="report" role="tabpanel" aria-labelledby="rtab-report">
+          <div id="reportTables" class="report-tables"></div>
+          <h3>Findings</h3>
+          <dl id="reportFindings" class="report-findings"></dl>
+          <h3>Conclusion</h3>
+          <ol id="reportConclusion" class="report-conclusion"></ol>
+          <div id="reportLearner"></div>
+          <p class="report-src" id="reportSrc"></p>
+        </section>
+        <section class="rtab-panel hidden" data-rpanel="write" role="tabpanel" aria-labelledby="rtab-write">
+          <div class="report-tpl-row">
+            <label>Template <select id="rpTemplate"></select></label>
+            <button id="rpInsert" class="small">Insert template</button>
+          </div>
+          <p class="report-hint">Templates are filled with this case's measurements. Text in <b>[square brackets]</b> is for you to judge from the images. Compare your conclusion with the Report tab when you are done.</p>
+          <textarea id="rpWriteUp" class="report-write" spellcheck="true" aria-label="Your report"></textarea>
+        </section>
+        <section class="rtab-panel hidden report-guide" data-rpanel="guide" role="tabpanel" aria-labelledby="rtab-guide">
+          <h3>How to write the report</h3>
+          <ol>
+            <li><b>Enter height, weight and sex first.</b> Chamber volumes and LV mass are indexed to body surface area, aortic dimensions to height. Reference intervals are sex-specific.</li>
+            <li><b>Report structure by structure</b> in a fixed order: LV (size, wall thickness, systolic and diastolic function, regional wall motion) → RV → atria → valves (aortic, mitral, tricuspid, pulmonary) → aorta → pericardium → IVC / RA pressure.</li>
+            <li><b>Measure at the right frame.</b> End-diastole is the frame before the mitral valve closes; end-systole is the frame before it opens, where the aortic valve has just closed.</li>
+            <li><b>Quote LVEF as a number</b> (e.g. "LVEF 42%") and avoid "mild" or "moderate" LV dysfunction. BSE bands: ≥55 normal, 50–54 borderline low, 36–49 impaired, ≤35 severely impaired.</li>
+            <li><b>Grade with the graded intervals</b> (normal / mild / moderate / severe) and say what the number is: "moderately dilated LV (LVEDVi 95 mL/m²)".</li>
+            <li><b>Valve disease is graded on concordant measures</b>: AS on Vmax, mean gradient and AVA; MS on valve area and mean gradient; regurgitation on an integrated assessment (regurgitant fraction / volume, vena contracta, jet, flow reversal).</li>
+            <li><b>The conclusion answers the clinical question</b>: list abnormal findings first, most important first, each with the number that supports it. Compare with a previous study if there is one.</li>
+          </ol>
+          <p class="report-hint">Reference intervals: Harkness A et al. <i>Normal reference intervals for cardiac dimensions and function for use in echocardiographic practice: a guideline from the British Society of Echocardiography.</i> Echo Res Pract 2020;7(1):G1–G18. Right heart: Zaidi A et al. Echo Res Pract 2020;7(1):G19–G41. The intervals come from a largely Caucasian population and are not valid for 3D measurements, athletes or pregnancy. The full guide and templates are in <code>docs/REPORTING.md</code>.</p>
+        </section>
+      </div>
+      <div class="report-actions">
+        <button id="rpCopy" class="small">⧉ Copy report</button>
+        <button id="rpDownload" class="small">⤓ Download .txt</button>
+        <span id="rpStatus" class="report-status" role="status" aria-live="polite"></span>
+      </div>
     </div>
   </div>
 

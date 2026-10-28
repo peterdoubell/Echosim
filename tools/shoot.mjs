@@ -26,7 +26,9 @@ const PORT = 8091;
 await new Promise((r) => server.listen(PORT, r));
 
 const browser = await chromium.launch({
-  executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
+  executablePath: process.env.CHROME_PATH || [
+    '/opt/pw-browsers/chromium', '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
+  ].find((p) => fs.existsSync(p)),
   args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox'],
 });
 const page = await browser.newPage({ viewport: { width: 1440, height: 880 } });
