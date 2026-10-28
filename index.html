@@ -33,6 +33,7 @@
       </div>
       <button id="twelveBtn" class="lead-btn" title="Show the full 12-lead ECG">12-Lead</button>
       <div class="phase-label"><span id="phaseName">—</span><small id="hrReadout">72 bpm</small></div>
+      <button id="feedbackBtn" class="lead-btn" title="Report a bug or request a feature">💬 Feedback</button>
       <button id="helpBtn" class="help-btn" title="Show help & keyboard shortcuts" aria-label="Help">?</button>
     </div>
   </header>
@@ -393,6 +394,37 @@
         <button id="rpDownload" class="small">⤓ Download .txt</button>
         <span id="rpStatus" class="report-status" role="status" aria-live="polite"></span>
       </div>
+    </div>
+  </div>
+
+  <!-- bug report / feature request: emailed to the maintainer via api/feedback.js -->
+  <div id="feedbackOverlay" class="overlay hidden">
+    <div class="overlay-card feedback-card" role="dialog" aria-modal="true" aria-labelledby="feedbackTitle">
+      <button id="feedbackClose" class="overlay-x" aria-label="Close">×</button>
+      <h2 id="feedbackTitle">Feedback <small>Goes straight to the EchoSim developer</small></h2>
+      <div class="report-tabs seg" role="tablist" aria-label="Feedback type">
+        <button class="seg-btn active" role="tab" aria-selected="true" data-ftab="bug" id="ftab-bug">🐞 Report a bug</button>
+        <button class="seg-btn" role="tab" aria-selected="false" data-ftab="feature" id="ftab-feature">💡 Request a feature</button>
+      </div>
+      <form id="feedbackForm" class="feedback-form" novalidate>
+        <label>Summary <span class="fb-req">required</span>
+          <input id="fbSummary" type="text" maxlength="200" required autocomplete="off" />
+        </label>
+        <label><span id="fbDetailsLabel">What happened?</span>
+          <textarea id="fbDetails" rows="7" maxlength="5000"></textarea>
+        </label>
+        <label>Your email <span class="fb-opt">optional, if you would like a reply</span>
+          <input id="fbEmail" type="email" maxlength="200" autocomplete="email" />
+        </label>
+        <!-- honeypot: hidden from people, filled by bots -->
+        <input id="fbWebsite" name="website" type="text" class="fb-hp" tabindex="-1" autocomplete="off" aria-hidden="true" />
+        <label class="fb-check"><input id="fbDiag" type="checkbox" checked /> Include diagnostics (case, view, browser, recent errors)</label>
+        <details class="fb-diag"><summary>What gets sent</summary><pre id="fbDiagText"></pre></details>
+        <div class="report-actions">
+          <button id="fbSend" type="submit" class="small primary-action">Send</button>
+          <span id="fbStatus" class="report-status" role="status" aria-live="polite"></span>
+        </div>
+      </form>
     </div>
   </div>
 
