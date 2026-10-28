@@ -69,10 +69,54 @@ node tools/verify-anatomy.mjs   # anatomy audit: ASE dimensions and relationship
 node tools/verify-timing.mjs    # valve timing, heart-rate warping, right-heart offsets
 node tools/verify-report.mjs    # structured echo report: BSE 2020 grading, conclusions, templates, dialog
 node tools/verify-feedback.mjs  # feedback dialog and api/feedback.js (validation, rate limit, fallbacks)
+node tools/verify-pathway.mjs   # learning pathway: question bank, scoring, case questions, mock exam
 ```
 
 `docs/ANATOMY.md` describes the anatomical model, the audit and the expert-panel
 review history.
+
+## Learning pathway (BSE accreditation revision)
+
+**🎓 Pathway** in the header (also in the Training panel) is a structured
+revision course for the BSE transthoracic echo accreditation written exam. It
+has ten modules:
+
+1. Physics
+2. Standard views
+3. LV size
+4. LV function and wall motion
+5. Diastolic function and LA
+6. Aortic valve
+7. Mitral valve
+8. Right heart and PH
+9. Pericardium and shunts
+10. Reporting
+
+Each module has three parts:
+
+- **Learn:** objectives and key facts. Numbers come from the BSE 2020
+  intervals in `js/references.js`.
+- **Practise:** tasks that load the matching case into the simulator.
+- **Test:** questions with explanations and a 70% pass mark.
+
+The bank has 97 questions, 14 of them case questions. During a case question
+the simulator plays the case with the diagnosis hidden, like the exam's video
+questions: the pathology menu, labels, severity control and report are locked,
+and for "name this view" questions the view name is hidden too. The learner
+answers from a bar docked over the 3D panel.
+
+The **mock exam** draws 40 questions evenly from every module and runs a
+60-minute timer. Answers stay hidden until the end, which shows a breakdown by
+module and the topics to revise. Progress is stored in the browser.
+
+The content lives in `js/pathway.js` and the dialog in `js/pathway-ui.js`.
+`node tools/verify-pathway.mjs` checks the bank and the scoring, checks that
+numbers quoted in explanations match what the simulator measures, and runs the
+dialog end to end.
+
+This is independent revision material, not produced by or affiliated with the
+British Society of Echocardiography. Accreditation also requires a logbook and
+a practical assessment; see bsecho.org.
 
 ## Feedback (bug reports and feature requests)
 

@@ -8,6 +8,7 @@ import { geometryAt, hemoSummary, pvLoop, longitudinalStrain, regionalStrain, ea
 import { GRADED, gradeLvef } from './references.js';
 import { buildReport, reportText, fillTemplate, TEMPLATES, TEMPLATE_FOR, DEFAULT_PATIENT } from './report.js';
 import { initFeedback } from './feedback.js';
+import { initPathway } from './pathway-ui.js';
 import { Heart3D } from './heart3d.js';
 import { EchoView } from './echo.js';
 import { MeasureTool } from './measure.js';
@@ -1045,13 +1046,13 @@ const feedback = initFeedback({
 // ---- keyboard shortcuts ----
 window.addEventListener('keydown', (e) => {
   if (/INPUT|SELECT|TEXTAREA/.test(document.activeElement?.tagName || '')) return;
-  if (helpOpen() || reportOpen() || feedback.isOpen()) return; // don't let shortcuts fire behind an open modal
+  if (helpOpen() || reportOpen() || feedback.isOpen() || pathway.isOpen()) return; // don't let shortcuts fire behind an open modal
   if (e.key === ' ') { e.preventDefault(); playBtn.click(); }
   else if (e.key === 'ArrowLeft') { state.playing = false; playBtn.textContent = '▶ Play'; state.phase = (state.phase - 0.02 + 1) % 1; }
   else if (e.key === 'ArrowRight') { state.playing = false; playBtn.textContent = '▶ Play'; state.phase = (state.phase + 0.02) % 1; }
   else if (e.key >= '1' && e.key <= '5') { const v = Object.keys(VIEWS)[+e.key - 1]; if (v) setView(v); }
   else if (e.key === 'r' || e.key === 'R') { setView(state.viewName); }
-  else if (e.key === 'l' || e.key === 'L') { const c = document.getElementById('labelsOn'); c.checked = !c.checked; echo.showLabels = c.checked; }
+  else if ((e.key === 'l' || e.key === 'L') && !pathwayCase.active) { const c = document.getElementById('labelsOn'); c.checked = !c.checked; echo.showLabels = c.checked; }
   else if (e.key === 'c' || e.key === 'C') { document.getElementById('challengeBtn').click(); }
 });
 
@@ -1179,6 +1180,7 @@ function answerCase(k) {
 let _seed = 20260707;
 function pseudoRand() { _seed = (_seed * 1664525 + 1013904223) & 0x7fffffff; return _seed / 0x7fffffff; }
 challengeBtn.addEventListener('click', () => {
+  if (pathwayCase.active) return; // a pathway case question is in progress
   challenge.active = !challenge.active;
   challengeBtn.classList.toggle('active', challenge.active);
   challengeBtn.textContent = challenge.active ? '✕ Exit challenge' : '🎯 Challenge mode';
@@ -1189,6 +1191,73 @@ challengeBtn.addEventListener('click', () => {
   if (severityCtl) severityCtl.classList.add('hidden');
   if (challenge.active) { challenge.score = 0; challenge.total = 0; _seed = 20260707 + Math.floor(state.phase * 99999); newCase(); }
   else { state.pathKey = 'normal'; state.path = {}; heart3d.setPathology({}); document.getElementById('pathology').value = 'normal'; setViewTagHidden(false); renderTeaching('normal'); setView('PLAX'); }
+});
+
+// ---- learning pathway (js/pathway-ui.js) ----
+// Loads cases for the pathway's practical tasks and case questions. A hidden
+// case works like challenge mode: the pathology menu, teaching text, severity
+// control, report and challenge button are locked so nothing names the lesion,
+// and the view name can be hidden too for "name this view" questions.
+// active: a case is loaded with its diagnosis hidden. prev: what was loaded
+// before the first case of a test, kept until the test restores it.
+const pathwayCase = { active: false, prev: null };
+const PATHWAY_LOCK_TITLE = 'Unavailable while a pathway case question is open (it would give the answer away)';
+let labelsBeforeCase = null;
+function lockForCase(on) {
+  const sel = document.getElementById('pathology');
+  sel.disabled = on;
+  // exam clips carry no labels, and labels such as "DAo" or "CS" give away the view
+  const lab = document.getElementById('labelsOn');
+  if (on && labelsBeforeCase === null) { labelsBeforeCase = lab.checked; lab.checked = false; echo.showLabels = false; }
+  if (!on && labelsBeforeCase !== null) { lab.checked = labelsBeforeCase; echo.showLabels = labelsBeforeCase; labelsBeforeCase = null; }
+  lab.disabled = on;
+  challengeBtn.disabled = on;
+  if (reportBtn) { reportBtn.disabled = on; reportBtn.title = on ? PATHWAY_LOCK_TITLE : REPORT_TITLE; }
+  if (on) {
+    sel.selectedIndex = -1;
+    if (severityCtl) severityCtl.classList.add('hidden');
+    document.getElementById('teaching').innerHTML =
+      '<div class="quiz"><b>🎓 Pathway case</b><br>Answer the question in the pathway. The diagnosis stays hidden until you answer.</div>';
+  }
+}
+function simLoad({ path: key = 'normal', grade = 'severe', view, hidden = false, hideView = false } = {}) {
+  if (challenge.active) challengeBtn.click();
+  if (hidden && !pathwayCase.prev) pathwayCase.prev = { key: state.pathKey || 'normal', view: state.viewName, grade: state.path.grade || 'severe' };
+  state.pathKey = key;
+  state.path = { ...PATHOLOGY[key].flags, grade };
+  heart3d.setPathology(state.path);
+  heart.setPathology(state.path);
+  setView(view || PATHOLOGY[key].view);
+  setGradeButtons(grade);
+  if (hidden) {
+    pathwayCase.active = true;
+    lockForCase(true);
+    setViewTagHidden(hideView);
+    if (hideView) document.querySelectorAll('[data-view]').forEach((b) => { b.classList.remove('active'); b.setAttribute('aria-pressed', 'false'); });
+  } else {
+    if (pathwayCase.active) { pathwayCase.active = false; lockForCase(false); }
+    setViewTagHidden(false);
+    document.getElementById('pathology').value = key;
+    syncSeverityCtl(key);
+    renderTeaching(key);
+  }
+}
+// leave a hidden case: restore=true goes back to what was loaded before it,
+// restore=false reveals the current case in place (used after answering)
+function simEnd(restore = true) {
+  if (restore) {
+    const prev = pathwayCase.prev;
+    pathwayCase.prev = null;
+    if (prev) simLoad({ path: prev.key, view: prev.view, grade: prev.grade });
+  } else if (pathwayCase.active) {
+    simLoad({ path: state.pathKey, view: state.viewName, grade: state.path.grade || 'severe' });
+  }
+}
+const pathway = initPathway({
+  load: simLoad,
+  end: simEnd,
+  openReport: () => openReport(),
+  caseActive: () => pathwayCase.active,
 });
 
 // initialise teaching text + kick off
