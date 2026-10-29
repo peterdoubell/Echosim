@@ -20,6 +20,7 @@
 // Windkessel; standard closed-loop lumped circulation (CircAdapt-style, reduced).
 
 import { clamp } from './mathutils.js';
+import { dcmSeverityOf } from './scenarios.js';
 
 const CYCLE = 0.833;          // reference cycle length (s) at ~72 bpm
 // Ventricular activation is ASYMMETRIC: contraction to peak elastance takes
@@ -91,10 +92,18 @@ function circParams(path) {
     p.Rsys *= 1.3;
   }
   if (path.lvh && !path.dilated) { p.Emin = 0.12; }               // stiff, hypertrophied → higher LVEDP
-  if (path.dilated) { p.Emax = 0.60; p.Emin = 0.060; p.V0 = 30; p.Rsys = 1.30; p.Cao = 1.4; p.Pla0 = 13; }
+  if (path.dilated) {
+    // Contractility, filling pressure and remodelling change together. EF is
+    // still measured from the solved PV loop, never replaced with a target.
+    Object.assign(p, {
+      borderline: { Emax: 2.00, Emin: 0.065, V0: 24, Rsys: 1.10, Cao: 1.45, Pla0: 10 },
+      impaired: { Emax: 1.21, Emin: 0.063, V0: 27, Rsys: 1.20, Cao: 1.4, Pla0: 11.5 },
+      severe: { Emax: 0.60, Emin: 0.060, V0: 30, Rsys: 1.30, Cao: 1.4, Pla0: 13 },
+    }[dcmSeverityOf(path)]);
+  }
   // DCM: annular dilatation and leaflet tethering leave a central FUNCTIONAL MR
   // (moderate: regurgitant fraction ~30 %) even with structurally normal leaflets
-  if (path.dilated && !path.mr) { p.Rmr = 1.2; }
+  if (path.dilated && !path.mr) { p.Rmr = ({ borderline: 3.5, impaired: 1.8, severe: 1.2 })[dcmSeverityOf(path)]; }
   if (path.mr) {
     // Regurgitant orifice + congested LA, plus the chronic volume-overload
     // REMODELLING of primary MR: the LV dilates (unstressed volume V0 rises) so it
@@ -244,7 +253,8 @@ function simulate(path) {
 const _cache = new Map();
 function sig(path) {
   return [path.aorticStenosis, path.lvh, path.dilated, path.mr, path.mitralStenosis,
-    path.rwma ? 1 : 0, path.rvpo].map((v) => (v ? 1 : 0)).join('') + ':' + gradeOf(path);
+    path.rwma ? 1 : 0, path.rvpo].map((v) => (v ? 1 : 0)).join('') + ':' + gradeOf(path)
+    + ':' + (path.dilated ? dcmSeverityOf(path) : '');
 }
 function solved(path) {
   const key = sig(path);

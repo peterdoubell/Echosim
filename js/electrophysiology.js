@@ -18,6 +18,7 @@
 // lead transform (Edenbrandt & Pahlm). Amplitudes in mV, times in seconds.
 
 import { clamp } from './mathutils.js';
+import { rwmaScenario } from './scenarios.js';
 
 // Inverse-Dower coefficients: lead = row · [X, Y, Z]  (Frank VCG axes:
 // X = right→left, Y = superior→inferior, Z = posterior→anterior).
@@ -27,6 +28,7 @@ const DOWER = {
   I: [0.632, -0.235, 0.059], II: [0.235, 1.066, -0.132],
 };
 export const LEAD_NAMES = ['I', 'II', 'III', 'aVR', 'aVL', 'aVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6'];
+const BEAT_HISTORY_SECONDS = 6.6; // six-second display plus the longest wave tail
 
 // Project a buffered VCG sample [X,Y,Z] to all 12 leads (for the strip / grid).
 export function vcgToLeads(v) { return leadsFromVCG(v, {}); }
@@ -99,8 +101,20 @@ function applyMorphology(W, path, rhythm, beatType) {
   if (path.effusion) {
     for (const k of ['P', 'Q', 'R', 'S', 'T']) W[k].a = W[k].a.map((v) => v * 0.5);
   }
-  // --- STEMI (explicit rhythm option): anterior ST elevation vector ---
-  if (rhythm === 'stemi') {
+  // --- RWMA teaching cases: a territory-matched acute injury pattern ---
+  // One shared vector retains Einthoven/Goldberger relationships and provides
+  // reciprocal changes. RWMA has other causes too; the case UI labels this as
+  // an illustrative infarction association, not a diagnostic equivalence.
+  const region = rwmaScenario(path);
+  if (region) {
+    const severity = typeof path.rwma === 'object' && path.rwma.severity != null
+      ? clamp(path.rwma.severity, 0, 1) / 0.85 : 1;
+    W.stVec = region.stVec.map((v) => v * severity);
+    W.T.a = W.T.a.map((v, i) => v + 0.35 * W.stVec[i]);
+  }
+  // The explicit STEMI option supplies the anterior example when no regional
+  // case is selected; it must not override an inferior/lateral case's ECG.
+  if (rhythm === 'stemi' && !region) {
     W.stVec = [0.5, 0.15, -0.9];                          // elevation projecting to V1-V4
     W.T.a = [0.7, 0.3, -1.0];                             // hyperacute T
   }
@@ -213,7 +227,7 @@ export class Heartbeat {
   }
 
   // Decide the next beat's RR and type from the current rhythm.
-  _scheduleNext(prevType) {
+  _scheduleNext(prevType, atT = this._t) {
     const base = this._baseRR();
     const r = this.rhythm;
     if (r === 'afib') {
@@ -226,14 +240,25 @@ export class Heartbeat {
       if (prevType === 'pvc') return { rr: base * 1.38, type: 'normal' }; // compensatory pause
     }
     // sinus (and morphology-only rhythms): base RR + respiratory sinus arrhythmia
-    const rsa = 1 + 0.05 * Math.sin(this._t * 2 * Math.PI * 0.25);
+    const rsa = 1 + 0.05 * Math.sin(atT * 2 * Math.PI * 0.25);
     return { rr: base * rsa, type: 'normal' };
   }
 
   _genBeat(atT) {
     const prev = this._beats.length ? this._beats[this._beats.length - 1].type : 'normal';
-    const sched = this._scheduleNext(prev);
-    let W = applyMorphology(normalWaves(), this.path, this.rhythm, sched.type);
+    const sched = this._scheduleNext(prev, atT);
+    const W = this._waves(sched);
+    const beat = { t: atT, rr: sched.rr, type: sched.type, W };
+    this._beats.push(beat);
+    // Keep time, not a fixed beat count: six beats are less than three seconds
+    // at tachycardic rates and cannot repaint the full ECG when a case changes.
+    while (this._beats.length > 1 && this._beats[0].t < atT - BEAT_HISTORY_SECONDS) this._beats.shift();
+    this._nextAt = atT + sched.rr;
+    return beat;
+  }
+
+  _waves(sched) {
+    const W = applyMorphology(normalWaves(), this.path, this.rhythm, sched.type);
     // AV block: prolong PR (shift P earlier relative to R)
     if (this.rhythm === 'avblock1') W.P.t0 = -0.28;
     // QT scales with RR: the T peak moves with sqrt(RR) (Bazett-ish) and the wave
@@ -242,11 +267,7 @@ export class Heartbeat {
     const rrC = clamp(sched.rr, 0.3, 1.5) / 0.857;
     W.T.t0 *= Math.sqrt(rrC);
     W.T.s *= Math.cbrt(rrC);
-    const beat = { t: atT, rr: sched.rr, type: sched.type, W };
-    this._beats.push(beat);
-    if (this._beats.length > 6) this._beats.shift();
-    this._nextAt = atT + sched.rr;
-    return beat;
+    return W;
   }
 
   // Advance absolute time and schedule beats as needed.
@@ -257,21 +278,29 @@ export class Heartbeat {
 
   // Current 12-lead voltages (mV) at absolute time this._t.
   leads() {
+    this._lastVcg = this.vcgAt(this._t);
+    return leadsFromVCG(this._lastVcg, this._leads);
+  }
+
+  // Read a sample from the retained history without advancing or changing the
+  // current ECG caches. This lets a frozen six-second strip be repainted for a
+  // new pathology using exactly the same beats, rhythm and mechanical phase.
+  vcgAt(time, out = [0, 0, 0]) {
     // sum contributions from recent beats (waves overlap across the R-R boundary)
-    const v = [0, 0, 0], tmp = [0, 0, 0];
+    out[0] = out[1] = out[2] = 0;
+    const tmp = [0, 0, 0];
     for (const b of this._beats) {
-      const tr = this._t - (b.t); // beat.t marks the R peak time
+      const tr = time - b.t; // beat.t marks the R peak time
       if (tr < -0.35 || tr > 0.6) continue;
       vcgAtBeat(tr, b.W, tmp);
-      v[0] += tmp[0]; v[1] += tmp[1]; v[2] += tmp[2];
+      out[0] += tmp[0]; out[1] += tmp[1]; out[2] += tmp[2];
     }
     // afib fibrillatory baseline in place of P
     if (this.rhythm === 'afib') {
-      const f = 0.05 * (Math.sin(this._t * 2 * Math.PI * 7.3) + 0.6 * Math.sin(this._t * 2 * Math.PI * 11.7));
-      v[0] += f; v[1] += f * 0.6;
+      const f = 0.05 * (Math.sin(time * 2 * Math.PI * 7.3) + 0.6 * Math.sin(time * 2 * Math.PI * 11.7));
+      out[0] += f; out[1] += f * 0.6;
     }
-    this._lastVcg = v;
-    return leadsFromVCG(v, this._leads);
+    return out;
   }
 
   // Mechanical beat phase (0..1) for the CURRENT beat, with the electromechanical
@@ -295,6 +324,12 @@ export class Heartbeat {
 
   setHR(hr) { this.hr = hr; }
   setRhythm(r) { this.rhythm = r; }
-  setPathology(p) { this.path = p || {}; }
+  setPathology(p) {
+    this.path = p || {};
+    // Apply the selected region to the current beat immediately without
+    // restarting time or disturbing the rhythm/mechanical phase.
+    for (const beat of this._beats) beat.W = this._waves(beat);
+  }
+  get time() { return this._t; }
   get vcg() { return this._lastVcg; }
 }

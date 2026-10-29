@@ -234,7 +234,8 @@ export class EchoView {
     // block-fill when a frame's sampling cost exceeds the budget, restoring full
     // resolution when there's headroom. Keeps the app smooth on slow hardware.
     this._stride = 1;
-    this._emaMs = 6;
+    this._emaMs = 0;
+    this._qualityHeadroom = 0;
 
     // deterministic speckle texture
     this.noise = new Float32Array(SW * SH);
@@ -637,32 +638,6 @@ export class EchoView {
       }
     }
 
-    // adapt sampling stride only as a genuine slow-hardware fallback: coarsen
-    // when sustained sampling cost is high, restore full resolution with headroom.
-    if (t0) {
-      const ms = performance.now() - t0;
-      this._emaMs = this._emaMs * 0.85 + ms * 0.15;
-      // Honest acquisition frame rate, measured from the real interval between
-      // rendered frames (not the sampling cost). Scanners display this because
-      // temporal resolution is a diagnostic property of the study, not a detail —
-      // so it is reported here as achieved, never as an aspirational number.
-      const tNow = performance.now();
-      if (this._lastFrameT) {
-        const iv = tNow - this._lastFrameT;
-        if (iv > 0 && iv < 1000) this._emaFrameMs = this._emaFrameMs
-          ? this._emaFrameMs * 0.9 + iv * 0.1 : iv;
-      }
-      this._lastFrameT = tNow;
-      this.metrics.fps = this._emaFrameMs ? 1000 / this._emaFrameMs : null;
-      // three tiers so a capable client renders the full-resolution buffer (stride 1)
-      // while slow hardware coarsens the SAMPLING (2, then 3) without dropping frames.
-      // Hysteresis band keeps it from oscillating between tiers. A pinned stride
-      // (Detail control / tests) overrides the adaptation for a fixed resolution.
-      if (this._pinStride) this._stride = this._pinStride;
-      else if (this._emaMs > 30 && this._stride < 3) this._stride++;
-      else if (this._emaMs < 14 && this._stride > 1) this._stride--;
-    }
-
     // A stenotic jet seen in the plane is read the way a CW sweep reads it: at its
     // vena contracta, i.e. the modelled peak (the 2-D sample rarely lands on the
     // core). The frame value follows the flow envelope; `cw` is the cycle peak.
@@ -711,6 +686,37 @@ export class EchoView {
     if (this.showLabels) this._labels(ctx, geo, G, path, probe);
     this._computeMetrics(G, path, peakSpeed, peakFlow);
     this._spectral(G, path, probe);
+
+    // Budget the whole image pipeline, including artifacts, PSF, compositing,
+    // labels and metrics. Sampling alone understated latency substantially.
+    const tNow = performance.now();
+    const ms = tNow - t0;
+    this._emaMs = this._emaMs ? this._emaMs * 0.85 + ms * 0.15 : ms;
+    if (this._lastFrameT) {
+      const iv = tNow - this._lastFrameT;
+      if (iv > 0 && iv < 1000) this._emaFrameMs = this._emaFrameMs
+        ? this._emaFrameMs * 0.9 + iv * 0.1 : iv;
+    }
+    this._lastFrameT = tNow;
+    this.metrics.fps = this._emaFrameMs ? 1000 / this._emaFrameMs : null;
+    if (this._pinStride) {
+      this._stride = this._pinStride;
+      this._qualityHeadroom = 0;
+    } else if (this._emaMs > 26 && this._stride < 3) {
+      this._stride++;
+      this._emaMs = 0;
+      this._qualityHeadroom = 0;
+    } else {
+      // Finer sampling costs roughly the square of its density. Require stable
+      // headroom at the projected finer resolution, avoiding 1↔2 oscillation.
+      const finerCost = this._stride > 1 ? this._emaMs * (this._stride / (this._stride - 1)) ** 2 : Infinity;
+      this._qualityHeadroom = finerCost < 22 ? this._qualityHeadroom + 1 : 0;
+      if (this._qualityHeadroom >= 30) {
+        this._stride--;
+        this._emaMs = 0;
+        this._qualityHeadroom = 0;
+      }
+    }
   }
 
   // Specular (interface) reflection. Tissue scatters DIFFUSELY (speckle, set per

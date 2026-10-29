@@ -156,7 +156,7 @@ export class Heart3D {
 
     // Async-bake cache (see setPathology). Only phase 0 of the normal heart is
     // baked synchronously so the first frame has geometry to bind; the other
-    // phases are deferred over the same time-sliced path (see _bakeInitial).
+    // phases use a worker, with time slicing as a compatibility fallback.
     this._cache = new Map();     // pathKey -> frames[] (LRU by insertion order)
     this._cacheMax = 4;
     this._bakeToken = 0;         // bumped on every setPathology to supersede bakes
@@ -170,8 +170,8 @@ export class Heart3D {
   }
 
   // Initial normal-heart bake. Phase 0 is baked synchronously so the very first
-  // frame can bind real geometry; the remaining phases are deferred to the next
-  // animation frame and time-sliced, with onBakeStart/onBakeEnd bracketing that
+  // frame can bind real geometry; the remaining phases are deferred to a worker,
+  // with onBakeStart/onBakeEnd bracketing that
   // deferred portion. Deferring to rAF also ensures onBakeStart fires after the
   // caller has wired up its callbacks.
   _bakeInitial() {
@@ -225,8 +225,8 @@ export class Heart3D {
 
   // Steer _phasesPerTick from the measured cost of the phases just baked.
   // A short EMA smooths the per-phase estimate; an 0.8x/1.2x dead-band around
-  // the frame budget gives hysteresis so the rate doesn't oscillate. Weak
-  // hardware settles toward 1 phase/tick so a re-bake never drops a frame.
+  // the frame budget gives hysteresis so the rate doesn't oscillate. This is a
+  // compatibility fallback; a single phase can still exceed the frame budget.
   _adaptSlice(ms, phasesDone) {
     if (phasesDone <= 0) return;
     const perPhase = ms / phasesDone;
@@ -241,11 +241,54 @@ export class Heart3D {
     }
   }
 
-  // Time-sliced bake driver shared by the initial bake and setPathology. Bakes
+  // Bake outside the animation thread so changing a case does not block input
+  // or ECG/echo rendering. Superseded work is terminated, never queued behind
+  // another full bake. Older browsers retain the time-sliced fallback below.
+  _runBake(path, token, frames, startP) {
+    if (typeof Worker === 'undefined') return this._runBakeFallback(path, token, frames, startP);
+    return new Promise((resolve) => {
+      let worker, next = startP, finished = false, fallingBack = false;
+      const finish = (done) => {
+        if (finished) return;
+        finished = true;
+        if (worker) worker.terminate();
+        if (this._cancelBake === cancel) this._cancelBake = null;
+        resolve(done);
+      };
+      const cancel = () => finish(false);
+      const fallback = () => {
+        if (finished || fallingBack) return;
+        fallingBack = true;
+        if (worker) {
+          worker.onmessage = null;
+          worker.onerror = null;
+          worker.terminate();
+        }
+        this._runBakeFallback(path, token, frames, next).then(finish);
+      };
+      this._cancelBake = cancel;
+      try {
+        worker = new Worker(new URL('./heart-mesh-worker.js', import.meta.url), { type: 'module' });
+        worker.onmessage = ({ data }) => {
+          if (finished || fallingBack) return;
+          if (token !== this._bakeToken) { finish(false); return; }
+          const frame = {};
+          for (const [name, mesh] of Object.entries(data.meshes)) frame[name] = this._geometryFromMesh(mesh);
+          frames[data.phase] = frame;
+          next = data.phase + 1;
+          if (next === NPHASE) finish(true);
+        };
+        worker.onerror = (event) => { event.preventDefault(); fallback(); };
+        worker.postMessage({ path, startPhase: startP, phaseCount: NPHASE, bbox: BBOX, cell: CELL });
+      } catch (error) { fallback(); }
+    });
+  }
+
+  // Time-sliced compatibility fallback. Bakes
   // phases [startP, NPHASE) into `frames` across rAF ticks, adapting the slice
   // size each tick. Resolves true when the full set is baked, or false if a
   // newer bake (token bump) superseded this one mid-flight.
-  _runBake(path, token, frames, startP) {
+  _runBakeFallback(path, token, frames, startP) {
     return new Promise((resolve) => {
       let p = startP;
       const step = () => {
@@ -263,8 +306,15 @@ export class Heart3D {
   }
 
   _bindFrames(frames) {
+    const previous = this.frames;
     this.frames = frames;
     this._boundFrame = null; // force a re-bind of the per-phase geometry next update
+    // Canceled startup frames and a formerly bound cache eviction are no longer
+    // reusable. Dispose only after replacement, so a rebake can keep displaying
+    // the previous anatomy until the complete new set is ready.
+    if (previous && previous !== frames && ![...this._cache.values()].includes(previous)) {
+      Heart3D._disposeFrames(previous);
+    }
   }
 
   static _disposeFrames(frames) {
@@ -303,12 +353,13 @@ export class Heart3D {
 
   // Rebind the beating loop for a new pathology. NON-BLOCKING and cached:
   //   - cache HIT: bind the stored frames immediately.
-  //   - cache MISS: bake the 12 phases time-sliced across rAF ticks so the main
-  //     thread never freezes, then bind and cache the result.
+  //   - cache MISS: bake the 12 phases in a worker, then bind and cache them.
+  //     Browsers without module workers fall back to time-sliced rAF work.
   // Fires this.onBakeStart()/this.onBakeEnd() around a real bake and returns a
   // Promise that resolves once the frames are bound (or the bake is superseded).
   setPathology(path) {
     path = path || {};
+    if (this._cancelBake) this._cancelBake();
     this._buildSubvalvular(geometryAt(0, path).A); // papillaries/chordae track dilatation
     const key = this._pathKey(path);
     const token = ++this._bakeToken; // supersede any in-flight bake
@@ -338,8 +389,11 @@ export class Heart3D {
   }
 
   _geomFrom(fn) {
+    return this._geometryFromMesh(buildMesh(fn, BBOX, CELL));
+  }
+
+  _geometryFromMesh(mesh) {
     const g = new THREE.BufferGeometry();
-    const mesh = buildMesh(fn, BBOX, CELL);
     if (mesh) {
       g.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3));
       g.setAttribute('normal', new THREE.BufferAttribute(mesh.normals, 3));
