@@ -33,6 +33,7 @@ body {
 /* ---------- top bar ---------- */
 .topbar {
   display: flex; justify-content: space-between; align-items: center;
+  flex-wrap: wrap; gap: 12px;
   padding: 10px 20px;
   border-bottom: 1px solid var(--line);
   background: linear-gradient(180deg, #0c111b, #0a0e16);
@@ -42,11 +43,14 @@ body {
 .brand h1 { font-size: 20px; margin: 0; letter-spacing: 1px; }
 .brand p { margin: 0; font-size: 12px; color: var(--muted); }
 
-.cycle-readout { display: flex; align-items: center; gap: 16px; }
-.ecg { background: #04060a; border: 1px solid var(--line); border-radius: 6px; padding: 2px; }
-.phase-label { text-align: right; }
-.phase-label span { display: block; font-size: 13px; color: var(--good); font-weight: 600; }
-.phase-label small { color: var(--muted); font-size: 11px; }
+.cycle-readout { display: flex; align-items: center; gap: 16px; flex: none; }
+.cycle-readout > button { flex: none; white-space: nowrap; }
+.ecg { background: #04060a; border: 1px solid var(--line); border-radius: 6px; padding: 2px; flex: none; }
+#ecg { display: block; width: 240px; height: 46px; }
+/* Reserve the longest phase label's space throughout the entire heartbeat. */
+.phase-label { text-align: right; width: 190px; flex: 0 0 190px; }
+.phase-label span { display: block; font-size: 13px; line-height: 18px; white-space: nowrap; color: var(--good); font-weight: 600; }
+.phase-label small { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 
 /* ---------- layout ---------- */
 .layout {
@@ -173,6 +177,7 @@ body {
   background: var(--accent); color: #04121a; border-color: var(--accent); font-weight: 700;
 }
 select { width: 100%; }
+.scenario-ctl.hidden { display: none; }
 .wide { width: 100%; }
 
 label {
@@ -382,9 +387,26 @@ button.small { padding: 6px; font-size: 12px; margin-top: 8px; }
 .cite-note small { color: #6f819a; font-size: 11px; }
 
 @media (max-width: 1100px) {
+  .topbar { flex-wrap: wrap; gap: 12px; }
+  .cycle-readout { width: 100%; justify-content: space-between; gap: 10px; }
   .layout { grid-template-columns: 1fr 1fr; grid-auto-rows: minmax(280px, auto); overflow-y: auto; }
   .console { grid-column: span 2; }
   body { overflow: auto; }
+}
+
+/* Compact header keeps the full phase label and ECG on a stable first row. */
+@media (max-width: 900px) {
+  .topbar { padding: 10px 12px; }
+  .brand p { font-size: 11px; }
+  .cycle-readout { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto; gap: 8px; }
+  .ecg { grid-column: 1 / 3; min-width: 0; }
+  #ecg { width: 100%; }
+  .phase-label { grid-column: 3 / 5; grid-row: 1; width: auto; min-width: 0; }
+  .phase-label span { font-size: 11px; }
+  #twelveBtn { grid-column: 1; grid-row: 2; }
+  #pathwayBtn { grid-column: 2; grid-row: 2; }
+  #feedbackBtn { grid-column: 3; grid-row: 2; }
+  #helpBtn { grid-column: 4; grid-row: 2; }
 }
 
 /* narrow / touch: stack all three panels full-width with shorter canvases */

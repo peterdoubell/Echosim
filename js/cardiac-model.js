@@ -17,6 +17,7 @@
 import { clamp, smoothstep, pulse, unit } from './mathutils.js';
 import { anatomyParams, atrialFill, bodyClassify, visceralDist, lumenDist, mitralLift, buildRwma, rwmaWeight, BODY, CFG, LM, BODY_AX } from './anatomy.js';
 import { hemodynamics, hemoSummary, pvLoop, gradeOf, eaRatio, MS_AREA } from './hemodynamics.js';
+import { DCM_SEVERITIES, dcmSeverityOf } from './scenarios.js';
 
 // Re-export the lumped-parameter circulation API so echo.js / the UI can read the
 // PV loop and instantaneous haemodynamics through cardiac-model (the single model
@@ -363,7 +364,7 @@ export function geometryAt(phase, path = {}) {
   const lvScale = Math.pow(vr, 0.4), lvLong = Math.pow(vr, 0.2);
   const laScale = 1 + 0.045 * Math.max(0, (hd.sum.Pla0 || 8) - 8);
   let lvWallMul = 1.0;
-  if (path.dilated) { lvWallMul = 0.82; }                    // thinned walls
+  if (path.dilated) { lvWallMul = DCM_SEVERITIES[dcmSeverityOf(path)].wallMul; }
   if (path.lvh || path.aorticStenosis) { lvWallMul = 1.55; } // concentric hypertrophy (IVSd ~1.4)
 
   // Long axis shortens less than the short axis. aLong = 0.24 gives, for the
@@ -540,7 +541,9 @@ let _rsPath = null, _rsVal = null;
 export function regionalStrain(path = {}) {
   if (path === _rsPath && _rsVal) return _rsVal;
   let gf = 1;                                           // global contractility factor
-  if (path.dilated) gf = 0.42;
+  // DCM affects every segment. Use the shortening of the same solved cavity
+  // rendered by geometryAt, so changing EF severity also changes the bullseye.
+  if (path.dilated) gf = longitudinalStrain(path) / NORMAL_SEG_STRAIN;
   else if (path.aorticStenosis && path.lvh) gf = 0.85;
   else if (path.lvh) gf = 0.9;
   const rw = buildRwma(path);
