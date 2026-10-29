@@ -21,6 +21,7 @@
 // Windkessel; standard closed-loop lumped circulation (CircAdapt-style, reduced).
 
 import { clamp } from './mathutils.js';
+import { dcmSeverityOf } from './scenarios.js';
 
 const CYCLE = 0.833;          // reference cycle length (s) at ~72 bpm
 // Ventricular activation is ASYMMETRIC: contraction to peak elastance takes
@@ -119,17 +120,21 @@ function circParams(path) {
   }
   if (path.lvh && !path.dilated) { p.Emin = 0.12; }               // stiff, hypertrophied → higher LVEDP
   if (path.dilated) {
-    p.Emax = 0.60; p.V0 = 30; p.Rsys = 1.30; p.Cao = 1.4;
-    // advanced DCM: a raised filling pressure into a stiffer, overfilled LV and a
-    // failing, dilated atrium (weak booster) give the RESTRICTIVE pattern that goes
-    // with an LVEF ~25 % and functional MR: a tall E wave that decelerates fast
-    // (DT < 150 ms) and a small A (E/A > 2), not impaired relaxation.
-    p.Pla0 = 18; p.Emin = 0.075;
-    p.ElaMin = 0.35; p.V0la = 40; p.aWave = 0.2; p.laDesc = 8;
+    // Contractility, filling pressure, LA mechanics and remodelling change
+    // together. EF is still measured from the solved PV loop, never replaced with a
+    // target. Severe DCM: a raised filling pressure into a stiffer, overfilled LV
+    // and a failing, dilated atrium (weak booster) give the RESTRICTIVE pattern
+    // that goes with an LVEF ~27 % and functional MR (tall E, DT < 150 ms, E/A > 2);
+    // impaired DCM sits between, with a pseudonormal pattern.
+    Object.assign(p, {
+      borderline: { Emax: 2.00, Emin: 0.065, V0: 24, Rsys: 1.10, Cao: 1.45, Pla0: 10 },
+      impaired: { Emax: 1.21, Emin: 0.068, V0: 27, Rsys: 1.20, Cao: 1.4, Pla0: 14, ElaMin: 0.28, V0la: 25, aWave: 0.6, laDesc: 14 },
+      severe: { Emax: 0.60, Emin: 0.075, V0: 30, Rsys: 1.30, Cao: 1.4, Pla0: 18, ElaMin: 0.35, V0la: 40, aWave: 0.2, laDesc: 8 },
+    }[dcmSeverityOf(path)]);
   }
   // DCM: annular dilatation and leaflet tethering leave a central FUNCTIONAL MR
-  // (moderate: regurgitant fraction ~30 %) even with structurally normal leaflets
-  if (path.dilated && !path.mr) { p.Rmr = 1.05; }
+  // (moderate: regurgitant fraction ~30 % in severe DCM) even with structurally normal leaflets
+  if (path.dilated && !path.mr) { p.Rmr = ({ borderline: 3.5, impaired: 1.8, severe: 1.05 })[dcmSeverityOf(path)]; }
   if (path.mr) {
     // Regurgitant orifice + congested LA, plus the chronic volume-overload
     // REMODELLING of primary MR: the LV dilates (unstressed volume V0 rises) so it
@@ -443,7 +448,8 @@ function inflowMetrics(tr) {
 const _cache = new Map();
 function sig(path) {
   return [path.aorticStenosis, path.lvh, path.dilated, path.mr, path.mitralStenosis,
-    path.rwma ? 1 : 0, path.rvpo, path.asd, path.vsd].map((v) => (v ? 1 : 0)).join('') + ':' + gradeOf(path);
+    path.rwma ? 1 : 0, path.rvpo, path.asd, path.vsd].map((v) => (v ? 1 : 0)).join('') + ':' + gradeOf(path)
+    + ':' + (path.dilated ? dcmSeverityOf(path) : '');
 }
 function solved(path) {
   const key = sig(path);

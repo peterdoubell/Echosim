@@ -14,7 +14,9 @@ import { EchoView } from './echo.js';
 import { MeasureTool } from './measure.js';
 import { vadd, vsub, vscale, vdot, vcross, norm, vrot } from './mathutils.js';
 import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, makeProbe } from './views.js';
-import { Heartbeat, vcgToLeads, LEAD_NAMES } from './electrophysiology.js';
+import { Heartbeat, vcgToLeads, LEAD_NAMES, PH_AVO, PH_AVC, PH_MVO, PH_ATR } from './electrophysiology.js';
+import { RWMA_SCENARIOS, DCM_SEVERITIES } from './scenarios.js';
+import { PlaybackClock } from './playback-clock.js';
 
 // ---------------------------------------------------------------------------
 // Standard echocardiographic windows: derived from the anatomy landmarks in
@@ -156,8 +158,9 @@ const ECG_FS = 250;                 // ECG sample rate (Hz) for the rolling buff
 const ECG_SECONDS = 6;
 const vcgBuf = new Float32Array(ECG_FS * ECG_SECONDS * 3); // ring of [x,y,z]
 let vcgHead = 0, vcgFilled = 0;
-let ecgAccum = 0;                   // time accumulator to sample at ECG_FS
 let ecgLead = 'II';                 // lead shown in the top-bar rhythm strip
+const playback = new PlaybackClock(heart, pushVcg, ECG_FS, ECG_SECONDS);
+window.echosim.playback = playback;
 
 function pushVcg(v) {
   vcgBuf[vcgHead * 3] = v[0]; vcgBuf[vcgHead * 3 + 1] = v[1]; vcgBuf[vcgHead * 3 + 2] = v[2];
@@ -214,11 +217,11 @@ window.addEventListener('resize', () => {
 });
 
 function phaseName(p) {
-  if (p < 0.05) return 'Isovolumic contraction';
-  if (p < 0.34) return 'Systole · ejection';
-  if (p < 0.42) return 'Isovolumic relaxation';
-  if (p < 0.55) return 'Early diastole · E wave';
-  if (p < 0.84) return 'Diastasis';
+  if (p < PH_AVO) return 'Isovolumic contraction';
+  if (p < PH_AVC) return 'Systole · ejection';
+  if (p < PH_MVO) return 'Isovolumic relaxation';
+  if (p < 0.67) return 'Early diastole · E wave';
+  if (p < PH_ATR) return 'Diastasis';
   return 'Atrial kick · A wave';
 }
 
@@ -297,24 +300,23 @@ function drawTwelveLead() {
 // Main loop
 // ---------------------------------------------------------------------------
 let lastBannerT = 0;   // throttle for the probe-banner frame-rate readout
+// Treat hidden tabs as suspended playback rather than queuing stale images or
+// fast-forwarding a lesson when the learner comes back.
+document.addEventListener('visibilitychange', () => { state.lastT = performance.now(); });
 function loop(now) {
-  const dt = Math.min((now - state.lastT) / 1000, 0.05);
+  // rAF's timestamp can predate other expensive callbacks in the same frame.
+  // Read the clock here, and never clamp away elapsed foreground time.
+  now = performance.now();
+  const dt = Math.max(0, (now - state.lastT) / 1000);
   state.lastT = now;
+  const advancing = state.playing && !document.hidden;
 
-  if (state.playing) {
+  if (advancing) {
     // Advance the electrophysiology engine at a fixed ECG sample rate and buffer
     // the VCG; the mechanical phase is derived from ventricular depolarisation
     // (electromechanical coupling), so an irregular rhythm (AF, PVC) makes the
     // heart beat — and the echo move — irregularly.
-    const step = 1 / ECG_FS;
-    ecgAccum += dt;
-    let guard = 0;
-    while (ecgAccum >= step && guard++ < 60) {
-      heart.advance(step);
-      heart.leads();        // updates the current VCG
-      pushVcg(heart.vcg);
-      ecgAccum -= step;
-    }
+    playback.advance(dt);
     state.phase = heart.mechanical().phase;
     const scrub = document.getElementById('scrub');
     scrub.value = Math.round(state.phase * 1000);
@@ -326,9 +328,10 @@ function loop(now) {
 
   echo.depthCm = state.depthCm || 17;
   heart3d.updateProbe(probe, echo.sectorHalf, echo.depthCm);
-  heart3d.update(G, state.path, probe, dt || 0.016);
+  // Particle advection can use a bounded step without altering the heart clock.
+  heart3d.update(G, state.path, probe, advancing ? Math.min(dt, 0.05) : 0);
   echo.rrSec = 60 / (state.hr || 72);
-  echo.render(G, state.path, probe, now * 0.001);
+  echo.render(G, state.path, probe, playback.time);
   updateColorScale();
 
   drawEcg();
@@ -336,7 +339,7 @@ function loop(now) {
   // refresh the scanner banner's frame-rate readout a couple of times a second —
   // often enough to be live, rarely enough not to flicker or cost layout work
   if (now - lastBannerT > 500) { lastBannerT = now; updateProbeInfo(!!TEE_VIEWS[state.viewName]); }
-  document.getElementById('phaseName').textContent = phaseName(state.phase);
+  setText('phaseName', phaseName(state.phase));
   publishMetrics();
   drawPvLoop(G);
   publishHemo(G);
@@ -423,7 +426,7 @@ function setBadge(anchorId, badgeId, text, level) {
   badge.textContent = text;
   badge.className = 'sev-badge sev-' + level;
 }
-function setText(id, t) { const el = document.getElementById(id); if (el) el.textContent = t; }
+function setText(id, t) { const el = document.getElementById(id); if (el && el.textContent !== t) el.textContent = t; }
 
 // ---------------------------------------------------------------------------
 // Haemodynamics: LV pressure–volume loop + numeric readout.
@@ -447,7 +450,7 @@ function buildPvCache(path, key) {
 
 function drawPvLoop(G) {
   if (!pvCtx) return;
-  if (_pv.key !== state.pathKey || !_pv.pts) buildPvCache(state.path, state.pathKey);
+  if (_pv.key !== state.path || !_pv.pts) buildPvCache(state.path, state.path);
   const b = _pv.b, W = pvCanvas.width, H = pvCanvas.height;
   const padL = 34, padB = 22, padT = 8, padR = 8;
   const x = (V) => padL + (V - b.vmin) / (b.vmax - b.vmin) * (W - padL - padR);
@@ -479,7 +482,7 @@ function drawPvLoop(G) {
 // numeric haemodynamics readout (EDV/ESV/SV/EF/pressures/gradient/regurg fraction)
 let _hemoKey = null, _hemoSum = null;
 function publishHemo(G) {
-  if (state.pathKey !== _hemoKey || !_hemoSum) { _hemoSum = hemoSummary(state.path); _hemoKey = state.pathKey; }
+  if (state.path !== _hemoKey || !_hemoSum) { _hemoSum = hemoSummary(state.path); _hemoKey = state.path; }
   const s = _hemoSum;
   const n = (v, d, u) => (v == null || Number.isNaN(v)) ? '—' : v.toFixed(d) + (u || '');
   setText('hEdv', n(s.EDV, 0, ' mL'));
@@ -547,8 +550,8 @@ function strainColor(s) {
 let _bullKey = null;
 function drawBullseye() {
   if (!bullCtx) return;
-  if (state.pathKey === _bullKey) return; // only redraw on pathology change
-  _bullKey = state.pathKey;
+  if (state.path === _bullKey) return; // includes region and EF severity changes
+  _bullKey = state.path;
   const { segments, gls } = regionalStrain(state.path);
   const W = bullCanvas.width, H = bullCanvas.height, cx = W / 2, cy = H / 2, R = Math.min(W, H) / 2 - 6;
   bullCtx.clearRect(0, 0, W, H);
@@ -693,7 +696,16 @@ document.querySelectorAll('#modalityCtl .seg-btn').forEach((b) => b.addEventList
 
 function renderTeaching(key) {
   if (challenge.active) return; // challenge mode hides the answer
-  const p = PATHOLOGY[key], c = CHECKS[key] || { look: [], hint: '' };
+  let p = PATHOLOGY[key], c = CHECKS[key] || { look: [], hint: '' };
+  if (key === 'rwma') {
+    const region = RWMA_SCENARIOS[state.path.rwma || 'septal'];
+    p = { name: `${region.label} wall-motion abnormality`, text: `${region.cue} <span class="cue">${region.ecgText}</span>` };
+    c = { look: [`Reduced ${region.label.toLowerCase()} wall thickening`, 'Preserved contraction outside the affected region', `Matching ECG changes: ${region.leads.join(', ')}`],
+      hint: `Compare the affected wall with the other walls in ${region.view}; open 12-Lead to review the illustrative infarction pattern.` };
+  } else if (key === 'dcm') {
+    const severity = DCM_SEVERITIES[state.path.dcmSeverity || 'severe'];
+    p = { name: `Dilated cardiomyopathy · ${severity.label}`, text: 'The LV is enlarged with globally reduced contraction. <span class="cue">Compare cavity size, wall thickening and the measured EF as you change impairment severity.</span>' };
+  }
   // render each item as a tickable checkbox the learner can mark off (client-side only)
   const list = c.look.map((x) =>
     '<li><label class="cl-item"><input type="checkbox" />' + x + '</label></li>').join('');
@@ -707,6 +719,46 @@ function renderTeaching(key) {
 const GRADEABLE = new Set(['as', 'mr', 'ms', 'tr']);
 const severityCtl = document.getElementById('severityCtl');
 const gradeBtns = severityCtl ? [...severityCtl.querySelectorAll('.seg-btn')] : [];
+const rwmaCtl = document.getElementById('rwmaCtl');
+const dcmCtl = document.getElementById('dcmCtl');
+const rwmaSelect = document.getElementById('rwmaRegion');
+const dcmSelect = document.getElementById('dcmSeverity');
+for (const [value, scenario] of Object.entries(RWMA_SCENARIOS)) rwmaSelect.add(new Option(scenario.label, value));
+for (const [value, severity] of Object.entries(DCM_SEVERITIES)) dcmSelect.add(new Option(severity.label, value));
+rwmaSelect.value = 'septal';
+dcmSelect.value = 'severe';
+
+function hideScenarioControls() {
+  rwmaCtl.classList.add('hidden'); dcmCtl.classList.add('hidden');
+  rwmaSelect.disabled = true; dcmSelect.disabled = true;
+}
+function syncScenarioControls(key) {
+  const isRwma = key === 'rwma', isDcm = key === 'dcm';
+  rwmaCtl.classList.toggle('hidden', !isRwma); dcmCtl.classList.toggle('hidden', !isDcm);
+  rwmaSelect.disabled = !isRwma; dcmSelect.disabled = !isDcm;
+  if (isRwma) {
+    rwmaSelect.value = state.path.rwma || 'septal';
+    setText('rwmaEcgHint', `${RWMA_SCENARIOS[rwmaSelect.value].ecgText}. Illustrative acute infarction example; RWMA can occur without these ECG changes.`);
+  }
+  if (isDcm) dcmSelect.value = state.path.dcmSeverity || 'severe';
+}
+function syncCaseModel() {
+  heart3d.setPathology(state.path);
+  heart.setPathology(state.path);
+  // Repaint the retained beat history with the new morphology, including when
+  // paused, without moving the shared clock or mixing two different regions.
+  vcgHead = vcgFilled = 0;
+  const n = Math.min(ECG_FS * ECG_SECONDS, Math.floor(heart.time * ECG_FS));
+  const sample = [0, 0, 0];
+  for (let i = n - 1; i >= 0; i--) pushVcg(heart.vcgAt(heart.time - i / ECG_FS, sample));
+  if (!n) { heart.leads(); pushVcg(heart.vcg); }
+  lastMeasure = {};
+  measure.clear();
+  const region = state.path.rwma && RWMA_SCENARIOS[state.path.rwma];
+  setText('twelveSub', region && !challenge.active && !pathwayCase.active
+    ? `${region.label} · ${region.ecgText}`
+    : 'derived from the cardiac dipole (VCG) via the inverse-Dower lead field');
+}
 function setGradeButtons(grade) {
   gradeBtns.forEach((x) => { const on = x.dataset.grade === grade; x.classList.toggle('active', on); x.setAttribute('aria-pressed', String(on)); });
 }
@@ -714,28 +766,44 @@ function setGradeButtons(grade) {
 function syncSeverityCtl(key) {
   const on = GRADEABLE.has(key);
   if (severityCtl) severityCtl.classList.toggle('hidden', !on);
+  syncScenarioControls(key);
 }
 
 document.getElementById('pathology').addEventListener('change', (e) => {
-  if (challenge.active) return;
+  if (challenge.active || pathwayCase.active) return;
   state.pathKey = e.target.value;
   state.path = { ...PATHOLOGY[e.target.value].flags, grade: 'severe' };
+  if (state.pathKey === 'rwma') state.path.rwma = rwmaSelect.value;
+  if (state.pathKey === 'dcm') state.path.dcmSeverity = dcmSelect.value;
   setGradeButtons('severe');
   syncSeverityCtl(e.target.value);
-  heart3d.setPathology(state.path);
-  heart.setPathology(state.path);   // ECG morphology follows the pathology (LVH, low-voltage, …)
+  syncCaseModel();
   renderTeaching(e.target.value);
-  setView(PATHOLOGY[e.target.value].view);
+  setView(state.pathKey === 'rwma' ? RWMA_SCENARIOS[state.path.rwma].view : PATHOLOGY[e.target.value].view);
+});
+
+rwmaSelect.addEventListener('change', () => {
+  if (challenge.active || pathwayCase.active || state.pathKey !== 'rwma') return;
+  state.path = { ...state.path, rwma: rwmaSelect.value };
+  syncCaseModel(); syncScenarioControls('rwma'); renderTeaching('rwma');
+  setView(RWMA_SCENARIOS[state.path.rwma].view);
+  announce(`${RWMA_SCENARIOS[state.path.rwma].label} region selected; echo and ECG updated`);
+});
+dcmSelect.addEventListener('change', () => {
+  if (challenge.active || pathwayCase.active || state.pathKey !== 'dcm') return;
+  state.path = { ...state.path, dcmSeverity: dcmSelect.value };
+  syncCaseModel(); renderTeaching('dcm');
+  announce(`DCM ${DCM_SEVERITIES[state.path.dcmSeverity].label}; echo and measurements updated`);
 });
 
 // severity grade — reapply a fresh path object so the echo re-measures (it memoises
 // by path identity) and the graded orifice feeds the continuity-Doppler + PV loop.
 gradeBtns.forEach((b) => b.addEventListener('click', () => {
-  if (challenge.active) return;
+  if (challenge.active || pathwayCase.active) return;
   const grade = b.dataset.grade;
   state.path = { ...state.path, grade };
   setGradeButtons(grade);
-  heart.setPathology(state.path);
+  syncCaseModel();
   announce(`${grade} severity`);
 }));
 
@@ -869,6 +937,7 @@ const DEFAULTS = { hr: 72, depth: 15, gain: 1.0, nyq: 0.62 };
 function resetAll() {
   // heart rate
   state.hr = DEFAULTS.hr;
+  heart.setHR(state.hr);
   setRange('hr', DEFAULTS.hr, 'hrOut', String(DEFAULTS.hr), DEFAULTS.hr + ' bpm');
   document.getElementById('hrReadout').textContent = DEFAULTS.hr + ' bpm';
   // imaging — depth is view-appropriate so the heart fills the field of view
@@ -1114,7 +1183,7 @@ function newCase() {
   challenge.selectedView = null;
   state.pathKey = key;
   state.path = { ...PATHOLOGY[key].flags };
-  heart3d.setPathology(state.path);
+  syncCaseModel();
   setView(PATHOLOGY[key].view);
 
   // Easy = view preset + finding pre-centred (view tag visible).
@@ -1203,8 +1272,9 @@ challengeBtn.addEventListener('click', () => {
   if (reportBtn) { reportBtn.disabled = challenge.active; reportBtn.title = challenge.active ? 'The echo report is unavailable in challenge mode (it would give the answer away)' : REPORT_TITLE; }
   // hide the severity control during a challenge — its state would leak the lesion
   if (severityCtl) severityCtl.classList.add('hidden');
+  hideScenarioControls();
   if (challenge.active) { challenge.score = 0; challenge.total = 0; _seed = 20260707 + Math.floor(state.phase * 99999); newCase(); }
-  else { state.pathKey = 'normal'; state.path = {}; heart3d.setPathology({}); document.getElementById('pathology').value = 'normal'; setViewTagHidden(false); renderTeaching('normal'); setView('PLAX'); }
+  else { state.pathKey = 'normal'; state.path = {}; syncCaseModel(); document.getElementById('pathology').value = 'normal'; setViewTagHidden(false); renderTeaching('normal'); setView('PLAX'); }
 });
 
 // ---- learning pathway (js/pathway-ui.js) ----
@@ -1230,17 +1300,18 @@ function lockForCase(on) {
   if (on) {
     sel.selectedIndex = -1;
     if (severityCtl) severityCtl.classList.add('hidden');
+    hideScenarioControls();
     document.getElementById('teaching').innerHTML =
       '<div class="quiz"><b>🎓 Pathway case</b><br>Answer the question in the pathway. The diagnosis stays hidden until you answer.</div>';
   }
 }
-function simLoad({ path: key = 'normal', grade = 'severe', view, hidden = false, hideView = false } = {}) {
+function simLoad({ path: key = 'normal', grade = 'severe', view, rwma, dcmSeverity, hidden = false, hideView = false } = {}) {
   if (challenge.active) challengeBtn.click();
-  if (hidden && !pathwayCase.prev) pathwayCase.prev = { key: state.pathKey || 'normal', view: state.viewName, grade: state.path.grade || 'severe' };
+  if (hidden && !pathwayCase.prev) pathwayCase.prev = { key: state.pathKey || 'normal', view: state.viewName, grade: state.path.grade || 'severe', rwma: state.path.rwma, dcmSeverity: state.path.dcmSeverity };
   state.pathKey = key;
   state.path = { ...PATHOLOGY[key].flags, grade };
-  heart3d.setPathology(state.path);
-  heart.setPathology(state.path);
+  if (key === 'rwma' && RWMA_SCENARIOS[rwma]) state.path.rwma = rwma;
+  if (key === 'dcm' && DCM_SEVERITIES[dcmSeverity]) state.path.dcmSeverity = dcmSeverity;
   setView(view || PATHOLOGY[key].view);
   setGradeButtons(grade);
   if (hidden) {
@@ -1255,6 +1326,7 @@ function simLoad({ path: key = 'normal', grade = 'severe', view, hidden = false,
     syncSeverityCtl(key);
     renderTeaching(key);
   }
+  syncCaseModel();
 }
 // leave a hidden case: restore=true goes back to what was loaded before it,
 // restore=false reveals the current case in place (used after answering)
@@ -1262,9 +1334,9 @@ function simEnd(restore = true) {
   if (restore) {
     const prev = pathwayCase.prev;
     pathwayCase.prev = null;
-    if (prev) simLoad({ path: prev.key, view: prev.view, grade: prev.grade });
+    if (prev) simLoad({ path: prev.key, view: prev.view, grade: prev.grade, rwma: prev.rwma, dcmSeverity: prev.dcmSeverity });
   } else if (pathwayCase.active) {
-    simLoad({ path: state.pathKey, view: state.viewName, grade: state.path.grade || 'severe' });
+    simLoad({ path: state.pathKey, view: state.viewName, grade: state.path.grade || 'severe', rwma: state.path.rwma, dcmSeverity: state.path.dcmSeverity });
   }
 }
 const pathway = initPathway({
@@ -1280,6 +1352,7 @@ state.depthCm = viewDepth('PLAX');
 echo.depthCm = state.depthCm;
 echo.showLabels = true;
 applyRefText();
+syncSeverityCtl('normal');
 renderTeaching('normal');
 setView('PLAX');
 resizeCanvases();

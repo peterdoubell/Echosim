@@ -67,6 +67,9 @@ node tools/verify-atrial-phase.mjs  # atrio-ventricular phase relationship
 node tools/verify-anatomy.mjs   # anatomy audit: ASE dimensions and relationships, swept
                                 # over views, phases and pathologies (open defects tagged KNOWN-FAIL)
 node tools/verify-timing.mjs    # valve timing, heart-rate warping, right-heart offsets
+node tools/verify-render-timing.mjs # ECG/echo clock at slow frame rates and after stalls
+node tools/verify-scenarios.mjs # regional ECG/wall motion and DCM EF presets
+node tools/verify-scenario-ui.mjs # responsive header, scenario controls and linked readouts
 node tools/verify-report.mjs    # structured echo report: BSE 2020 grading, conclusions, templates, dialog
 node tools/verify-feedback.mjs  # feedback dialog and api/feedback.js (validation, rate limit, fallbacks)
 node tools/verify-pathway.mjs   # learning pathway: question bank, scoring, case questions, mock exam
@@ -76,6 +79,18 @@ node tools/review-pack.mjs out/ # image pack for an expert-panel review (echo + 
 
 `docs/ANATOMY.md` describes the anatomical model, the audit and the expert-panel
 review history.
+
+Under **Pathology**, regional wall-motion abnormality offers septal,
+anteroseptal, anterior, lateral, inferior and inferolateral examples with a
+matching illustrative infarction ECG. Dilated cardiomyopathy offers borderline
+low, impaired and severely impaired EF presets using the same BSE 2020 bands
+as the report. Both selectors update the echo, 3D anatomy, measurements,
+pressure–volume loop and strain map. See [`docs/SCENARIOS.md`](docs/SCENARIOS.md)
+for calibration, sources and interpretation limits.
+
+ECG and echo use one elapsed-time clock: slow frames skip intermediate images
+without slowing the simulated heart rate. The 3D mesh rebuild runs in a worker
+where supported, and automatic echo detail adapts to the complete render cost.
 
 ## Learning pathway (BSE accreditation revision)
 

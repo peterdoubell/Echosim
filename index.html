@@ -130,7 +130,7 @@
 
       <div class="ctl-group">
         <h3>Pathology</h3>
-        <select id="pathology">
+        <select id="pathology" aria-label="Pathology">
           <option value="normal">Normal heart</option>
           <option value="mr">Mitral regurgitation</option>
           <option value="ms">Mitral stenosis</option>
@@ -143,6 +143,16 @@
           <option value="tr">Tricuspid regurgitation</option>
           <option value="phtn">Pulmonary hypertension (RV overload)</option>
         </select>
+        <div id="rwmaCtl" class="scenario-ctl hidden">
+          <label for="rwmaRegion">Affected wall / region</label>
+          <select id="rwmaRegion" aria-describedby="rwmaEcgHint"></select>
+          <p id="rwmaEcgHint" class="bse-note"></p>
+        </div>
+        <div id="dcmCtl" class="scenario-ctl hidden">
+          <label for="dcmSeverity">LV ejection fraction impairment</label>
+          <select id="dcmSeverity" aria-describedby="dcmSeverityHint"></select>
+          <p id="dcmSeverityHint" class="bse-note">BSE 2020 EF bands. Measurements show the simulated EF for the selected case.</p>
+        </div>
         <div class="seg severity-ctl hidden" id="severityCtl" role="group" aria-label="Lesion severity">
           <button data-grade="mild" class="seg-btn" aria-pressed="false">Mild</button>
           <button data-grade="moderate" class="seg-btn" aria-pressed="false">Moderate</button>
