@@ -588,7 +588,7 @@ export const TEE_VIEWS = {
   MEAVSAX: { probe: meAvSaxProbe, depth: 10, track: (A) => [0, 0.8 * (A.lv.A[1] - A0.lv.A[1]), 0] },   // follows the root
   MEBICAVAL: { probe: meBicavalProbe, depth: 11 },
   MERVIO: { probe: meRvioProbe, depth: 12 },
-  DESCAO: { probe: descAoSaxProbe, depth: 6 },
+  DESCAO: { probe: descAoSaxProbe, depth: 8 },
   TGSAX: { probe: tgsaxProbe, depth: 12 },
   // Mid-oesophageal left-atrial-appendage view: the plane CONTAINS the appendage's
   // long axis, so the narrow ostium, neck and hooked lobes lie in-plane.

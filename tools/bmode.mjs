@@ -44,7 +44,7 @@ export function renderBmode(name, phase = 0, path = {}) {
   for (let i = 0; i < SW * SH; i++) grey[i] = d[i * 4];
   const apexY = SH * 0.04, pxPerCm = (SH * 0.92) / e.depthCm;
   return { SW, SH, grey, spk: e._spk, kind: e._kind, depth: e._depth, mask: e._mask, abin: e._abin, NA: e._NA,
-    lungD: e._lungDepth, cx: SW * 0.5, apexY, pxPerCm, half: e.sectorHalf, G, probe };
+    lungD: e._lungDepth, mirP: e._mirP, cx: SW * 0.5, apexY, pxPerCm, half: e.sectorHalf, G, probe };
 }
 // sample the grey (and kind) along a beam at angle th (rad, + = screen right)
 export function beamSample(R, th, depth) {

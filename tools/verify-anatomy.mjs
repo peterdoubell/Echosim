@@ -1972,6 +1972,177 @@ SECTION = 'Pathology';
     vein.length ? `${(vein[0].length * 0.0025).toFixed(2)} cm2` : 'absent');
 }
 
+SECTION = 'Normal';
+// B-mode contrast and display (headless render): the heart border stands out
+// from the tissue around it, liver is no brighter than myocardium, the RV
+// cavity stays echolucent in the near field, the PLAX posterior wall and the
+// pericardium beneath it are distinct layers, extracardiac soft tissue never
+// renders fluid-dark, the full curved sector and depth ruler fit at 17 cm, the
+// lung behind the descending aorta mirrors it, and an effusion is echo-free.
+{
+  const T = TISSUE;
+  const FLUIDS = new Set([T.LV, T.RV, T.LA, T.RA, T.AORTA, T.VEIN, T.PERICARDIUM]);
+  const meanOf = (v) => (v.length ? v.reduce((a, b) => a + b, 0) / v.length : null);
+  const medOf = (v) => { const b = [...v].sort((x, y) => x - y); return b.length ? b[b.length >> 1] : null; };
+  const pctOf = (v, p) => { const b = [...v].sort((x, y) => x - y); return b.length ? b[Math.min(b.length - 1, Math.floor(p * b.length))] : null; };
+  // grey of the pixels of a label at least `rCm` from any other label (interior)
+  const interior = (R, K, rCm) => {
+    const W = R.SW, r = Math.max(1, Math.round(rCm * R.pxPerCm)), out = [];
+    for (let j = r; j < R.SH - r; j++) for (let i = r; i < W - r; i++) {
+      const q = j * W + i; if (!R.mask[q] || R.kind[q] !== K) continue;
+      let ok = true;
+      for (let dj = -r; dj <= r && ok; dj += r) for (let di = -r; di <= r; di += r) if (R.kind[q + dj * W + di] !== K) { ok = false; break; }
+      if (ok) out.push(R.grey[q]);
+    }
+    return out;
+  };
+  const byKind = (R, K) => { const v = []; for (let i = 0; i < R.SW * R.SH; i++) if (R.mask[i] && R.kind[i] === K) v.push(R.grey[i]); return v; };
+  {
+    const R = renderBmode('A4C', ED, {});
+    check('B-mode', 'A4C: myocardium minus surrounding soft tissue (mean grey)', meanOf(byKind(R, T.MYO)) - meanOf(byKind(R, T.OUTSIDE)), [25, 255], 'grey');
+  }
+  for (const nm of ['PSAX', 'A2C']) {
+    const R = renderBmode(nm, ED, {});
+    check('B-mode', `${nm}: myocardium minus liver (mean grey, liver iso or darker)`, meanOf(byKind(R, T.MYO)) - meanOf(byKind(R, T.LIVER)), [0, 255], 'grey');
+    if (nm === 'PSAX') check('B-mode', 'PSAX: RV cavity minus LV cavity (mean grey, no near-field haze)', meanOf(byKind(R, T.RV)) - meanOf(byKind(R, T.LV)), [-255, 12], 'grey');
+  }
+  {
+    // PLAX: column through the posterior wall to the pericardium beneath it
+    const R = renderBmode('PLAX', ED, {});
+    const pk = [], thick = [], pw = [], sept = [];
+    for (let th = -0.45; th <= 0.2; th += 0.01) {
+      const S = []; for (let d = 1; ; d += 0.02) { const q = beamSample(R, th, d); if (!q) break; S.push(q); }
+      let k = S.findIndex((q) => q.kind === T.LV); if (k < 0) continue;
+      let s1 = k - 1; while (s1 > 0 && S[s1].kind !== T.MYO) s1--;
+      let s0 = s1; while (s0 > 0 && S[s0].kind === T.MYO) s0--;
+      for (let q = s0 + 3; q < s1 - 2; q++) sept.push(S[q].grey);
+      while (k < S.length && S[k].kind === T.LV) k++;
+      const m0 = k; while (k < S.length && S[k].kind === T.MYO) k++; const m1 = k;
+      if (m1 - m0 < 20) continue;
+      for (let q = m0 + 3; q < m1 - 5; q++) pw.push(S[q].grey);
+      // the pericardium beneath it (as in the peak-above-wall check above)
+      let kp = m1; while (kp < S.length && S[kp].kind !== T.PERI_LINE && kp - m1 < 15) kp++;
+      if (kp >= S.length || S[kp].kind !== T.PERI_LINE) continue;
+      let p = 0, pi = m1; for (let q = m1 - 5; q < Math.min(S.length, m1 + 20); q++) if (S[q].grey > p) { p = S[q].grey; pi = q; }
+      let a = pi, b = pi; while (a > 0 && S[a - 1].grey > 0.85 * p) a--; while (b < S.length - 1 && S[b + 1].grey > 0.85 * p) b++;
+      pk.push(p); thick.push((b - a + 1) * 0.2);
+    }
+    const P = medOf(pk), PW = medOf(pw), SE = medOf(sept);
+    check('B-mode', 'PLAX: pericardial peak minus posterior-wall median (grey)', P - PW, [40, 255], 'grey', `${pk.length} beams, peak ${P}, wall ${PW}`);
+    check('B-mode', 'PLAX: pericardial band (> 85% of its peak) thickness', medOf(thick), [0, 3], 'mm');
+    check('B-mode', 'PLAX: posterior-wall median minus septal median (grey)', PW - SE, [-25, 25], 'grey', `septum ${SE}`);
+  }
+  {
+    // no extracardiac soft-tissue region > 1 cm2 renders fluid-dark (0.3 cm box
+    // mean < 30), outside air (beyond the pleura on its beam)
+    for (const nm of ['MELAA', 'MELAX', 'SC_IVC']) {
+      const R = renderBmode(nm, ED, {});
+      const W = R.SW, H = R.SH, r = Math.max(1, Math.round(0.15 * R.pxPerCm));
+      const dark = new Uint8Array(W * H);
+      for (let j = r; j < H - r; j++) for (let i = r; i < W - r; i++) {
+        const q = j * W + i;
+        if (!R.mask[q] || FLUIDS.has(R.kind[q]) || R.kind[q] === T.LUNG || R.depth[q] > R.lungD[Math.round(R.abin[q])] - 0.2) continue;
+        let s = 0, n = 0; for (let dj = -r; dj <= r; dj++) for (let di = -r; di <= r; di++) { const p = q + dj * W + di; if (R.mask[p]) { s += R.grey[p]; n++; } }
+        if (s / n < 30) dark[q] = 1;
+      }
+      let best = 0; const seen = new Uint8Array(W * H);
+      for (let q = 0; q < W * H; q++) if (dark[q] && !seen[q]) {
+        let n = 0; const st = [q]; seen[q] = 1;
+        while (st.length) { const p = st.pop(); n++; for (const d of [1, -1, W, -W]) { const z = p + d; if (z >= 0 && z < W * H && dark[z] && !seen[z]) { seen[z] = 1; st.push(z); } } }
+        best = Math.max(best, n);
+      }
+      check('B-mode', `${nm}: largest fluid-dark non-fluid region (soft tissue reads grey)`, best / (R.pxPerCm * R.pxPerCm), [0, 1], 'cm2');
+    }
+  }
+  {
+    // full curved sector at 17 cm (A4C): the fan never reaches the buffer's side
+    // edges and its bottom is an arc, not a flat cut
+    const R = renderBmode('A4C', ED, {});
+    let side = 0, maxW = 0, last = -1;
+    for (let j = 0; j < R.SH; j++) {
+      let lo = -1, hi = -1;
+      for (let i = 0; i < R.SW; i++) if (R.mask[j * R.SW + i]) { if (lo < 0) lo = i; hi = i; }
+      if (lo < 0) continue;
+      if (lo === 0 || hi === R.SW - 1) side++;
+      maxW = Math.max(maxW, hi - lo + 1); last = j;
+    }
+    let bw = 0; { let lo = -1, hi = -1; for (let i = 0; i < R.SW; i++) if (R.mask[last * R.SW + i]) { if (lo < 0) lo = i; hi = i; } bw = hi - lo + 1; }
+    check('B-mode', 'A4C 17 cm: sector rows touching the buffer side edges', side, [0, 0], 'rows');
+    check('B-mode', 'A4C 17 cm: deepest sector row width / fan max width (curved bottom)', bw / maxW, [0, 0.3], '');
+    // depth ruler: every label 2..16 drawn inside the canvas
+    const { EchoView } = await import('../js/echo.js');
+    const texts = [], noop = () => {};
+    const ctx = new Proxy({
+      createImageData: (w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+      measureText: () => ({ width: 0 }), getImageData: (x, y, w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+      createLinearGradient: () => ({ addColorStop: noop }), fillText: (t, x, y) => texts.push([String(t), x, y]),
+    }, { get: (t, k) => (k in t ? t[k] : noop), set: () => true });
+    const cv = { width: 430, height: 590, getContext: () => ctx, style: {} };
+    const ev = new EchoView(cv, null); ev._pinStride = 3; ev._stride = 3;
+    ev.viewName = 'A4C'; ev.colorOn = false; ev.showLabels = false; ev.depthCm = 17;
+    ev.render(GED, {}, TTE_VIEWS.A4C.probe(), 0);
+    const want = [2, 4, 6, 8, 10, 12, 14, 16];
+    const inC = want.filter((d) => texts.some(([t, x, y]) => t === String(d) && x >= 0 && x <= cv.width && y >= 0 && y <= cv.height));
+    check('B-mode', 'depth ruler at 17 cm: labels 2..16 drawn inside the canvas', inC.length, [want.length, want.length], `of ${want.length}`);
+  }
+}
+SECTION = 'TEE';
+{
+  // mirror-image artefact: the lung behind the descending aorta repeats it about
+  // the pleural plane (normalised cross-correlation of the grey in front of the
+  // plane with the grey at the mirrored points beyond it)
+  const R = renderBmode('DESCAO', ED, {});
+  const M = R.mirP, W = R.SW, a = [], b = [];
+  if (M) for (let j = 0; j < R.SH; j++) for (let i = 0; i < W; i++) {
+    const q = j * W + i; if (!R.mask[q]) continue;
+    const dist = (i - M[0]) * M[2] + (j - M[1]) * M[3];
+    if (dist > -0.3 * R.pxPerCm || dist < -3 * R.pxPerCm) continue;        // 0.3-3 cm in front of the plane
+    const mx = Math.round(i - 2 * dist * M[2]), my = Math.round(j - 2 * dist * M[3]);
+    if (mx < 0 || mx >= W || my < 0 || my >= R.SH) continue;
+    const p = my * W + mx; if (!R.mask[p] || R.depth[p] < R.lungD[Math.round(R.abin[p])] + 0.2) continue;
+    const th = Math.atan2(mx - R.cx, my - R.apexY); if (Math.abs(th) > R.half - 0.2) continue;
+    a.push(R.grey[q]); b.push(R.grey[p]);
+  }
+  let ncc = null;
+  if (a.length > 200) {
+    const ma = a.reduce((x, y) => x + y, 0) / a.length, mb = b.reduce((x, y) => x + y, 0) / b.length;
+    let sab = 0, saa = 0, sbb = 0;
+    for (let k = 0; k < a.length; k++) { const u = a[k] - ma, v = b[k] - mb; sab += u * v; saa += u * u; sbb += v * v; }
+    ncc = sab / Math.sqrt(saa * sbb);
+  }
+  check('B-mode', 'DESCAO: mirror image of the aorta beyond the pleura (NCC)', ncc, [0.3, 1], '', `${a.length} px pairs`);
+}
+SECTION = 'Pathology';
+{
+  // effusion: echo-free (as dark as blood), sharply bounded by bright layers
+  const T = TISSUE;
+  for (const nm of ['PLAX', 'A4C', 'SUBCOSTAL']) {
+    const R = renderBmode(nm, ED, { effusion: true }), W = R.SW, r = Math.max(1, Math.round(0.15 * R.pxPerCm));
+    const inner = (K) => {
+      const v = [];
+      for (let j = r; j < R.SH - r; j++) for (let i = r; i < W - r; i++) {
+        const q = j * W + i; if (!R.mask[q] || R.kind[q] !== K) continue;
+        let ok = true;
+        for (let dj = -r; dj <= r && ok; dj += r) for (let di = -r; di <= r; di += r) if (R.kind[q + dj * W + di] !== K) { ok = false; break; }
+        if (ok) v.push(R.grey[q]);
+      }
+      return v;
+    };
+    const mean = (v) => (v.length ? v.reduce((x, y) => x + y, 0) / v.length : null);
+    const fl = mean(inner(T.PERICARDIUM)), lv = mean(inner(T.LV));
+    const adj = [], rim = [];
+    for (let j = 3; j < R.SH - 3; j++) for (let i = 3; i < W - 3; i++) {
+      const q = j * W + i; if (!R.mask[q] || R.kind[q] === T.PERICARDIUM) continue;
+      let near = false;
+      for (let dj = -2; dj <= 2 && !near; dj++) for (let di = -2; di <= 2; di++) if (R.kind[q + dj * W + di] === T.PERICARDIUM) { near = true; break; }
+      if (near) { rim.push(R.grey[q]); if (R.kind[q] === T.MYO) adj.push(R.grey[q]); }
+    }
+    check('Effusion', `${nm}: fluid minus LV blood (interior mean grey)`, fl - lv, [-255, 5], 'grey', `fluid ${fl?.toFixed(0)}, LV ${lv?.toFixed(0)}`);
+    check('Effusion', `${nm}: adjacent myocardium minus fluid (mean grey)`, mean(adj) - fl, [60, 255], 'grey');
+    if (nm === 'PLAX') { rim.sort((x, y) => x - y); check('Effusion', 'PLAX: 95th-percentile grey of the 2 px rims of the fluid', rim[Math.floor(0.95 * rim.length)], [200, 255], 'grey'); }
+  }
+}
+
 // ---- report ------------------------------------------------------------------
 const fmt = (v) => (typeof v === 'number' ? v.toFixed(2) : String(v));
 const SECTIONS = [...new Set(rows.map((r) => r.section))];
