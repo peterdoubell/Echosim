@@ -455,6 +455,8 @@ function diaphH() {
 // inferior wall. The stomach itself is ONE organ, LIV_LOBE.stomach (left upper
 // quadrant, under the left dome, behind the left lobe), fitted so its lumen
 // surface passes through p with its normal close to n; its wall is t thick.
+// (The TG probe is slid a few degrees round the LV long axis from p, views.js
+// TG_ROLL, no further than this lumen reaches.)
 const GASTRIC = (() => {
   const n = unit([0.1, 0, 1]);
   return { n, p: mad([0, -3.6, 0], n, -4.6), t: 0.45 };
@@ -650,6 +652,9 @@ export function rightHeartLoad(path = {}) {
     : vol ? (kR) => (path.asd ? 0.42 : 0.3) * vol * (1 - kR) : null;   // (the ASD's larger diastolic RV load)
   return { rvC, rvL, septum, msPH, trVol };
 }
+// septal root of the posteromedial papillary base: angle (rad, as papAt), share of
+// the muscle's base-to-tip height it rises, base / top radius (cm)
+const PM_ROOT = { ang: -2.7, up: 0.3, rb: 0.6, rt: 0.4 };
 export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   // Remodelling: when coupled to the circulation the LV size follows the modelled
   // EDV (eccentric dilatation in DCM / chronic MR, a smaller cavity in concentric
@@ -801,10 +806,22 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
       b: [c * rt * sS * lvScale + M0[0] * 0.3, apexY + (papY1 - LVP.apexY) * lvLong + w * dM, s * rt * sS * lvScale + M0[2] * 0.3],
     };
   };
-  // (the posteromedial muscle rises from the inferior wall, ~7 o'clock in PSAX;
-  // the anterolateral from the anterolateral/inferolateral border, ~3.5 o'clock;
-  // in TG mid SAX they then sit near the top and at the right of the LV)
-  const alpm = papAt(-0.3, 2.2, 1.8), pmpm = papAt(-2.3, 2.2, 1.75);
+  // (the posteromedial muscle rises from the inferior wall, ~7.5 o'clock in PSAX;
+  // the anterolateral from the anterolateral border, ~3.7 o'clock; in TG mid SAX
+  // they then sit near the top and at the right of the LV.) The anterolateral
+  // muscle stands nearer the lateral wall than the posteromedial one (base and
+  // tip ~0.4 / 0.2 cm further out, its base buried in the trabeculated wall): this
+  // close to 3 o'clock a muscle standing as far into the cavity as the
+  // posteromedial would lie across the A4C plane and the septal-lateral diameter
+  // of the PSAX, narrowing the A4C end-systolic cavity and inflating the
+  // eccentricity index.
+  const alpm = papAt(-0.38, 2.6, 2.0), pmpm = papAt(-2.3, 2.2, 1.75);
+  // The posteromedial base is broad (often several roots): a second, septal root
+  // (PM_ROOT: angle, share of the muscle's height, radii) runs into the inferoseptal
+  // wall, filling the trabeculated recess there that the RV inflow plane, passing
+  // through the inferior septum, would otherwise cut as a sliver of LV cavity.
+  const pmr = papAt(PM_ROOT.ang, 2.2, 1.75);
+  const pmRoot = { a: pmr.a, b: lerp3(pmr.a, pmr.b, PM_ROOT.up), rb: PM_ROOT.rb * papBase, rt: PM_ROOT.rt };
 
   const lvLive = {
       c: [0, apexY + LVP.len * lvLong * lsy * 0.5, 0],
@@ -913,7 +930,7 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
     },
     pap: [
       { a: alpm.a, b: alpm.b, r: 0.5, rb: 0.62 * papBase, rt: 0.3 * papThick },
-      { a: pmpm.a, b: pmpm.b, r: 0.5, rb: 0.62 * papBase, rt: 0.3 * papThick },
+      { a: pmpm.a, b: pmpm.b, r: 0.5, rb: 0.62 * papBase, rt: 0.3 * papThick, root: pmRoot },
     ],
     // moderator band: crosses the lower third of the RV from the septum to the
     // base of the anterior papillary muscle on the free wall.
@@ -945,7 +962,9 @@ function laaSegs(la) {
   const o = mad(w, u, -0.25);
   const p1 = mad(o, unit([0.6, -0.45, 1]), 1.5);
   const p2 = mad(p1, unit([0.6, -0.7, 0.5]), 1.2);
-  const p3 = mad(p2, unit([0.1, -0.65, 0.75]), 1.1);
+  // (the tip runs forward more than down: it ends at the AV-groove level, above
+  // the mitral leaflets, so the PSAX mitral-level plane stays clear of it)
+  const p3 = mad(p2, unit([0.1, -0.45, 0.85]), 1.1);
   return [
     { a: o, b: p1, r1: 0.85, r2: 1.0, w },
     { a: p1, b: p2, r1: 1.0, r2: 0.8 },
@@ -1811,7 +1830,10 @@ function dPAlumen(x, y, z, A) {
 }
 function dPap(x, y, z, A) {
   let d = 1e9;
-  for (const p of A.pap) d = smin(d, sdRoundCone(x, y, z, p.a[0], p.a[1], p.a[2], p.b[0], p.b[1], p.b[2], p.rb, p.rt), 0.35);
+  for (const p of A.pap) {
+    d = smin(d, sdRoundCone(x, y, z, p.a[0], p.a[1], p.a[2], p.b[0], p.b[1], p.b[2], p.rb, p.rt), 0.35);
+    const r = p.root; if (r) d = smin(d, sdRoundCone(x, y, z, r.a[0], r.a[1], r.a[2], r.b[0], r.b[1], r.b[2], r.rb, r.rt), 0.35);
+  }
   return d;
 }
 function dMod(x, y, z, A) {

@@ -445,10 +445,13 @@ function melaxProbe() {
 // toward the diaphragmatic face than the reference gastric contact, along the
 // greater curvature, so it looks up through the INFERIOR wall: the posteromedial
 // papillary muscle then sits near the top of the sector (near field, ~11 o'clock)
-// and the anterolateral one at the right (~3 o'clock), the ASE transgastric orientation
-// used to name the segments and their coronary territories. It rests where that
-// beam line meets the gastric lumen.
-const TG_ROLL = 12;                                  // deg
+// and the anterolateral one at the right (~2.5 o'clock), the ASE transgastric
+// orientation used to name the segments and their coronary territories. It rests
+// where that beam line meets the gastric lumen. (The slide is no more than the
+// fundus allows: a few degrees further and the beam line misses the lumen, leaving
+// the transducer in the tissue beyond it. Steering the beam off the LV centre from
+// the contact instead would push the RV off the side of the sector.)
+const TG_ROLL = 6;                                   // deg
 function tgsaxProbe() {
   // transgastric: probe in the fundus below the heart, looking up through the
   // inferior wall; mid-papillary short axis, lateral wall on the right
