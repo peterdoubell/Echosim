@@ -1676,6 +1676,127 @@ SECTION = 'TEE';
   }
 }
 
+// ---- review-10 TEE / subcostal / suprasternal plane content -----------------
+// ME LAA: a windsock appendage (2.5-7 cm2, >= 1.5 cm across) with the LUPV in
+// plane and the warfarin ridge reading bright; ME2C: the LA fills the near field
+// at end-diastole, the appendage shows, no RV; TG mid SAX: posteromedial
+// papillary muscle near the top, anterolateral at the right; DESC AO SAX: the
+// whole aortic section in the sector, ~1 cm from the probe; ME bicaval: the RA
+// appendage, a capacious RA, the crista and Eustachian valve in plane, no lung
+SECTION = 'TEE';
+{
+  // the appendage's width across its long axis (max over 0.2 cm stations)
+  const widthAcross = (S, cells) => {
+    const P = cells.map((k) => xd(S, k)), H = hull(P);
+    let L = 0, u = [1, 0];
+    for (const a of H) for (const b of H) { const l = Math.hypot(a[0] - b[0], a[1] - b[1]); if (l > L) { L = l; u = [(b[0] - a[0]) / l, (b[1] - a[1]) / l]; } }
+    const bins = new Map();
+    for (const [x, d] of P) {
+      const s = Math.round((x * u[0] + d * u[1]) / 0.2), t = -x * u[1] + d * u[0];
+      const b = bins.get(s) || [1e9, -1e9]; b[0] = Math.min(b[0], t); b[1] = Math.max(b[1], t); bins.set(s, b);
+    }
+    let w = 0; for (const [, b] of bins) w = Math.max(w, b[1] - b[0] + S.step);
+    return w;
+  };
+  for (const [G, ph] of [[GED, 'ED'], [GES, 'ES']]) {
+    const S = planeSample(TEE_VIEWS.MELAA, G, {}, 0.1);
+    const laa = cellsWhere(S, (l, k) => l === TISSUE.LA && laPart(G.A, ptK(S, k)) === 'laa');
+    const pv = cellsWhere(S, (l, k) => l === TISSUE.LA && laPart(G.A, ptK(S, k)) === 'pv');
+    check('TEE', `MELAA: appendage blood area in plane (${ph})`, areaOf(S, laa), [2.5, 7], 'cm2');
+    check('TEE', `MELAA: appendage width across its axis (${ph})`, widthAcross(S, laa), [1.5, 3.5]);
+    assert('TEE', `MELAA: LSPV lumen in plane (${ph})`, areaOf(S, pv) >= 0.5, `${areaOf(S, pv).toFixed(2)} cm2`);
+    // the LSPV-LAA ridge: peak grey within 0.25 cm of its centre
+    const R = renderBmode('MELAA', ph === 'ED' ? ED : ES, {}), g = R.G.A.pv.ridge, c = mul(add(g.a, g.b), 0.5), r = sub(c, R.probe.pos);
+    const px = R.cx + dot(r, R.probe.lat) * R.pxPerCm, py = R.apexY + dot(r, R.probe.dir) * R.pxPerCm, rad = Math.round(0.25 * R.pxPerCm);
+    let mx = 0;
+    for (let j = -rad; j <= rad; j++) for (let i = -rad; i <= rad; i++) if (i * i + j * j <= rad * rad) mx = Math.max(mx, R.grey[Math.round(py + j) * R.SW + Math.round(px + i)]);
+    check('TEE', `MELAA: warfarin ridge peak grey (${ph})`, mx, [170, 255], 'grey');
+  }
+  {
+    const S = planeSample(TEE_VIEWS.ME2C, GED, {}, 0.1), p = S.p, M = GED.A.valves.mitral.c;
+    check('TEE', 'ME2C: mitral annulus centre depth (ED)', dot(sub(M, p.pos), p.dir), [3.5, 5.5]);
+    const tot = cellsWhere(S, () => true).length, rv = cellsWhere(S, (l) => l === TISSUE.RV).length;
+    check('TEE', 'ME2C: RV share of the sector (ED)', 100 * rv / tot, [0, 2], '%');
+  }
+  // TG mid SAX: papillary-muscle centroids round the LV cavity centroid, from
+  // the near-field vertical, clockwise (screen right +)
+  for (const [G, ph] of [[GED, 'ED'], [GES, 'ES']]) {
+    const S = planeSample(TEE_VIEWS.TGSAX, G, {}, 0.1), p = S.p;
+    const lv = cellsWhere(S, (l) => l === TISSUE.LV).map((k) => xd(S, k));
+    const cx = lv.reduce((m, v) => m + v[0], 0) / lv.length, cd = lv.reduce((m, v) => m + v[1], 0) / lv.length;
+    const ang = (m) => { const q = mul(add(m.a, m.b), 0.5), r = sub(q, p.pos); return Math.atan2(dot(r, p.lat) - cx, cd - dot(r, p.dir)) * 180 / Math.PI; };
+    check('TEE', `TGSAX: posteromedial papillary muscle angle from the near-field vertical (${ph})`, ang(G.A.pap[1]), [-30, 60], 'deg');
+    check('TEE', `TGSAX: anterolateral papillary muscle angle (${ph})`, ang(G.A.pap[0]), [70, 150], 'deg');
+  }
+  for (const [G, ph] of [[GED, 'ED'], [GES, 'ES']]) {
+    const S = planeSample(TEE_VIEWS.DESCAO, G, {}, 0.05);
+    const ao = cellsWhere(S, (l) => l === TISSUE.AORTA).map((k) => xd(S, k)[1]);
+    check('TEE', `DESCAO: nearest aortic lumen depth (${ph})`, ao.length ? Math.min(...ao) : null, [0.5, 1.2]);
+    // the whole section (lumen and wall) in the sector: no lumen within 0.15 cm
+    // of the sector's edge
+    const cut = cellsWhere(S, (l, k) => {
+      if (l !== TISSUE.AORTA) return false; const [x, d] = xd(S, k), r = Math.hypot(x, d);
+      return r * Math.sin(0.66 - Math.abs(Math.atan2(x, d))) < 0.15;
+    });
+    assert('TEE', `DESCAO: aortic section inside the sector (${ph})`, cut.length === 0, `${cut.length} cells at the edge`);
+  }
+  for (const [G, ph] of [[GED, 'ED'], [GES, 'ES']]) {
+    const S = planeSample(TEE_VIEWS.MEBICAVAL, G, {}, 0.1), p = S.p, A = G.A;
+    const inRAA = (q) => A.ra.aa.some((g) => { const ab = sub(g.b, g.a), t = Math.max(0, Math.min(1, dot(sub(q, g.a), ab) / dot(ab, ab))); return Math.hypot(...sub(q, add(g.a, mul(ab, t)))) < g.r1 + (g.r2 - g.r1) * t; });
+    const raa = cellsWhere(S, (l, k) => l === TISSUE.RA && inRAA(ptK(S, k)));
+    check('TEE', `MEBICAVAL: RA appendage in plane (${ph})`, areaOf(S, raa), [1.5, 8], 'cm2');
+    // RA width across the caval line (between the orifices), against the SVC calibre
+    const im = (q) => { const r = sub(q, p.pos); return [dot(r, p.lat), dot(r, p.dir)]; };
+    const s0 = im(A.svc.a), i0 = im(A.ivc.a), L = Math.hypot(s0[0] - i0[0], s0[1] - i0[1]);
+    const u = [(s0[0] - i0[0]) / L, (s0[1] - i0[1]) / L], v = [-u[1], u[0]];
+    let wMax = 0;
+    for (let t = 0.2; t <= 0.8; t += 0.05) {
+      const c = [i0[0] + u[0] * L * t, i0[1] + u[1] * L * t];
+      let w = 0;
+      for (let h = -4; h <= 4; h += 0.05) {
+        const x = c[0] + v[0] * h, d = c[1] + v[1] * h;
+        const q = add(p.pos, add(mul(p.dir, d), mul(p.lat, x)));
+        if (classify(q[0], q[1], q[2], G, {}).tissue === TISSUE.RA) w += 0.05;
+      }
+      wMax = Math.max(wMax, w);
+    }
+    check('TEE', `MEBICAVAL: RA width across the caval line / SVC diameter (${ph})`, wMax / (2 * A.svc.r), [1.3, 5], '');
+    const tot = cellsWhere(S, () => true).length, lung = cellsWhere(S, (l) => l === TISSUE.LUNG).length;
+    check('TEE', `MEBICAVAL: lung share of the sector (${ph})`, 100 * lung / tot, [0, 3], '%');
+    const crosses = (g) => { const da = dot(sub(g.a, p.pos), p.normal), db = dot(sub(g.b, p.pos), p.normal); return Math.min(Math.abs(da), Math.abs(db)) < g.r || da * db < 0; };
+    assert('TEE', `MEBICAVAL: crista terminalis crosses the plane (${ph})`, A.crista.some(crosses));
+    assert('TEE', `MEBICAVAL: Eustachian valve crosses the plane (${ph})`, [A.eustachian, ...A.eustachianRim].some(crosses));
+  }
+}
+SECTION = 'Normal';
+{
+  // TTE A2C: the appendage at the anterior LA
+  for (const [G, ph] of [[GED, 'ED'], [GES, 'ES']]) {
+    const S = planeSample(TTE_VIEWS.A2C, G, {}, 0.1);
+    check('LA', `A2C: appendage area in plane (${ph})`, areaOf(S, cellsWhere(S, (l, k) => l === TISSUE.LA && laPart(G.A, ptK(S, k)) === 'laa')), [0.8, 8], 'cm2');
+  }
+  // subcostal IVC: the IVC into the RA with nothing of the left heart or the root
+  for (const [G, ph] of [[GED, 'ED'], [GES, 'ES']]) {
+    const S = planeSample(EXTRA_VIEWS.SC_IVC, G, {}, 0.1), A = G.A, tot = cellsWhere(S, () => true).length;
+    const avc = A.valves.aortic.c;
+    const avPx = cellsWhere(S, (l, k) => l === TISSUE.VALVE && Math.hypot(...sub(ptK(S, k), avc)) < 2.0).length;
+    const ao = cellsWhere(S, (l, k) => l === TISSUE.AORTA && lumenDist(...ptK(S, k), A, 'PA') > 0).length;
+    const pa = cellsWhere(S, (l, k) => l === TISSUE.AORTA && lumenDist(...ptK(S, k), A, 'PA') <= 0).length;
+    const la = cellsWhere(S, (l) => l === TISSUE.LA).length;
+    check('Subcostal IVC', `no aortic-valve pixels (${ph})`, avPx, [0, 0], 'px');
+    check('Subcostal IVC', `aortic pixels, share of the sector (${ph})`, 100 * ao / tot, [0, 1], '%');
+    check('Subcostal IVC', `LA and PA pixels (${ph})`, la + pa, [0, 0], 'px');
+  }
+  // suprasternal: the left brachiocephalic vein crosses the near field along the plane
+  {
+    const S = planeSample(EXTRA_VIEWS.SSN, GED, {}, 0.05);
+    const v = cellsWhere(S, (l) => l === TISSUE.VEIN).map((k) => xd(S, k));
+    const xs = v.map((q) => q[0]);
+    check('SSN', 'innominate vein in-plane length (lateral extent)', v.length ? Math.max(...xs) - Math.min(...xs) : 0, [2.5, 9]);
+    check('SSN', 'innominate vein area in plane', v.length * S.step * S.step, [1.0, 6], 'cm2');
+  }
+}
+
 // ---- caval system: SVC -> RA -> IVC is one continuous lumen -----------------
 // (the regression that walled the SVC off from the RA slipped through the
 // single-phase normal-heart checks: sweep every pathology at ED and ES)
