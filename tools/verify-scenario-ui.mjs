@@ -51,6 +51,12 @@ try {
     await page.$eval('#scrub', (el, value) => { el.value = String(value); el.dispatchEvent(new Event('input', { bubbles: true })); }, value);
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   }
+  async function settledAnatomy() {
+    await page.locator('#rebuildOverlay').waitFor({ state: 'hidden', timeout: 60000 });
+    // The bake binds frames before hiding its overlay; let the live renderer
+    // paint those frames before capturing proof of the completed result.
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  }
   const snapshot = () => page.evaluate(() => ({
     path: { ...window.echosim.state.path },
     ef: Number.parseFloat(document.getElementById('mEf').textContent),
@@ -70,12 +76,20 @@ try {
       await phase(p);
       boxes.push(await page.evaluate(() => {
         const box = (id) => { const r = document.getElementById(id).getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; };
-        return { ecg: box('ecg'), button: box('twelveBtn'), name: box('phaseName'), label: document.getElementById('phaseName').textContent };
+        const name = document.getElementById('phaseName');
+        // A fixed-width span can still hide text motion caused by right or
+        // centre alignment. Measure the rendered glyphs, not just their slot.
+        const range = document.createRange();
+        range.selectNodeContents(name);
+        const text = range.getBoundingClientRect();
+        return { ecg: box('ecg'), button: box('twelveBtn'), name: box('phaseName'), textX: text.x, label: name.textContent };
       }));
     }
     const stable = boxes.every((b) => ['ecg', 'button', 'name'].every((key) => b[key].every((v, i) => Math.abs(v - boxes[0][key][i]) < 1)));
+    const textStartStable = boxes.every((b) => Math.abs(b.textX - boxes[0].textX) < 1 && Math.abs(b.textX - b.name[0]) < 1);
     const fits = await page.evaluate(() => document.querySelector('.topbar').scrollWidth <= document.documentElement.clientWidth);
     check(`${width}px header does not move across all six phase labels`, stable, boxes.map((b) => `${b.label}: ${b.button[0].toFixed(1)}`).join(', '));
+    check(`${width}px phase text keeps a fixed left-aligned starting position`, textStartStable, boxes.map((b) => `${b.label}: ${b.textX.toFixed(1)}`).join(', '));
     check(`${width}px header fits the viewport`, fits);
   }
   await page.screenshot({ path: path.join(OUT, 'mobile-header.png'), fullPage: true });
@@ -94,6 +108,7 @@ try {
   }
   check('DCM severity changes the pressure-volume loop and strain bullseye', new Set(dcms.slice(0, 3).map((s) => s.pv)).size === 3 && new Set(dcms.slice(0, 3).map((s) => s.bull)).size === 3);
   check('returning to severe DCM restores its EF and regional strain', dcms[0].ef === dcms[3].ef && dcms[0].bull === dcms[3].bull);
+  await settledAnatomy();
   await page.screenshot({ path: path.join(OUT, 'dcm-severity.png') });
 
   await page.selectOption('#pathology', 'rwma');
@@ -115,6 +130,7 @@ try {
   check('all six RWMA presets refresh the matching 12-lead ECG while paused', new Set(regions.map((s) => s.ecg)).size === 6);
   await page.screenshot({ path: path.join(OUT, 'regional-ecg.png') });
   await page.click('#twelveClose');
+  await settledAnatomy();
   await page.screenshot({ path: path.join(OUT, 'regional-control.png') });
 
   // Unknown-case workflows must hide added diagnostic controls and restore the prior preset.

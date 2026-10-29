@@ -48,7 +48,7 @@ body {
 .ecg { background: #04060a; border: 1px solid var(--line); border-radius: 6px; padding: 2px; flex: none; }
 #ecg { display: block; width: 240px; height: 46px; }
 /* Reserve the longest phase label's space throughout the entire heartbeat. */
-.phase-label { text-align: right; width: 190px; flex: 0 0 190px; }
+.phase-label { text-align: left; width: 190px; flex: 0 0 190px; }
 .phase-label span { display: block; font-size: 13px; line-height: 18px; white-space: nowrap; color: var(--good); font-weight: 600; }
 .phase-label small { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 
