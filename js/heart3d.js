@@ -8,6 +8,7 @@ import { OrbitControls } from '../vendor/OrbitControls.js';
 import { geometryAt, velocityAt, VALVE_DEFS } from './cardiac-model.js';
 import { myoDist, lumenDist, LM } from './anatomy.js';
 import { buildMesh } from './marching.js';
+import { VESSELS, VESSEL_BOX, VESSEL_CELL } from './vessels3d.js';
 
 const MUSCLE = 0x8a3330;
 // Chamber tints. Ventricles read bright; atria are a touch deeper/darker and
@@ -106,7 +107,16 @@ export class Heart3D {
     this.rvMesh = new THREE.Mesh(new THREE.BufferGeometry(), mkMat(RV_COLOR, 0.72, { depthWrite: true, roughness: 0.42 }));
     this.laMesh = new THREE.Mesh(new THREE.BufferGeometry(), mkMat(LA_COLOR, 0.62, { depthWrite: true, roughness: 0.42 }));
     this.raMesh = new THREE.Mesh(new THREE.BufferGeometry(), mkMat(RA_COLOR, 0.62, { depthWrite: true, roughness: 0.42 }));
-    this.vesMesh = new THREE.Mesh(new THREE.BufferGeometry(), mkMat(0xb85c40, 0.66, { depthWrite: true, roughness: 0.5 }));
+    // great vessels, coronaries and coronary sinus (vessels3d.js), each in its
+    // own material: aorta and branches arterial red, the coronaries a lighter
+    // red, the PA, CS and cavae venous blue (the legend's deoxygenated colour).
+    // vesMesh is the aortic root + ascending aorta (moves with the heart).
+    this.vesselMeshes = {};
+    for (const v of VESSELS) {
+      this.vesselMeshes[v.key] = new THREE.Mesh(new THREE.BufferGeometry(),
+        mkMat(v.color, v.key === 'coronary' ? 0.9 : 0.66, { depthWrite: true, roughness: 0.5 }));
+    }
+    this.vesMesh = this.vesselMeshes.aorticRoot;
     // Per-chamber Fresnel rim: each pool gets a thin glowing silhouette in its
     // own hue, so the depth-sorted translucent volumes read as separate bodies
     // (a shader-side outline that needs no extra per-phase geometry).
@@ -114,7 +124,11 @@ export class Heart3D {
     this._addFresnelRim(this.laMesh.material, 0xcf5a72, 2.2, 0.55);
     this._addFresnelRim(this.rvMesh.material, 0x6fb2ff, 2.2, 0.55);
     this._addFresnelRim(this.raMesh.material, 0x5f83d6, 2.2, 0.55);
-    this.bloodMeshes = [this.lvMesh, this.rvMesh, this.laMesh, this.raMesh, this.vesMesh];
+    this.bloodMeshes = [this.lvMesh, this.rvMesh, this.laMesh, this.raMesh, ...Object.values(this.vesselMeshes)];
+    // the arch, head and neck vessels, descending aorta and cavae barely move:
+    // meshed once, from the end-diastolic anatomy, in a taller box than the heart
+    const A0 = geometryAt(0, {}).A;
+    for (const v of VESSELS) if (!v.moving) this.vesselMeshes[v.key].geometry = this._geomFrom((x, y, z) => v.fn(x, y, z, A0), VESSEL_BOX, VESSEL_CELL);
     this.bloodMeshes.forEach((m) => { m.renderOrder = 2; });
     [this.myoMesh, ...this.bloodMeshes].forEach((m) => this.heartGroup.add(m));
 
@@ -219,7 +233,7 @@ export class Heart3D {
       RV: this._geomFrom((x, y, z) => lumenDist(x, y, z, A, 'RV')),
       LA: this._geomFrom((x, y, z) => lumenDist(x, y, z, A, 'LA')),
       RA: this._geomFrom((x, y, z) => lumenDist(x, y, z, A, 'RA')),
-      VES: this._geomFrom((x, y, z) => Math.min(lumenDist(x, y, z, A, 'AOROOT'), lumenDist(x, y, z, A, 'PA'))),
+      ...Object.fromEntries(VESSELS.filter((v) => v.moving).map((v) => [v.key, this._geomFrom((x, y, z) => v.fn(x, y, z, A))])),
     };
   }
 
@@ -337,9 +351,9 @@ export class Heart3D {
     });
   }
 
-  _geomFrom(fn) {
+  _geomFrom(fn, box = BBOX, cell = CELL) {
     const g = new THREE.BufferGeometry();
-    const mesh = buildMesh(fn, BBOX, CELL);
+    const mesh = buildMesh(fn, box, cell);
     if (mesh) {
       g.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3));
       g.setAttribute('normal', new THREE.BufferAttribute(mesh.normals, 3));
@@ -658,7 +672,7 @@ export class Heart3D {
         this.myoMesh.geometry = f.myo;
         this.lvMesh.geometry = f.LV; this.rvMesh.geometry = f.RV;
         this.laMesh.geometry = f.LA; this.raMesh.geometry = f.RA;
-        this.vesMesh.geometry = f.VES;
+        for (const v of VESSELS) if (v.moving && f[v.key]) this.vesselMeshes[v.key].geometry = f[v.key];
         this._boundFrame = f;
       }
     }

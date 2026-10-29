@@ -180,8 +180,38 @@ function circParams(path) {
     p.Pla0 = Math.min(p.Pla0, 7); p.Emin *= 1.3;            // LV EDV ~90 mL
   }
   if (path.rwma) { p.Emax = Math.min(p.Emax, 1.8); }              // regional dysfunction → low global contractility
+  Object.assign(p, shuntParams(path));
   return p;
 }
+
+// ---- intracardiac shunts (self-contained) ---------------------------------
+// Secundum ASD and VSD as Bernoulli orifices between the modelled LEFT heart and
+// a prescribed RIGHT-heart pressure (the right heart is not lumped-modelled):
+//   Q = A_eff x 50 sqrt(|dP|) mL/s  (v = sqrt(dP/4) m/s = 50 sqrt(dP) cm/s)
+// ASD: LA -> RA through the cycle, driven by the small LA-RA difference (a few
+// mmHg: ~1 m/s), largest in late systole (LA v wave) and early diastole, with a
+// dip as both atria contract. VSD: LV -> RV, a fast jet in systole that follows
+// the LV-RV gradient (RV systolic ~25 mmHg), a trickle in diastole. Either way
+// the pulmonary circuit carries the shunt on top of the systemic output, so
+// Qp:Qs = (forward SV + shunt volume) / forward SV; the LA keeps its chronic mean
+// pressure (Pla0) because the pulmonary venous return rises with the shunt.
+function shuntParams(path) {
+  return {
+    asdA: path.asd ? 0.62 : 0,     // effective ASD orifice (cm2): the ~1.4 x 0.7 cm oval defect x Cd
+    vsdA: path.vsd ? 0.12 : 0,     // restrictive VSD vena contracta (cm2)
+  };
+}
+// right-atrial pressure over the cycle (mmHg): mean ~3.5, a wave just BEFORE the
+// left atrial one (the RA is activated first), the c wave as the tricuspid
+// bulges back at the QRS, x descent in systole, v wave at
+// end-systole, y descent once the tricuspid opens
+function praAt(tau) {
+  const g = (c, w) => { let d = tau - c; d -= Math.round(d); return Math.exp(-(d / w) * (d / w)); };
+  return 3.5 + 4.2 * g(0.875, 0.045) + 2.4 * g(0.0, 0.035) - 1.6 * g(0.22, 0.1) + 1.6 * g(0.46, 0.06) - 1.4 * g(0.6, 0.07);
+}
+// right-ventricular pressure (mmHg): ~25/4, systole on the left heart's clock
+function prvAt(tau, a) { return 4 + 22 * Math.min(1, a * 1.15); }
+const orifice = (A, dP) => (A > 0 ? A * 50 * dP / Math.sqrt(Math.abs(dP) + 0.05) : 0);
 
 // Mitral valve area (cm^2) per grade: the ONE area the leaflet geometry (planimetry)
 // is drawn to. circParams' Rmv/Pla0 are tuned so the Hakki area of the solved
@@ -194,6 +224,9 @@ export function gradeOf(path = {}) {
   const gr = path.grade;
   return (gr === 'mild' || gr === 'moderate' || gr === 'severe') ? gr : 'severe';
 }
+
+// shunt-jet velocity (m/s, signed) from the pressure difference across it (Bernoulli)
+const shuntV = (dP) => (dP >= 0 ? 1 : -1) * Math.sqrt(Math.abs(dP) / 4);
 
 // Integrate the closed loop to its limit cycle and return a sampled trace of one
 // cycle plus scalar summary (EDV/ESV/SV/EF/pressures/gradients/regurg fraction).
@@ -213,6 +246,8 @@ function simulate(path) {
     Qmv: new Float64Array(NSAMPLE), Qao: new Float64Array(NSAMPLE),
     Qmr: new Float64Array(NSAMPLE), Pla: new Float64Array(NSAMPLE),
     Vla: new Float64Array(NSAMPLE), Qpv: new Float64Array(NSAMPLE),
+    Qasd: new Float64Array(NSAMPLE), Qvsd: new Float64Array(NSAMPLE),
+    dPasd: new Float64Array(NSAMPLE), dPvsd: new Float64Array(NSAMPLE),
   };
 
   for (let cyc = 0; cyc < NCYCLE; cyc++) {
@@ -249,8 +284,10 @@ function simulate(path) {
       }
       const Qmr = (p.Rmr !== Infinity && Plv > Pla) ? (Plv - Pla) / p.Rmr : 0;
       const Qsys = (Pao - p.Pven) / p.Rsys;
-      Vlv += (Qmv - Qao - Qmr) * dt;
-      Vla += (Qpv + Qmr - Qmv) * dt;
+      const dPasd = p.asdA ? Pla - praAt(tau) : 0, dPvsd = p.vsdA ? Plv - prvAt(tau, a) : 0;
+      const Qasd = orifice(p.asdA, dPasd), Qvsd = orifice(p.vsdA, dPvsd);
+      Vlv += (Qmv - Qao - Qmr - Qvsd) * dt;
+      Vla += (Qpv + Qmr - Qmv - Qasd) * dt;
       Pao += ((Qao - Qsys) / p.Cao) * dt;
       if (Vlv < 0) Vlv = 0;
 
@@ -262,6 +299,7 @@ function simulate(path) {
           tr.Plv[sIdx] = Plv; tr.Pao[sIdx] = Pao + Zc * Qao; tr.Vlv[sIdx] = Vlv;   // Pao: ascending-aortic pressure
           tr.Qmv[sIdx] = Qmv; tr.Qao[sIdx] = Qao; tr.Qmr[sIdx] = Qmr; tr.Pla[sIdx] = Pla;
           tr.Vla[sIdx] = Vla; tr.Qpv[sIdx] = Qpv;
+          tr.Qasd[sIdx] = Qasd; tr.Qvsd[sIdx] = Qvsd; tr.dPasd[sIdx] = dPasd; tr.dPvsd[sIdx] = dPvsd;
           sIdx++;
         }
       }
@@ -272,6 +310,7 @@ function simulate(path) {
   let EDV = -1e9, ESV = 1e9, PlvSys = -1e9, PaoSys = -1e9, PaoDia = 1e9;
   let grad = 0, fwd = 0, regurg = 0, tMin = 0, PlaAtSys = 0, gradMV = 0, mvSum = 0, mvN = 0;
   let QaoMax = 0, QmvMax = 0, QmrMax = 0, iQmax = 0, iOpen = -1, iClose = -1, mrGradMax = 0;
+  let shunt = 0, vAsdMax = 0, vAsdMin = 0, vVsdMax = 0;
   const dtS = CYCLE / NSAMPLE;
   for (let i = 0; i < NSAMPLE; i++) {
     if (tr.Vlv[i] > EDV) EDV = tr.Vlv[i];
@@ -292,6 +331,9 @@ function simulate(path) {
     if (tr.Qmr[i] > 0.5 && tr.Plv[i] - tr.Pla[i] > mrGradMax) mrGradMax = tr.Plv[i] - tr.Pla[i];
     fwd += tr.Qao[i] * dtS;
     regurg += tr.Qmr[i] * dtS;
+    shunt += (tr.Qasd[i] + tr.Qvsd[i]) * dtS;
+    vAsdMax = Math.max(vAsdMax, shuntV(tr.dPasd[i])); vAsdMin = Math.min(vAsdMin, shuntV(tr.dPasd[i]));
+    vVsdMax = Math.max(vVsdMax, shuntV(tr.dPvsd[i]));
   }
   const SV = EDV - ESV;
   const sum = {
@@ -308,6 +350,10 @@ function simulate(path) {
     mrGradMax,              // peak LV-LA gradient while regurgitating (MR jet Vmax = sqrt(/4))
     accelTime: (iQmax - iOpen) * dtS, ejectTime: (iClose - iOpen + 1) * dtS,
     Pla0: p.Pla0,           // chronic LA pressure (drives LA remodelling in the anatomy)
+    // intracardiac shunt (ASD / VSD): net left-to-right volume per beat, the
+    // pulmonary-to-systemic flow ratio and the shunt-jet velocities (m/s, + = L->R)
+    shuntVol: shunt, QpQs: fwd > 0 ? (fwd + shunt) / fwd : 1,
+    vAsdPeak: vAsdMax, vAsdMin, vVsdPeak: vVsdMax,
   };
   Object.assign(sum, laMetrics(tr), inflowMetrics(tr));
   return { tr, sum, params: p };
@@ -397,7 +443,7 @@ function inflowMetrics(tr) {
 const _cache = new Map();
 function sig(path) {
   return [path.aorticStenosis, path.lvh, path.dilated, path.mr, path.mitralStenosis,
-    path.rwma ? 1 : 0, path.rvpo].map((v) => (v ? 1 : 0)).join('') + ':' + gradeOf(path);
+    path.rwma ? 1 : 0, path.rvpo, path.asd, path.vsd].map((v) => (v ? 1 : 0)).join('') + ':' + gradeOf(path);
 }
 function solved(path) {
   const key = sig(path);
@@ -408,7 +454,7 @@ function solved(path) {
 
 // Reusable singleton so the ~per-frame call in geometryAt allocates nothing.
 const _state = {
-  phase: 0, Plv: 0, Pao: 0, Vlv: 0, Pla: 0, Qmv: 0, Qao: 0, Qmr: 0,
+  phase: 0, Plv: 0, Pao: 0, Vlv: 0, Pla: 0, Qmv: 0, Qao: 0, Qmr: 0, vAsd: 0, vVsd: 0, Qasd: 0, Qvsd: 0,
   rho: 1, kv: 0, sum: null,
 };
 
@@ -426,6 +472,8 @@ export function hemodynamics(phase, path = {}) {
   _state.Plv = lerp(tr.Plv); _state.Pao = lerp(tr.Pao); _state.Vlv = lerp(tr.Vlv);
   _state.Pla = lerp(tr.Pla); _state.Qmv = lerp(tr.Qmv); _state.Qao = lerp(tr.Qao);
   _state.Qmr = lerp(tr.Qmr);
+  _state.Qasd = lerp(tr.Qasd); _state.Qvsd = lerp(tr.Qvsd);
+  _state.vAsd = shuntV(lerp(tr.dPasd)); _state.vVsd = shuntV(lerp(tr.dPvsd));
   _state.rho = sum.EDV > 0 ? clamp(_state.Vlv / sum.EDV, 0.05, 1) : 1;
   _state.kv = sum.SV > 0 ? clamp((sum.EDV - _state.Vlv) / sum.SV, 0, 1.2) : 0;
   _state.sum = sum;

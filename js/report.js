@@ -186,6 +186,8 @@ export function measureModel(path = {}) {
     m.effusion = r ? len(r) : null;
   }
   m.shunt = shuntLabel(path);
+  // pulmonary-to-systemic flow ratio of a shunt (RVOT vs LVOT stroke volume)
+  m.qpqs = m.shunt ? hemoSummary(path).QpQs : null;
   m.rwma = path.rwma || null;
   m.grade = gradeOf(path);
   m.esPhase = ES; m.rvEsPhase = rvEs;
@@ -288,7 +290,7 @@ export function buildReport(path, patient = DEFAULT_PATIENT, learner = {}) {
   const rvOk = g.rvd1.level === 'normal' && g.tapse.level === 'normal' && g.rvfac.level === 'normal';
   F.push({ section: 'Right ventricle', text: rvOk ? `Normal RV size and systolic function (RVD1 ${f0(m.rvd1)} mm, TAPSE ${f0(m.tapse)} mm, FAC ${f0(m.rvfac)}%).`
     : `RV ${g.rvd1.level !== 'normal' ? 'dilated' : 'normal size'} (RVD1 ${f0(m.rvd1)} mm); TAPSE ${f0(m.tapse)} mm, FAC ${f0(m.rvfac)}%${g.tapse.level !== 'normal' || g.rvfac.level !== 'normal' ? ' — impaired RV systolic function' : ''}.` });
-  F.push({ section: 'Atria', text: `LA ${g.lavi.word} (LAVi ${f0(lavi)} mL/m²). RA ${g.raArea.level === 'normal' ? 'normal size' : 'dilated'} (area ${f1(m.raArea)} cm²).${m.shunt && path.asd ? ` ${cap(m.shunt.label)} with left-to-right shunt across the interatrial septum.` : ''}` });
+  F.push({ section: 'Atria', text: `LA ${g.lavi.word} (LAVi ${f0(lavi)} mL/m²). RA ${g.raArea.level === 'normal' ? 'normal size' : 'dilated'} (area ${f1(m.raArea)} cm²).${m.shunt && path.asd ? ` ${cap(m.shunt.label)} with left-to-right shunt across the interatrial septum${m.qpqs ? ` (Qp:Qs ${f1(m.qpqs)})` : ''}.` : ''}` });
   F.push({ section: 'Aortic valve', text: as ? `${cap(as.word)}: Vmax ${f1(m.avVmax)} m/s, mean gradient ${f0(m.avMeanGrad)} mmHg, AVA ${f2(m.ava)} cm² (continuity).` : `Trileaflet, opens well. Vmax ${f1(m.avVmax)} m/s. No aortic stenosis or regurgitation.` });
   const mvParts = [];
   if (ms) mvParts.push(`${cap(ms.word)}: MVA ${f2(m.mva)} cm², mean gradient ${f1(m.mvMeanGrad)} mmHg`);
@@ -296,7 +298,7 @@ export function buildReport(path, patient = DEFAULT_PATIENT, learner = {}) {
   F.push({ section: 'Mitral valve', text: mvParts.length ? `${mvParts.join('. ')}.` : 'Structurally normal; no significant regurgitation or stenosis.' });
   const trWord = path.tr ? `${path.rvpo ? 'Functional' : cap(m.grade)} tricuspid regurgitation` : 'Tricuspid regurgitation';
   F.push({ section: 'Tricuspid & pulmonary valves', text: m.trVmax ? `${trWord}, TR Vmax ${f1(m.trVmax)} m/s; estimated PASP ${f0(m.pasp)} mmHg (RAP ${m.rap} mmHg). ${cap(ph.word)} echocardiographic probability of pulmonary hypertension.` : 'Normal tricuspid and pulmonary valves; insufficient TR to estimate PASP.' });
-  if (m.shunt && path.vsd) F.push({ section: 'Ventricular septum', text: `${cap(m.shunt.label)} with left-to-right flow.` });
+  if (m.shunt && path.vsd) F.push({ section: 'Ventricular septum', text: `${cap(m.shunt.label)} with left-to-right flow${m.qpqs ? ` (Qp:Qs ${f1(m.qpqs)})` : ''}.` });
   const aoOk = [g.sovh, g.stjh, g.asch].every((x) => x.level === 'normal');
   F.push({ section: 'Aorta', text: aoOk ? `Normal aortic root and proximal ascending aorta (sinus ${f0(m.sov)} mm, STJ ${f0(m.stj)} mm, ascending ${f0(m.asc)} mm).` : `Aortic dimensions: sinus ${f0(m.sov)} mm, STJ ${f0(m.stj)} mm, ascending ${f0(m.asc)} mm — check against height-indexed limits.` });
   F.push({ section: 'Pericardium', text: eff ? `${cap(eff.word)} pericardial effusion (${f1(m.effusion)} cm posteriorly in PLAX).` : 'No pericardial effusion.' });
@@ -313,7 +315,7 @@ export function buildReport(path, patient = DEFAULT_PATIENT, learner = {}) {
   if (geom && geom !== 'normal geometry') C.push(`LV ${geom}.`);
   if (mr && !path.mr) C.push(`${cap(mr.word)} functional mitral regurgitation (RF ${f0(m.mrRf)}%).`);
   if (g.lavi.level !== 'normal') C.push(`${cap(g.lavi.word)} left atrium (LAVi ${f0(lavi)} mL/m²).`);
-  if (m.shunt) C.push(`${cap(m.shunt.label)}.`);
+  if (m.shunt) C.push(`${cap(m.shunt.label)}${m.qpqs ? ` (Qp:Qs ${f1(m.qpqs)})` : ''}.`);
   if (ph && ph.level !== 'normal') C.push(`${cap(ph.word)} echocardiographic probability of pulmonary hypertension (TR Vmax ${f1(m.trVmax)} m/s, PASP ~${f0(m.pasp)} mmHg).`);
   if (path.tr && !path.rvpo) C.unshift(`${cap(m.grade)} tricuspid regurgitation (TR Vmax ${f1(m.trVmax)} m/s).`);
   if (!rvOk) {

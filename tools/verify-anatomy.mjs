@@ -944,10 +944,10 @@ SECTION = 'Normal';
 // and a secundum ASD is a real LA-RA communication
 {
   const ias = GED.A.ias, n = ias.n;
-  const wall = (G, path) => {                          // non-atrial thickness across the fossa
+  const wall = (G, path, c = ias.fc) => {              // non-atrial thickness across the fossa (or the defect)
     let t = 0;
     for (let s = -1.5; s <= 1.5; s += 0.01) {
-      const p = add(ias.fc, mul(n, s));
+      const p = add(c, mul(n, s));
       const k = classify(p[0], p[1], p[2], G, path).tissue;
       if (k !== TISSUE.LA && k !== TISSUE.RA) t += 0.01;
     }
@@ -956,7 +956,7 @@ SECTION = 'Normal';
   check('Septum', 'fossa ovalis thickness (ED)', wall(GED, {}), [0.05, 0.3]);
   check('Septum', 'fossa ovalis thickness (ES)', wall(GES, {}), [0.05, 0.3]);
   const asd = { asd: true };
-  check('Septum', 'secundum ASD: LA-RA gap at the fossa', wall(geometryAt(0.5, asd), asd), [0, 0.02]);
+  check('Septum', 'secundum ASD: LA-RA gap at the fossa', wall(geometryAt(0.5, asd), asd, LM.IAS.asdC), [0, 0.02]);
 }
 // closed mitral valve coapts just below the annulus (no pathological tenting)
 const PLAX_N_X = () => { const c = cross(PLAX_N, [0, 1, 0]); return c; };
@@ -1920,11 +1920,9 @@ for (const [vn, view, vessels] of [['SC_IVC', EXTRA_VIEWS.SC_IVC, ['ivc']], ['ME
     let lo = 0, hi = 0;
     for (let i = i0 - 1; i >= 0 && sp[i] === 1; i--) lo += 0.05;
     for (let i = i1 + 1; i < sp.length && sp[i] === 1; i++) hi += 0.05;
-    // KNOWN-FAIL: only the superior (SVC-side) rim is in plane (~0.45 cm): the
-    // in-plane septum is ~1.8 cm and the 1.2 cm defect opens at its lower end
-    KNOWN = true;
+    // the oval defect sits mid-way along the in-plane septum: an inferior (IVC)
+    // and a superior (SVC) rim on either side of it
     check('Pathology', 'secundum ASD: both rims in ME bicaval (shorter rim)', Math.min(lo, hi), [0.5, 5], 'cm', `rims ${lo.toFixed(2)} / ${hi.toFixed(2)} cm`);
-    KNOWN = false;
   }
   SECTION = sec0;
 }
@@ -2587,6 +2585,128 @@ SECTION = 'Pathology';
     const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
     const mj = fs.readFileSync(new URL('../js/main.js', import.meta.url), 'utf8');
     assert(gc, 'colour bar carries numeric +/- Nyquist labels (cm/s)', /class="ds-top">\+\d+</.test(html) && /class="ds-bot">&minus;\d+</.test(html) && /updateColorScale/.test(mj));
+  }
+}
+
+// ---- shunts, secondary signs of disease, 3D vessels (review 10) --------------
+{
+  SECTION = 'Pathology';
+  const g = 'Shunt haemodynamics';
+  // secundum ASD: a phasic low-velocity L->R signal, a Qp:Qs of a significant
+  // shunt and the right-heart volume load it brings
+  const asd = PATHS.asd, sA = hemoSummary(asd);
+  check(g, 'secundum ASD: Qp:Qs', sA.QpQs, [1.5, 3], '', `shunt ${sA.shuntVol.toFixed(0)} mL/beat`);
+  for (const vn of ['SUBCOSTAL', 'MEBICAVAL']) {
+    const sp = renderDoppler(vn, 0.3, asd, {}).spec;
+    let mx = 0, mn = 99;
+    for (let c = 0; c < sp.cols; c++) { const v = Math.abs(sp.vs[c]); mx = Math.max(mx, v); mn = Math.min(mn, v); }
+    assert(g, `secundum ASD ${vn}: PW at the atrial septum`, sp.mode === 'PW' && sp.site === 'asd', `${sp.mode} ${sp.site}`);
+    check(g, `secundum ASD ${vn}: PW peak`, mx, [0.9, 1.5], 'm/s', `beam-flow angle ${sp.angleDeg.toFixed(0)} deg`);
+    check(g, `secundum ASD ${vn}: phasic (max / min |v| over the cycle)`, mx / Math.max(mn, 0.01), [2, 999], '', `min ${mn.toFixed(2)} m/s`);
+  }
+  {
+    // L->R in late systole and early diastole; dips as the RA contracts, peaks after the LA does
+    const v = (ph) => hemodynamics(ph, asd).vAsd;
+    assert(g, 'secundum ASD: L->R in late systole and early diastole, dip at RA contraction', v(0.38) > 0.8 && v(0.57) > 1.0 && v(0.85) < v(0.9) - 0.2,
+      `0.38 ${v(0.38).toFixed(2)}, 0.57 ${v(0.57).toFixed(2)}, 0.85 ${v(0.85).toFixed(2)}, 0.90 ${v(0.9).toFixed(2)} m/s`);
+  }
+  {
+    const area = (key, t) => { const S = planeSample(TTE_VIEWS.A4C, geo(0, key), PATHS[key], 0.08); let n = 0; for (const l of S.lab) if (l === t) n++; return n * S.step * S.step; };
+    const rv = area('asd', TISSUE.RV), lv = area('asd', TISSUE.LV);
+    check(g, 'secundum ASD: A4C ED RV area / LV area (RV volume load)', rv / lv, [1.0, 2.5], '', `RV ${rv.toFixed(1)}, LV ${lv.toFixed(1)} cm2`);
+  }
+  {
+    // B-mode: a drop-out of the septum at the defect in the subcostal view (a
+    // >= 0.8 cm run of blood-dark pixels along the septal line, LA one side, RA the other)
+    const R = renderBmode('SUBCOSTAL', 0, asd), pr = R.probe, G = R.G;
+    const L = unit(cross(pr.normal, LM.IAS_N));
+    let q0 = sub(LM.IAS.asdC, mul(pr.normal, dot(sub(LM.IAS.asdC, pr.pos), pr.normal)));
+    q0 = sub(q0, mul(LM.IAS_N, dot(sub(q0, LM.IAS_P), LM.IAS_N)));
+    const pix = (q) => { const r = sub(q, pr.pos); return Math.round(R.apexY + dot(r, pr.dir) * R.pxPerCm) * R.SW + Math.round(R.cx + dot(r, pr.lat) * R.pxPerCm); };
+    let bl = 0, nb = 0;
+    for (let k = 0; k < R.SW * R.SH; k++) if (R.kind[k] === TISSUE.LA || R.kind[k] === TISSUE.RA) { bl += R.grey[k]; nb++; }
+    const thr = Math.max(25, 2.5 * bl / Math.max(1, nb));
+    let best = 0, cur = 0, wall = 0;
+    for (let t = -3; t <= 3; t += 0.05) {
+      const q = add(q0, mul(L, t));
+      const la = classify(...sub(q, mul(LM.IAS_N, 0.35)), G, asd).tissue === TISSUE.LA;
+      const ra = classify(...add(q, mul(LM.IAS_N, 0.35)), G, asd).tissue === TISSUE.RA;
+      if (!(la && ra)) { cur = 0; continue; }
+      const k = pix(q);
+      if (R.grey[k] < thr) { cur += 0.05; best = Math.max(best, cur); } else { cur = 0; wall += 0.05; }
+    }
+    check(g, 'secundum ASD SUBCOSTAL B-mode: septal drop-out at the defect', best, [0.8, 3], 'cm', `septal tissue ${wall.toFixed(2)} cm beside it, grey threshold ${thr.toFixed(0)}`);
+  }
+  // VSD: the jet follows the LV-RV gradient, with a modest shunt
+  const sV = hemoSummary(PATHS.vsd);
+  check(g, 'restrictive VSD: peak jet velocity (Bernoulli on LV - RV systolic)', sV.vVsdPeak, [4.0, 5.5], 'm/s', `LV ${sV.PlvSys.toFixed(0)} mmHg`);
+  check(g, 'restrictive VSD: jet peak vs sqrt((LVsys - RVsys 26) / 4)', sV.vVsdPeak / Math.sqrt((sV.PlvSys - 26) / 4), [0.9, 1.1], '');
+  check(g, 'restrictive VSD: Qp:Qs', sV.QpQs, [1.1, 1.6], '');
+  assert(g, 'restrictive VSD: systolic jet, low-velocity in diastole', Math.abs(hemodynamics(0.2, PATHS.vsd).vVsd) > 4 && Math.abs(hemodynamics(0.75, PATHS.vsd).vVsd) < 1.5);
+  check(g, 'normal heart: no shunt (Qp:Qs)', hemoSummary({}).QpQs, [1, 1.0001], '');
+
+  const g2 = 'Secondary signs';
+  {
+    // severe AS: post-stenotic dilatation of the ascending aorta and an enlarged LA
+    const key = 'as', G0 = geo(0, key), GS = geo(esOf(key), key);
+    const asc = G0.A.ao.asc, ua = norm(sub(asc.b, asc.a)), c = add(asc.a, mul(ua, 1.4));
+    let best = 0;
+    for (let a = 0; a < Math.PI; a += 0.1) {
+      const e1 = unit(cross(ua, [1, 0, 0])), e2 = cross(ua, e1), d = add(mul(e1, Math.cos(a)), mul(e2, Math.sin(a)));
+      const r = run(G0, sub(c, mul(d, 3)), d, (t, p) => lumenDist(p[0], p[1], p[2], G0.A, 'AOROOT') < 0, 6);
+      best = Math.max(best, len(r));
+    }
+    check(g2, 'severe AS: proximal ascending aorta (post-stenotic dilatation)', best, [3.8, 4.8]);
+    const cl = add(GS.A.valves.aortic.c, mul(U, 0.8)), r = run(GS, cl, perpAo, isT(TISSUE.LA), 10, 0, 0, PATHS.as);
+    check(g2, 'severe AS: LA AP diameter (PLAX, ES)', len(r), [4.0, 5.0]);
+  }
+  {
+    // severe MS: spontaneous echo contrast in the LA
+    const lag = (path) => { const R = renderBmode('A4C', 0.3, path); let s = 0, n = 0; for (let k = 0; k < R.SW * R.SH; k++) if (R.kind[k] === TISSUE.LA) { s += R.grey[k]; n++; } return n ? s / n : 0; };
+    const ms = lag(PATHS.ms), nl = lag({});
+    check(g2, 'severe MS: mean LA blood grey (A4C) / normal (spontaneous echo contrast)', ms / Math.max(1, nl), [1.5, 8], '', `${ms.toFixed(1)} vs ${nl.toFixed(1)}`);
+  }
+  {
+    // chronic septal infarct: a thinned, echo-bright scar
+    const key = 'rwma', G0 = geo(0, key), A = G0.A, y = A.lv.apexY + 4.0;
+    const wallRun = (G, dir, path) => { const lv = run(G, [0, y, 0], dir, isT(TISSUE.LV), 6, 0, 0.3, path); if (!lv) return null; return run(G, [0, y, 0], dir, isT(TISSUE.MYO), 8, lv[1], 0, path); };
+    const sw = wallRun(G0, [-1, 0, 0], PATHS.rwma), nw = wallRun(GED, [-1, 0, 0], {});
+    check(g2, 'chronic septal infarct: ED septal thickness (mid)', len(sw), [0.4, 0.7], 'cm', `normal ${len(nw).toFixed(2)} cm`);
+    const R = renderBmode('A4C', 0, PATHS.rwma), pr = R.probe;
+    const greyAt = (q) => { const r = sub(q, pr.pos); const i0 = Math.round(R.cx + dot(r, pr.lat) * R.pxPerCm), j0 = Math.round(R.apexY + dot(r, pr.dir) * R.pxPerCm); let s = 0, n = 0; const rr = Math.round(0.5 * R.pxPerCm);
+      for (let j = j0 - rr; j <= j0 + rr; j++) for (let i = i0 - rr; i <= i0 + rr; i++) { const k = j * R.SW + i; if (R.kind[k] === TISSUE.MYO) { s += R.grey[k]; n++; } } return n ? s / n : 0; };
+    const lv = run(G0, [0, y, 0], [-1, 0, 0], isT(TISSUE.LV), 6, 0, 0.3, PATHS.rwma), lvL = run(G0, [0, y, 0], [1, 0, 0], isT(TISSUE.LV), 6, 0, 0.3, PATHS.rwma);
+    const qs = [-(lv[1] + len(sw) / 2), y, 0], ql = [lvL[1] + 0.5, y, 0];
+    const gs = greyAt(qs), gl = greyAt(ql);
+    check(g2, 'chronic septal infarct: scar grey minus lateral wall grey (A4C ED)', gs - gl, [20, 120], 'grey', `septum ${gs.toFixed(0)}, lateral ${gl.toFixed(0)}`);
+  }
+  {
+    const fs = await import('fs');
+    const mj = fs.readFileSync(new URL('../js/main.js', import.meta.url), 'utf8');
+    const line = mj.split('\n').find((l) => /^\s*effusion:\s*\{\s*look:/.test(l)) || '';
+    assert(g2, 'effusion checklist no longer promises a swinging heart (no tamponade variant)', line && !/swinging/i.test(line));
+  }
+
+  // 3D panel: the great vessels, coronaries and CS as separate, legend-coloured meshes
+  SECTION = '3D';
+  const g3 = '3D vessels';
+  const { VESSELS, VESSEL_BOX, VESSEL_CELL, VENOUS, ARTERIAL } = await import('../js/vessels3d.js');
+  const { buildMesh } = await import('../js/marching.js');
+  const BOX = { min: [-7.4, -9.4, -4.6], max: [5.2, 6.0, 6.6] };
+  for (const key of ['arch', 'desc', 'PA', 'coronary', 'CS', 'IVC', 'SVC', 'aorticRoot']) {
+    const v = VESSELS.find((q) => q.key === key);
+    const m = v && buildMesh((x, y, z) => v.fn(x, y, z, GED.A), v.moving ? BOX : VESSEL_BOX, v.moving ? 0.36 : VESSEL_CELL);
+    const tri = m ? m.indices.length / 3 : 0;
+    check(g3, `3D mesh '${key}': triangles`, tri, [100, 1e7], '');
+  }
+  {
+    const fs = await import('fs');
+    const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+    const sw = (re) => { const m = html.match(re); return m ? parseInt(m[1], 16) : null; };
+    const deoxy = sw(/background:#([0-9a-f]{6})"><\/i>Deoxygenated/i), oxy = sw(/background:#([0-9a-f]{6})"><\/i>Oxygenated/i);
+    const col = (k) => VESSELS.find((q) => q.key === k).color;
+    assert(g3, '3D: PA in the legend\'s deoxygenated colour, the aorta in the oxygenated', col('PA') === deoxy && col('arch') === oxy && col('aorticRoot') === oxy && col('PA') !== col('aorticRoot'),
+      `PA ${col('PA').toString(16)}, legend ${deoxy && deoxy.toString(16)} / ${oxy && oxy.toString(16)}`);
   }
 }
 
