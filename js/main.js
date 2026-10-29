@@ -70,8 +70,8 @@ const CHECKS = {
   ms:       { look: ['Thickened/bright mitral leaflets', 'Small orifice', 'Accelerated diastolic inflow'], hint: 'Watch the diastolic inflow velocity on the spectral trace — it stays high and prolonged.' },
   as:       { look: ['Restricted aortic valve', 'Thick (hypertrophied) LV wall', 'High-velocity systolic jet'], hint: 'Note the peak velocity & ΔP — severe AS is >4 m/s (>64 mmHg).' },
   dcm:      { look: ['Enlarged rounded LV', 'Little wall thickening', 'Low EF'], hint: 'Compare LVIDd and EF in Measurements against a normal heart.' },
-  rwma:     { look: ['One akinetic wall segment', 'Normal thickening elsewhere', 'Reduced global EF'], hint: 'Pause in systole and watch the septum fail to thicken while the lateral wall does.' },
-  effusion: { look: ['Echo-free rim around the heart', 'Largest posteriorly', 'Swinging heart if large'], hint: 'Look behind the LV posterior wall for the dependent black crescent.' },
+  rwma:     { look: ['One akinetic wall segment', 'Thinned, bright scar', 'Normal thickening elsewhere', 'Reduced global EF'], hint: 'Pause in systole and watch the septum fail to thicken while the lateral wall does.' },
+  effusion: { look: ['Echo-free rim around the heart', 'Largest posteriorly', 'Anterior to the descending aorta'], hint: 'Look behind the LV posterior wall for the dependent black crescent.' },
   vsd:      { look: ['Interventricular septum', 'Systolic jet LV→RV', 'Turbulent mosaic'], hint: 'Centre the septum and pause in systole to catch the trans-septal jet.' },
   asd:      { look: ['Interatrial septum', 'Flow LA→RA', 'Dilated right heart'], hint: 'Use the subcostal window where the atrial septum lies across the beam.' },
   tr:       { look: ['Tricuspid valve', 'Systolic jet into the RA', 'Peak jet velocity → PA pressure'], hint: 'Peak TR velocity estimates pulmonary pressures — read it off the trace.' },
@@ -259,6 +259,18 @@ function drawLead(ctx, W, H, leadName, secShown, opts = {}) {
   }
 }
 
+// Colour-bar velocity labels: +/- the colour box's Nyquist limit in cm/s (the
+// box depth sets the PRF, so the limit can sit below the slider setting).
+let _cbarNyq = -1;
+function updateColorScale() {
+  const nq = Math.round((echo.colorNyquist || echo.nyquist) * 100);
+  if (nq === _cbarNyq) return;
+  _cbarNyq = nq;
+  const t = document.querySelector('.ds-top'), b = document.querySelector('.ds-bot');
+  if (t) t.textContent = '+' + nq;
+  if (b) b.textContent = '\u2212' + nq;
+}
+
 function drawEcg() {
   drawLead(ecgCtx, ecgCanvas.width, ecgCanvas.height, ecgLead, ECG_SECONDS * 0.62, { label: true });
 }
@@ -318,7 +330,9 @@ function loop(now) {
   heart3d.updateProbe(probe, echo.sectorHalf, echo.depthCm);
   // Particle advection can use a bounded step without altering the heart clock.
   heart3d.update(G, state.path, probe, advancing ? Math.min(dt, 0.05) : 0);
+  echo.rrSec = 60 / (state.hr || 72);
   echo.render(G, state.path, probe, playback.time);
+  updateColorScale();
 
   drawEcg();
   drawTwelveLead();

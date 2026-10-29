@@ -138,8 +138,9 @@ body {
   width: 14px; flex: 1; border-radius: 3px; margin: 16px 0;
   background: linear-gradient(180deg, #ffec3d, #ff8a1e, #d0301b 45%, #0a0a0a 50%, #1b4fa0 55%, #2b8ad0, #45e0ff);
 }
-.ds-top { position: absolute; top: 2px; }
-.ds-bot { position: absolute; bottom: 2px; }
+.ds-top { position: absolute; top: 2px; font-variant-numeric: tabular-nums; }
+.ds-bot { position: absolute; bottom: 2px; font-variant-numeric: tabular-nums; }
+.ds-unit { position: absolute; top: 50%; transform: translateY(-50%) rotate(-90deg); font-size: 8px; color: var(--muted); background: #05070c; padding: 0 2px; }
 
 .spectral-wrap { padding: 0 10px 10px; }
 .sp-label { font-size: 10px; color: var(--muted); display: block; margin-bottom: 3px; }

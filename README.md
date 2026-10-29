@@ -73,6 +73,8 @@ node tools/verify-scenario-ui.mjs # responsive header, scenario controls and lin
 node tools/verify-report.mjs    # structured echo report: BSE 2020 grading, conclusions, templates, dialog
 node tools/verify-feedback.mjs  # feedback dialog and api/feedback.js (validation, rate limit, fallbacks)
 node tools/verify-pathway.mjs   # learning pathway: question bank, scoring, case questions, mock exam
+node tools/review-pack.mjs out/ # image pack for an expert-panel review (echo + tissue maps per view, 3D, audits);
+                                # --scene <pathology> <VIEWS> <phase> renders one scene to check a change
 ```
 
 `docs/ANATOMY.md` describes the anatomical model, the audit and the expert-panel

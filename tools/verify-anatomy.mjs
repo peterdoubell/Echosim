@@ -19,11 +19,13 @@
 // commit that added it: it is printed but does not set the exit code.
 //
 // Usage: node tools/verify-anatomy.mjs [--verbose]     (exit 0 = all pass)
-import { geometryAt, classify, TISSUE, hemoSummary, hemodynamics, membSite, MEMB_T, VSD_RADIUS, shuntLabel, stenosisCw, FLOW } from '../js/cardiac-model.js';
+import { geometryAt, classify, TISSUE, hemoSummary, hemodynamics, membSite, MEMB_T, VSD_RADIUS, shuntLabel, stenosisCw, FLOW, eaRatio, trEnvelope } from '../js/cardiac-model.js';
+import { measureModel } from '../js/report.js';
 import { LM, REF, lumenDist, mitralLift, BODY_AX, diaphragmBelow, rwmaBlend, stomachDist, rapEstimate } from '../js/anatomy.js';
 import { MS_AREA } from '../js/hemodynamics.js';
 import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, ALL_VIEWS as ALL_V } from '../js/views.js';
-import { renderBmode, beamSample, speckleAxis } from './bmode.mjs';
+import { renderBmode, beamSample, speckleAxis, renderDoppler } from './bmode.mjs';
+import { velocityAt, VALVE_DEFS } from '../js/cardiac-model.js';
 
 const VERBOSE = process.argv.includes('--verbose');
 const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
@@ -185,7 +187,7 @@ check('LV', 'apical wall thickness', apexWall, [0.4, 0.8], 'cm', 'thinner than b
   const c0 = [0, y, 0], c = sub(c0, mul(a4.normal, dot(sub(c0, a4.pos), a4.normal)));
   let n = 0;
   for (let t = -4; t <= 4; t += 0.01) { const p = add(c, mul(lat, t)); if (classify(p[0], p[1], p[2], GES, {}).tissue === TISSUE.LV) n++; }
-  check('LV', 'A4C mid-cavity width (ES)', n * 0.01, [2.2, 4.0]);
+  check('LV', 'A4C mid-cavity width (ES)', n * 0.01, [2.6, 3.6]);
 }
 
 // LV volumes by voxel integration of the rendered LV blood pool below the valves
@@ -308,9 +310,11 @@ check('LA', 'LA volume (voxel, ES)', laV, [30, 70], 'mL', 'LAVI 16-34 mL/m2 x BS
 {
   const w = inPlane(sub(GED.A.valves.mitral.c, GED.A.valves.tricuspid.c), a4c.normal);  // toward the LV
   const onPlane = (p) => sub(p, mul(a4c.normal, dot(sub(p, a4c.pos), a4c.normal)));
+  // (the caliper spans the cavity across a moderator band or trabecula up to
+  // 0.5 cm thick, as a sonographer's RVD2 does: free-wall endocardium to septum)
   const rvAt = (yy) => {
     const c = onPlane([-3.5, yy, 0]);
-    return run(GED, sub(c, mul(w, 5)), w, isT(TISSUE.RV, TISSUE.VALVE), 9);
+    return run(GED, sub(c, mul(w, 5)), w, isT(TISSUE.RV, TISSUE.VALVE), 9, 0, 0.5);
   };
   const rvd1 = rvAt(GED.A.valves.tricuspid.c[1] - 1.0);
   const rvd2 = rvAt(-3.6);
@@ -940,10 +944,10 @@ SECTION = 'Normal';
 // and a secundum ASD is a real LA-RA communication
 {
   const ias = GED.A.ias, n = ias.n;
-  const wall = (G, path) => {                          // non-atrial thickness across the fossa
+  const wall = (G, path, c = ias.fc) => {              // non-atrial thickness across the fossa (or the defect)
     let t = 0;
     for (let s = -1.5; s <= 1.5; s += 0.01) {
-      const p = add(ias.fc, mul(n, s));
+      const p = add(c, mul(n, s));
       const k = classify(p[0], p[1], p[2], G, path).tissue;
       if (k !== TISSUE.LA && k !== TISSUE.RA) t += 0.01;
     }
@@ -952,7 +956,7 @@ SECTION = 'Normal';
   check('Septum', 'fossa ovalis thickness (ED)', wall(GED, {}), [0.05, 0.3]);
   check('Septum', 'fossa ovalis thickness (ES)', wall(GES, {}), [0.05, 0.3]);
   const asd = { asd: true };
-  check('Septum', 'secundum ASD: LA-RA gap at the fossa', wall(geometryAt(0.5, asd), asd), [0, 0.02]);
+  check('Septum', 'secundum ASD: LA-RA gap at the fossa', wall(geometryAt(0.5, asd), asd, LM.IAS.asdC), [0, 0.02]);
 }
 // closed mitral valve coapts just below the annulus (no pathological tenting)
 const PLAX_N_X = () => { const c = cross(PLAX_N, [0, 1, 0]); return c; };
@@ -991,10 +995,7 @@ const PLAX_N_X = () => { const c = cross(PLAX_N, [0, 1, 0]); return c; };
   // the plane follows the posterior annulus down, so it does not climb into the
   // posterior AV groove in systole (a coronary-sinus crescent reads as an
   // effusion); a small cut of the sinus near the crux is acceptable
-  // KNOWN-FAIL (marginal, from combining the review-9 fixes): 101 vs 100 samples after the RV/annulus mechanics change
-  KNOWN = true;
   check('PSAX-MV', 'coronary sinus in plane at ES (samples)', cs, [0, 100], '');
-  KNOWN = false;
 }
 // moderator band in the four-chamber plane; LAA cut by the A2C
 {
@@ -1175,12 +1176,9 @@ function erodeSurvivors(S, k, r) {
       }
     }
   }
-  // KNOWN-FAIL (marginal): the liver's upper (diaphragmatic) face under the heart
-  // still shows a nearly straight 3 cm stretch (residual 0.07 vs 0.1 cm) on the
-  // left of PSAX-MV at end-systole, where the dome sheet is locally flat
-  KNOWN = true;
+  // (the parasternal beams now stay above the flat central tendon: the liver they
+  // still reach is the curved dome edge at the sector margin)
   check('Liver', 'PSAX: straightest 3 cm of liver edge (max line-fit residual)', worst === 1e9 ? 1 : worst, [0.1, 99], 'cm', where);
-  KNOWN = false;
 }
 // one stomach, in the left upper quadrant: no extrahepatic wall band (gastric
 // wall or its fat) runs through the liver in the parasternal / subcostal views,
@@ -1534,6 +1532,130 @@ const laPart = (A, q) => {
   check('LA', 'A4C LA minor, minimum / maximum (ED / LA max)', a4ED.minor / a4M.minor, [0.78, 0.92], '');
   check('LA', 'A4C LA height / width at ED', a4ED.major / a4ED.minor, [1.0, 1.6], '');
 }
+// ---- parasternal / apical planes (review 10) --------------------------------
+// The parasternal beams run on behind the heart into the posterior mediastinum
+// and lung, not into the liver and the gastric fundus (those belong to the
+// subcostal window); PSAX-MV shows the LV and the RV crescent, not the RA and
+// the IVC; the A5C opens the LVOT into the aortic root; the A4C end-systolic
+// cavity matches the A2C; the RV inflow has the RA in the far field.
+{
+  const PL = 'Parasternal / apical planes';
+  const T = TISSUE;
+  const abdomen = (S) => cellsWhere(S, (l, k) => {
+    if (l === T.LIVER) return true;
+    const q = ptK(S, k);
+    if (l === T.VEIN) return diaphragmBelow(q[0], q[1], q[2]) > 0;
+    return (l === T.LUNG || l === T.VWALL || l === T.FAT) && stomachDist(q[0], q[1], q[2]) < 0.5 && diaphragmBelow(q[0], q[1], q[2]) > -0.4;
+  });
+  const sectorCells = (S) => cellsWhere(S, () => true).length;
+  for (const [nm, lim] of [['PLAX', 2], ['PSAX_AV', 2], ['PSAX_MV', 2], ['RVIT', 2], ['PSAX', 6]]) {
+    const v = TTE_VIEWS[nm] || EXTRA_VIEWS[nm];
+    for (const [tag, G] of [['ED', GED], ['ES', GES]]) {
+      const S = planeSample(v, G, {}, 0.1);
+      // KNOWN-FAIL: the RV inflow's left edge still reaches ~4 % liver at ES below
+      // the RV diaphragmatic wall; every roll / swing that clears it brings the LV
+      // into the plane (the 'RA and RV both shown' row) or loses the CS ostium
+      KNOWN = nm === 'RVIT' && tag === 'ES';
+      check(PL, `${nm}: liver + stomach share of the sector (${tag})`, 100 * abdomen(S).length / sectorCells(S), [0, lim], '%');
+      KNOWN = false;
+    }
+  }
+  // PSAX-MV: no RA, RV crescent over the LV
+  for (const [tag, G] of [['ED', GED], ['ES', GES]]) {
+    const S = planeSample(EXTRA_VIEWS.PSAX_MV, G, {}, 0.1);
+    check(PL, `PSAX-MV: RA in the plane (${tag})`, areaOf(S, cellsWhere(S, (l) => l === T.RA)), [0, 0.05], 'cm2');
+    const Tc = G.A.valves.tricuspid.c, Mc = G.A.valves.mitral.c;
+    const tv = cellsWhere(S, (l, k) => { if (l !== T.VALVE) return false; const q = ptK(S, k); return Math.hypot(...sub(q, Tc)) < Math.hypot(...sub(q, Mc)); });
+    // KNOWN-FAIL at ED: the tips of the open tricuspid leaflets (which hang into
+    // the RV inflow at this level) still show at the left sector edge, ~0.2 cm2
+    KNOWN = tag === 'ED';
+    check(PL, `PSAX-MV: tricuspid leaflet in the plane (${tag})`, areaOf(S, tv), [0, 0.02], 'cm2');
+    KNOWN = false;
+    const lv = cellsWhere(S, (l) => l === T.LV), rv = cellsWhere(S, (l) => l === T.RV);
+    const c = lv.reduce((m, k) => { const q = xd(S, k); return [m[0] + q[0] / lv.length, m[1] + q[1] / lv.length]; }, [0, 0]);
+    const bins = new Set();
+    for (const k of rv) { const q = xd(S, k); if (Math.hypot(q[0] - c[0], q[1] - c[1]) < 5.5) bins.add(Math.floor((Math.atan2(q[0] - c[0], -(q[1] - c[1])) * 180 / Math.PI + 360) / 5)); }
+    check(PL, `PSAX-MV: RV crescent arc round the LV (${tag})`, bins.size * 5, [90, 200], 'deg');
+  }
+  // A5C: LVOT, cusps and root in the plane, along the beam
+  {
+    const v = EXTRA_VIEWS.A5C;
+    const S = planeSample(v, GES, {}, 0.08), p = S.p;
+    check(PL, 'A5C: aortic root axis out of the plane', Math.asin(Math.abs(dot(LM.U_AO, p.normal))) * 180 / Math.PI, [0, 15], 'deg');
+    const lvot = unit(sub(GES.A.valves.aortic.c, GES.A.lv.apex || [0, GES.A.lv.apexY, 0]));
+    check(PL, 'A5C: LVOT (apex -> aortic valve) angle to the central beam', Math.acos(Math.min(1, Math.abs(dot(lvot, p.dir)))) * 180 / Math.PI, [0, 25], 'deg');
+    const av = GES.A.valves.aortic.c, rel = sub(av, p.pos), d0 = dot(rel, p.dir), x0 = dot(rel, p.lat);
+    let ui = [dot(LM.U_AO, p.dir), dot(LM.U_AO, p.lat)]; const un = Math.hypot(ui[0], ui[1]); ui = [ui[0] / un, ui[1] / un];
+    let run = 0, best = 0;
+    for (let t = -0.5; t < 8; t += 0.05) {
+      const q = add(p.pos, add(mul(p.dir, d0 + ui[0] * t), mul(p.lat, x0 + ui[1] * t)));
+      const l = classify(q[0], q[1], q[2], GES, {}).tissue;
+      if (l === T.AORTA) { run += 0.05; best = Math.max(best, run); } else if (l !== T.VALVE) run = 0;
+    }
+    check(PL, 'A5C: aortic root + ascending aorta run along the root axis (ES)', best, [3, 9]);
+    const cusp = cellsWhere(S, (l, k) => { if (l !== T.VALVE) return false; const q = xd(S, k); return Math.hypot(q[1] - d0, q[0] - x0) < 1.4; });
+    check(PL, 'A5C: aortic cusps in the plane at the annulus (ES)', areaOf(S, cusp), [0.3, 3], 'cm2');
+    for (const [tag, G] of [['ED', GED], ['ES', GES]]) {
+      const S2 = planeSample(v, G, {}, 0.08);
+      // (sinus pockets the cusps cut off from the main lumen are root, not extra)
+      const inRoot = (c) => c.filter((k) => { const q = ptK(S2, k); return lumenDist(q[0], q[1], q[2], G.A, 'AOROOT') < 0; }).length > c.length / 2;
+      const comps = components(S2, (l) => l === T.AORTA).comps.sort((a, b) => b.length - a.length);
+      const extra = comps.slice(1).filter((c) => !inRoot(c)).map((c) => areaOf(S2, c)).filter((a) => a >= 0.3);
+      check(PL, `A5C: aortic sections beyond the root, count / largest (${tag})`, extra.length + (extra[0] || 0) / 10, [0, 1.3], '',
+        `${extra.map((a) => a.toFixed(1)).join(' / ') || 'none'} cm2 (descending aorta <= 3 cm2)`);
+    }
+  }
+  // A4C end-systole: open cavity, area change consistent with the A2C
+  {
+    const area = (v, G) => { const S = planeSample(v, G, {}, 0.08); const c = components(S, (l) => l === T.LV).comps; const tot = c.reduce((s, x) => s + x.length, 0); const big = c.reduce((m, x) => Math.max(m, x.length), 0); return [areaOf(S, { length: big }), tot ? big / tot : 0]; };
+    const [a4d] = area(TTE_VIEWS.A4C, GED), [a4s, conn] = area(TTE_VIEWS.A4C, GES), [a2d] = area(TTE_VIEWS.A2C, GED), [a2s] = area(TTE_VIEWS.A2C, GES);
+    const f4 = 100 * (1 - a4s / a4d), f2 = 100 * (1 - a2s / a2d);
+    check(PL, 'A4C: LV area change ED -> ES', f4, [40, 55], '%', `${a4d.toFixed(1)} -> ${a4s.toFixed(1)} cm2`);
+    check(PL, 'A4C minus A2C LV area change', Math.abs(f4 - f2), [0, 8], 'pts', `A2C ${f2.toFixed(1)} %`);
+    check(PL, 'A4C: ES LV blood pool in one piece (largest region share)', conn, [0.97, 1], '');
+  }
+  // RV inflow: RV in the near field, RA in the far field
+  for (const [tag, G] of [['ED', GED], ['ES', GES]]) {
+    const S = planeSample(EXTRA_VIEWS.RVIT, G, {}, 0.1);
+    const dep = (lab) => { const c = cellsWhere(S, (l) => l === lab); return c.reduce((m, k) => m + xd(S, k)[1], 0) / Math.max(1, c.length); };
+    check(PL, `RVIT: RA centroid deeper than the RV centroid (${tag})`, dep(T.RA) - dep(T.RV), [3, 9]);
+  }
+  // PLAX: a rounded LA behind the root (no posterior venous tail), the CS at the
+  // posterior AV groove, no great-vessel sections beyond the root
+  for (const [tag, G] of [['ED', GED], ['ES', GES]]) {
+    const S = planeSample(TTE_VIEWS.PLAX, G, {}, 0.08), p = S.p;
+    const la = components(S, (l) => l === T.LA).comps.reduce((m, c) => (c.length > m.length ? c : m), []);
+    const H = hull(la.map((k) => xd(S, k)));
+    let ha = 0; for (let i = 0; i < H.length; i++) { const a = H[i], b = H[(i + 1) % H.length]; ha += a[0] * b[1] - a[1] * b[0]; }
+    // (>= 0.9: at ES the posterior wall of the aortic root flattens the LA's
+    // anterior face where the LA rises behind it; a posterior venous tail running
+    // down under the LV wall lowers it)
+    check(PL, `PLAX: LA solidity, area / convex hull (${tag})`, areaOf(S, la) / Math.max(1e-6, Math.abs(ha) / 2), [0.9, 1], '');
+    const cs = cellsWhere(S, (l, k) => { const q = ptK(S, k); return lumenDist(q[0], q[1], q[2], G.A, 'CS') < 0; });
+    const csC = cs.reduce((m, k) => { const q = xd(S, k); return [m[0] + q[0] / cs.length, m[1] + q[1] / cs.length]; }, [0, 0]);
+    const mv = VALVE_DEFS.mitral, mc = G.A.valves.mitral.c;
+    let w = cross(mv.n, p.normal); w = unit(w);
+    const ring = [1, -1].map((sg) => add(mc, mul(w, sg * mv.r))).map((q) => [dot(sub(q, p.pos), p.lat), dot(sub(q, p.pos), p.dir)]);
+    const hinge = ring[0][1] > ring[1][1] ? ring[0] : ring[1];
+    // KNOWN-FAIL: the CS runs in the AV groove outside the ~1 cm posterior wall, so
+    // its centre sits ~1.1-1.3 cm from the ring point of the posterior annulus
+    KNOWN = true;
+    check(PL, `PLAX: CS centre to the posterior mitral hinge (${tag})`, cs.length ? Math.hypot(csC[0] - hinge[0], csC[1] - hinge[1]) : null, [0, 1.0]);
+    const ao = components(S, (l) => l === T.AORTA).comps.sort((a, b) => b.length - a.length);
+    const rootX = ao.length ? ao[0].reduce((m, k) => m + xd(S, k)[0], 0) / ao[0].length : 0;
+    let beyond = 0;
+    for (const c of components(S, (l) => l === T.AORTA || l === T.RA || l === T.VEIN).comps) {
+      if (c === ao[0] || areaOf(S, c) < 0.3) continue;
+      const x = c.reduce((m, k) => m + xd(S, k)[0], 0) / c.length;
+      if (x > rootX + 2) beyond += areaOf(S, c);
+    }
+    // KNOWN-FAIL: the SVC (right of the ascending aorta) and the right PA (behind
+    // it) are cut at the right sector edge; shifting the plane off one brings in
+    // the other
+    check(PL, `PLAX: great-vessel sections beyond the root (${tag})`, beyond, [0, 0.3], 'cm2');
+    KNOWN = false;
+  }
+}
 SECTION = 'TEE';
 {
   // the appendage along its length in ME LAA and ME2C, and no ventricular wall
@@ -1551,6 +1673,127 @@ SECTION = 'TEE';
       const myo = cellsWhere(S, (l, k) => { if (l !== TISSUE.MYO) return false; const q = ptK(S, k); return lumenDist(q[0], q[1], q[2], G.A, 'LV_EPI') < 0; });
       check('TEE', `MELAA: LV myocardium in the sector (${ph})`, areaOf(S, myo), [0, 2], 'cm2');
     }
+  }
+}
+
+// ---- review-10 TEE / subcostal / suprasternal plane content -----------------
+// ME LAA: a windsock appendage (2.5-7 cm2, >= 1.5 cm across) with the LUPV in
+// plane and the warfarin ridge reading bright; ME2C: the LA fills the near field
+// at end-diastole, the appendage shows, no RV; TG mid SAX: posteromedial
+// papillary muscle near the top, anterolateral at the right; DESC AO SAX: the
+// whole aortic section in the sector, ~1 cm from the probe; ME bicaval: the RA
+// appendage, a capacious RA, the crista and Eustachian valve in plane, no lung
+SECTION = 'TEE';
+{
+  // the appendage's width across its long axis (max over 0.2 cm stations)
+  const widthAcross = (S, cells) => {
+    const P = cells.map((k) => xd(S, k)), H = hull(P);
+    let L = 0, u = [1, 0];
+    for (const a of H) for (const b of H) { const l = Math.hypot(a[0] - b[0], a[1] - b[1]); if (l > L) { L = l; u = [(b[0] - a[0]) / l, (b[1] - a[1]) / l]; } }
+    const bins = new Map();
+    for (const [x, d] of P) {
+      const s = Math.round((x * u[0] + d * u[1]) / 0.2), t = -x * u[1] + d * u[0];
+      const b = bins.get(s) || [1e9, -1e9]; b[0] = Math.min(b[0], t); b[1] = Math.max(b[1], t); bins.set(s, b);
+    }
+    let w = 0; for (const [, b] of bins) w = Math.max(w, b[1] - b[0] + S.step);
+    return w;
+  };
+  for (const [G, ph] of [[GED, 'ED'], [GES, 'ES']]) {
+    const S = planeSample(TEE_VIEWS.MELAA, G, {}, 0.1);
+    const laa = cellsWhere(S, (l, k) => l === TISSUE.LA && laPart(G.A, ptK(S, k)) === 'laa');
+    const pv = cellsWhere(S, (l, k) => l === TISSUE.LA && laPart(G.A, ptK(S, k)) === 'pv');
+    check('TEE', `MELAA: appendage blood area in plane (${ph})`, areaOf(S, laa), [2.5, 7], 'cm2');
+    check('TEE', `MELAA: appendage width across its axis (${ph})`, widthAcross(S, laa), [1.5, 3.5]);
+    assert('TEE', `MELAA: LSPV lumen in plane (${ph})`, areaOf(S, pv) >= 0.5, `${areaOf(S, pv).toFixed(2)} cm2`);
+    // the LSPV-LAA ridge: peak grey within 0.25 cm of its centre
+    const R = renderBmode('MELAA', ph === 'ED' ? ED : ES, {}), g = R.G.A.pv.ridge, c = mul(add(g.a, g.b), 0.5), r = sub(c, R.probe.pos);
+    const px = R.cx + dot(r, R.probe.lat) * R.pxPerCm, py = R.apexY + dot(r, R.probe.dir) * R.pxPerCm, rad = Math.round(0.25 * R.pxPerCm);
+    let mx = 0;
+    for (let j = -rad; j <= rad; j++) for (let i = -rad; i <= rad; i++) if (i * i + j * j <= rad * rad) mx = Math.max(mx, R.grey[Math.round(py + j) * R.SW + Math.round(px + i)]);
+    check('TEE', `MELAA: warfarin ridge peak grey (${ph})`, mx, [170, 255], 'grey');
+  }
+  {
+    const S = planeSample(TEE_VIEWS.ME2C, GED, {}, 0.1), p = S.p, M = GED.A.valves.mitral.c;
+    check('TEE', 'ME2C: mitral annulus centre depth (ED)', dot(sub(M, p.pos), p.dir), [3.5, 5.5]);
+    const tot = cellsWhere(S, () => true).length, rv = cellsWhere(S, (l) => l === TISSUE.RV).length;
+    check('TEE', 'ME2C: RV share of the sector (ED)', 100 * rv / tot, [0, 2], '%');
+  }
+  // TG mid SAX: papillary-muscle centroids round the LV cavity centroid, from
+  // the near-field vertical, clockwise (screen right +)
+  for (const [G, ph] of [[GED, 'ED'], [GES, 'ES']]) {
+    const S = planeSample(TEE_VIEWS.TGSAX, G, {}, 0.1), p = S.p;
+    const lv = cellsWhere(S, (l) => l === TISSUE.LV).map((k) => xd(S, k));
+    const cx = lv.reduce((m, v) => m + v[0], 0) / lv.length, cd = lv.reduce((m, v) => m + v[1], 0) / lv.length;
+    const ang = (m) => { const q = mul(add(m.a, m.b), 0.5), r = sub(q, p.pos); return Math.atan2(dot(r, p.lat) - cx, cd - dot(r, p.dir)) * 180 / Math.PI; };
+    check('TEE', `TGSAX: posteromedial papillary muscle angle from the near-field vertical (${ph})`, ang(G.A.pap[1]), [-30, 60], 'deg');
+    check('TEE', `TGSAX: anterolateral papillary muscle angle (${ph})`, ang(G.A.pap[0]), [70, 150], 'deg');
+  }
+  for (const [G, ph] of [[GED, 'ED'], [GES, 'ES']]) {
+    const S = planeSample(TEE_VIEWS.DESCAO, G, {}, 0.05);
+    const ao = cellsWhere(S, (l) => l === TISSUE.AORTA).map((k) => xd(S, k)[1]);
+    check('TEE', `DESCAO: nearest aortic lumen depth (${ph})`, ao.length ? Math.min(...ao) : null, [0.5, 1.2]);
+    // the whole section (lumen and wall) in the sector: no lumen within 0.15 cm
+    // of the sector's edge
+    const cut = cellsWhere(S, (l, k) => {
+      if (l !== TISSUE.AORTA) return false; const [x, d] = xd(S, k), r = Math.hypot(x, d);
+      return r * Math.sin(0.66 - Math.abs(Math.atan2(x, d))) < 0.15;
+    });
+    assert('TEE', `DESCAO: aortic section inside the sector (${ph})`, cut.length === 0, `${cut.length} cells at the edge`);
+  }
+  for (const [G, ph] of [[GED, 'ED'], [GES, 'ES']]) {
+    const S = planeSample(TEE_VIEWS.MEBICAVAL, G, {}, 0.1), p = S.p, A = G.A;
+    const inRAA = (q) => A.ra.aa.some((g) => { const ab = sub(g.b, g.a), t = Math.max(0, Math.min(1, dot(sub(q, g.a), ab) / dot(ab, ab))); return Math.hypot(...sub(q, add(g.a, mul(ab, t)))) < g.r1 + (g.r2 - g.r1) * t; });
+    const raa = cellsWhere(S, (l, k) => l === TISSUE.RA && inRAA(ptK(S, k)));
+    check('TEE', `MEBICAVAL: RA appendage in plane (${ph})`, areaOf(S, raa), [1.5, 8], 'cm2');
+    // RA width across the caval line (between the orifices), against the SVC calibre
+    const im = (q) => { const r = sub(q, p.pos); return [dot(r, p.lat), dot(r, p.dir)]; };
+    const s0 = im(A.svc.a), i0 = im(A.ivc.a), L = Math.hypot(s0[0] - i0[0], s0[1] - i0[1]);
+    const u = [(s0[0] - i0[0]) / L, (s0[1] - i0[1]) / L], v = [-u[1], u[0]];
+    let wMax = 0;
+    for (let t = 0.2; t <= 0.8; t += 0.05) {
+      const c = [i0[0] + u[0] * L * t, i0[1] + u[1] * L * t];
+      let w = 0;
+      for (let h = -4; h <= 4; h += 0.05) {
+        const x = c[0] + v[0] * h, d = c[1] + v[1] * h;
+        const q = add(p.pos, add(mul(p.dir, d), mul(p.lat, x)));
+        if (classify(q[0], q[1], q[2], G, {}).tissue === TISSUE.RA) w += 0.05;
+      }
+      wMax = Math.max(wMax, w);
+    }
+    check('TEE', `MEBICAVAL: RA width across the caval line / SVC diameter (${ph})`, wMax / (2 * A.svc.r), [1.3, 5], '');
+    const tot = cellsWhere(S, () => true).length, lung = cellsWhere(S, (l) => l === TISSUE.LUNG).length;
+    check('TEE', `MEBICAVAL: lung share of the sector (${ph})`, 100 * lung / tot, [0, 3], '%');
+    const crosses = (g) => { const da = dot(sub(g.a, p.pos), p.normal), db = dot(sub(g.b, p.pos), p.normal); return Math.min(Math.abs(da), Math.abs(db)) < g.r || da * db < 0; };
+    assert('TEE', `MEBICAVAL: crista terminalis crosses the plane (${ph})`, A.crista.some(crosses));
+    assert('TEE', `MEBICAVAL: Eustachian valve crosses the plane (${ph})`, [A.eustachian, ...A.eustachianRim].some(crosses));
+  }
+}
+SECTION = 'Normal';
+{
+  // TTE A2C: the appendage at the anterior LA
+  for (const [G, ph] of [[GED, 'ED'], [GES, 'ES']]) {
+    const S = planeSample(TTE_VIEWS.A2C, G, {}, 0.1);
+    check('LA', `A2C: appendage area in plane (${ph})`, areaOf(S, cellsWhere(S, (l, k) => l === TISSUE.LA && laPart(G.A, ptK(S, k)) === 'laa')), [0.8, 8], 'cm2');
+  }
+  // subcostal IVC: the IVC into the RA with nothing of the left heart or the root
+  for (const [G, ph] of [[GED, 'ED'], [GES, 'ES']]) {
+    const S = planeSample(EXTRA_VIEWS.SC_IVC, G, {}, 0.1), A = G.A, tot = cellsWhere(S, () => true).length;
+    const avc = A.valves.aortic.c;
+    const avPx = cellsWhere(S, (l, k) => l === TISSUE.VALVE && Math.hypot(...sub(ptK(S, k), avc)) < 2.0).length;
+    const ao = cellsWhere(S, (l, k) => l === TISSUE.AORTA && lumenDist(...ptK(S, k), A, 'PA') > 0).length;
+    const pa = cellsWhere(S, (l, k) => l === TISSUE.AORTA && lumenDist(...ptK(S, k), A, 'PA') <= 0).length;
+    const la = cellsWhere(S, (l) => l === TISSUE.LA).length;
+    check('Subcostal IVC', `no aortic-valve pixels (${ph})`, avPx, [0, 0], 'px');
+    check('Subcostal IVC', `aortic pixels, share of the sector (${ph})`, 100 * ao / tot, [0, 1], '%');
+    check('Subcostal IVC', `LA and PA pixels (${ph})`, la + pa, [0, 0], 'px');
+  }
+  // suprasternal: the left brachiocephalic vein crosses the near field along the plane
+  {
+    const S = planeSample(EXTRA_VIEWS.SSN, GED, {}, 0.05);
+    const v = cellsWhere(S, (l) => l === TISSUE.VEIN).map((k) => xd(S, k));
+    const xs = v.map((q) => q[0]);
+    check('SSN', 'innominate vein in-plane length (lateral extent)', v.length ? Math.max(...xs) - Math.min(...xs) : 0, [2.5, 9]);
+    check('SSN', 'innominate vein area in plane', v.length * S.step * S.step, [1.0, 6], 'cm2');
   }
 }
 
@@ -1677,11 +1920,9 @@ for (const [vn, view, vessels] of [['SC_IVC', EXTRA_VIEWS.SC_IVC, ['ivc']], ['ME
     let lo = 0, hi = 0;
     for (let i = i0 - 1; i >= 0 && sp[i] === 1; i--) lo += 0.05;
     for (let i = i1 + 1; i < sp.length && sp[i] === 1; i++) hi += 0.05;
-    // KNOWN-FAIL: only the superior (SVC-side) rim is in plane (~0.45 cm): the
-    // in-plane septum is ~1.8 cm and the 1.2 cm defect opens at its lower end
-    KNOWN = true;
+    // the oval defect sits mid-way along the in-plane septum: an inferior (IVC)
+    // and a superior (SVC) rim on either side of it
     check('Pathology', 'secundum ASD: both rims in ME bicaval (shorter rim)', Math.min(lo, hi), [0.5, 5], 'cm', `rims ${lo.toFixed(2)} / ${hi.toFixed(2)} cm`);
-    KNOWN = false;
   }
   SECTION = sec0;
 }
@@ -1904,7 +2145,8 @@ SECTION = 'Pathology';
   // LV short-axis centroid, and planimeters to the grade's MVA (+/- 15 %)
   const ph0 = esOf('ms');
   for (const [tag, ph] of [['mid-diastole', (1 + ph0) / 2], ['late diastole', 0.9], ['ED', 0.99]]) {
-    const S = planeSample(EXTRA_VIEWS.PSAX_MV, geo(ph, 'ms'), PATHS.ms, 0.04, 10);
+    // (sampled to the view's own depth: the LV section reaches past 10 cm)
+    const S = planeSample(EXTRA_VIEWS.PSAX_MV, geo(ph, 'ms'), PATHS.ms, 0.04);
     const sec = components(S, (l) => l === TISSUE.LV || l === TISSUE.VALVE).comps.reduce((m, c) => (c.length > m.length ? c : m), []);
     const inSec = new Set(sec);
     const lvc = components(S, (l, k) => l === TISSUE.LV && inSec.has(k)).comps.sort((a, b) => b.length - a.length);
@@ -1935,8 +2177,10 @@ SECTION = 'Pathology';
     const iv = geo(0, key).A.ivc, d = 2 * iv.r, rap = rapEstimate(iv);
     const want = d > 2.1 && iv.collapse < 0.5 ? 15 : d <= 2.1 && iv.collapse > 0.5 ? 3 : 8;
     const plethoric = !!(PATHS[key].tr || PATHS[key].rvpo);
+    // severe MS: secondary pulmonary hypertension dilates the IVC (still collapsing): RAP 8
+    const expect = plethoric ? 15 : PATHS[key].mitralStenosis ? 8 : 3;
     assert('RAP', `${key}: RAP ${rap} mmHg matches the IVC (${d.toFixed(1)} cm, ${Math.round(iv.collapse * 100)} % sniff collapse)`,
-      rap === want && (plethoric ? rap === 15 : rap === 3));
+      rap === want && rap === expect);
   }
   // F29: compensated severe AS is not hypotensive — the LV carries the gradient
   const sAs = hemoSummary(PATHS.as);
@@ -1947,6 +2191,76 @@ SECTION = 'Pathology';
   check('Haemodynamics', 'PH: LV EDV (circulation, underfilled)', sPh.EDV, [80, 105], 'mL', `normal ${sum.EDV.toFixed(0)} mL`);
   const edvPh = volume(geo(0, 'phtn'), 'LV', LVBOX);
   check('Haemodynamics', 'PH: geometry EDV vs circulation EDV', Math.abs(edvPh - sPh.EDV) / sPh.EDV * 100, [0, 12], '%', `voxel ${edvPh.toFixed(0)} mL`);
+}
+
+{
+  // Review 10: a compliant LA (pulmonary-vein inflow, annular descent, active
+  // contraction) and mitral inertance shape the transmitral inflow and the LA
+  // pressure waveform; the right heart's contractility, size and septal motion
+  // follow its loading.
+  const ms = (v) => (v == null ? null : v * 1000);
+  check('Mitral inflow', 'normal: E acceleration time (MVO to E peak)', ms(sum.eAccel), [70, 110], 'ms');
+  check('Mitral inflow', 'normal: E deceleration time', ms(sum.eDT), [160, 240], 'ms');
+  // at 72 bpm the E wave (accel ~95 + DT ~165 ms after MVO at 0.517) ends at ~0.84,
+  // so diastasis is the short nadir before the A wave; it must not shut the valve
+  check('Mitral inflow', 'normal: diastasis nadir (flow between E and A / E peak)', sum.diastasis, [0.02, 0.15], '');
+  check('Mitral inflow', 'normal: E/A', eaRatio({}), [1.0, 2.0], '');
+  check('Mitral inflow', 'normal: E velocity', geo(0).hemo.vMitPeak, [0.7, 1.0], 'm/s');
+  const sMs = hemoSummary(PATHS.ms);
+  check('Mitral inflow', 'severe MS: pressure half-time of the CW envelope', ms(sMs.pht), [180, 280], 'ms', `220/PHT ${(0.22 / sMs.pht).toFixed(2)} cm2`);
+  check('Mitral inflow', 'severe MS: 220/PHT vs planimetered MVA', 0.22 / sMs.pht, [MS_AREA.severe - 0.25, MS_AREA.severe + 0.25], 'cm2');
+  assert('Mitral inflow', 'severe MS: A-wave bump on the CW envelope', sMs.aPresent);
+  const sMr = hemoSummary(PATHS.mr);
+  check('Mitral inflow', 'severe MR: LA v-wave (peak systolic LAP)', sMr.PlaVWave, [25, 50], 'mmHg', `mean LAP ${sMr.PlaMean.toFixed(0)}`);
+  const sD = hemoSummary(PATHS.dcm);
+  check('Mitral inflow', 'DCM: restrictive E/A', eaRatio(PATHS.dcm), [1.8, 4], '', `LAP ${sD.PlaMean.toFixed(0)} mmHg, EF ${sD.EF.toFixed(0)} %`);
+  check('Mitral inflow', 'DCM: E deceleration time', ms(sD.eDT), [80, 150], 'ms');
+  // the drawn LA empties as the circulation's LA does: the stiff MS atrium barely moves
+  const laA = (key, ph) => { const S = planeSample(TTE_VIEWS.A4C, geo(ph, key), PATHS[key], 0.1); return areaOf(S, cellsWhere(S, (l) => l === TISSUE.LA)); };
+  const laChange = (key) => { const lo = laA(key, 0), hi = laA(key, 0.5); return (hi - lo) / hi * 100; };
+  // (in the A4C plane the area change is the LA long-axis stretch, its reservoir strain)
+  const laN = laChange('normal');
+  check('LA', 'normal: A4C LA area change (max -> ED)', laN, [20, 45], '%');
+  check('LA', 'severe MS: A4C LA area change (max -> ED)', laChange('ms'), [5, Math.min(30, laN * 0.8)], '%', `normal ${laN.toFixed(0)} %`);
+
+  const MM = (key) => measureModel({ ...PATHS[key], grade: 'severe' });
+  const mN = MM('normal'), mPh = MM('phtn'), mD = MM('dcm'), mTr = MM('tr'), mMs = MM('ms');
+  check('Right heart', 'normal: TAPSE', mN.tapse / 10, [2.0, 2.8], 'cm');
+  check('Right heart', 'PH: TAPSE', mPh.tapse / 10, [1.0, 1.6], 'cm');
+  check('Right heart', 'PH: RV FAC (A4C)', mPh.rvfac, [15, 35], '%', `normal ${mN.rvfac.toFixed(0)} %`);
+  check('Right heart', 'DCM: TAPSE', mD.tapse / 10, [0.8, 1.7], 'cm');
+  check('Right heart', 'severe TR: RVD1', mTr.rvd1 / 10, [4.2, 6.5], 'cm');
+  check('Right heart', 'severe MS: PASP (4 vTR^2 + RAP)', mMs.pasp, [50, 70], 'mmHg', `TR ${mMs.trVmax.toFixed(1)} m/s, RAP ${mMs.rap}`);
+  // severe TR: early-peaking triangular CW envelope; PH: rounded mid-systolic
+  const trPk = (key) => { let b = 0, bp = 0; for (let p = 0.02; p < 0.48; p += 0.002) { const e = trEnvelope(p, { ...PATHS[key], grade: 'severe' }); if (e > b) { b = e; bp = p; } } return (bp - 0.02) / 0.46 * 100; };
+  check('Right heart', 'severe TR: CW peak time (% of systole)', trPk('tr'), [15, 40], '%', `PH ${trPk('phtn').toFixed(0)} %`);
+  // septal geometry: LV eccentricity index (PSAX, D2 parallel / D1 perpendicular to
+  // the septum, through the LV centroid), at ED and LV end-systole
+  const eiAt = (key, ph) => {
+    const G = geo(ph, key), S = planeSample(TTE_VIEWS.PSAX, G, PATHS[key], 0.1);
+    const big = (pred) => components(S, pred).comps.reduce((m, c) => (c.length > m.length ? c : m), []);
+    const lv = big((l) => l === TISSUE.LV), rv = big((l) => l === TISSUE.RV);
+    const cen = (cs) => { let x = 0, y = 0; for (const k of cs) { x += S.X(k % S.nx); y += S.D(Math.floor(k / S.nx)); } return [x / cs.length, y / cs.length]; };
+    const c = cen(lv), r = cen(rv), inLv = new Set(lv);
+    let u = [r[0] - c[0], r[1] - c[1]]; const L = Math.hypot(u[0], u[1]); u = [u[0] / L, u[1] / L];
+    const chord = (d) => {
+      let n = 0;
+      for (let t = -6; t <= 6; t += 0.02) {
+        const x = c[0] + d[0] * t, y = c[1] + d[1] * t, i = Math.round((x + S.X(0) * -1) / S.step), j = Math.round(y / S.step);
+        if (i >= 0 && i < S.nx && j >= 0 && j < S.nd && inLv.has(j * S.nx + i)) n++;
+      }
+      return n * 0.02;
+    };
+    return chord([-u[1], u[0]]) / chord(u);
+  };
+  const ei = (key) => [eiAt(key, 0), eiAt(key, esOf(key))];
+  const [phEd, phEs] = ei('phtn');
+  check('Right heart', 'PH: LV eccentricity index at ED (PSAX)', phEd, [1.1, 2], '', `normal ${eiAt('normal', 0).toFixed(2)}`);
+  check('Right heart', 'PH: eccentricity index ES minus ED (systolic D-shape)', phEs - phEd, [0.15, 1], '', `ES ${phEs.toFixed(2)}`);
+  for (const key of ['tr', 'asd']) {
+    const [ed, es] = ei(key);
+    check('Right heart', `${key}: eccentricity index ED minus ES (diastolic flattening)`, ed - es, [0.08, 1], '', `ED ${ed.toFixed(2)}, ES ${es.toFixed(2)}`);
+  }
 }
 
 {
@@ -1970,6 +2284,430 @@ SECTION = 'Pathology';
   const vd = vein.length ? Math.min(...vein.map((c) => c.reduce((m, k) => m + xd(S, k)[1], 0) / c.length)) : null;
   check('SSN', 'innominate vein in the near field (depth of its centroid)', vd, [1.5, 5.5], 'cm',
     vein.length ? `${(vein[0].length * 0.0025).toFixed(2)} cm2` : 'absent');
+}
+
+SECTION = 'Normal';
+// B-mode contrast and display (headless render): the heart border stands out
+// from the tissue around it, liver is no brighter than myocardium, the RV
+// cavity stays echolucent in the near field, the PLAX posterior wall and the
+// pericardium beneath it are distinct layers, extracardiac soft tissue never
+// renders fluid-dark, the full curved sector and depth ruler fit at 17 cm, the
+// lung behind the descending aorta mirrors it, and an effusion is echo-free.
+{
+  const T = TISSUE;
+  const FLUIDS = new Set([T.LV, T.RV, T.LA, T.RA, T.AORTA, T.VEIN, T.PERICARDIUM]);
+  const meanOf = (v) => (v.length ? v.reduce((a, b) => a + b, 0) / v.length : null);
+  const medOf = (v) => { const b = [...v].sort((x, y) => x - y); return b.length ? b[b.length >> 1] : null; };
+  const pctOf = (v, p) => { const b = [...v].sort((x, y) => x - y); return b.length ? b[Math.min(b.length - 1, Math.floor(p * b.length))] : null; };
+  // grey of the pixels of a label at least `rCm` from any other label (interior)
+  const interior = (R, K, rCm) => {
+    const W = R.SW, r = Math.max(1, Math.round(rCm * R.pxPerCm)), out = [];
+    for (let j = r; j < R.SH - r; j++) for (let i = r; i < W - r; i++) {
+      const q = j * W + i; if (!R.mask[q] || R.kind[q] !== K) continue;
+      let ok = true;
+      for (let dj = -r; dj <= r && ok; dj += r) for (let di = -r; di <= r; di += r) if (R.kind[q + dj * W + di] !== K) { ok = false; break; }
+      if (ok) out.push(R.grey[q]);
+    }
+    return out;
+  };
+  const byKind = (R, K) => { const v = []; for (let i = 0; i < R.SW * R.SH; i++) if (R.mask[i] && R.kind[i] === K) v.push(R.grey[i]); return v; };
+  {
+    const R = renderBmode('A4C', ED, {});
+    check('B-mode', 'A4C: myocardium minus surrounding soft tissue (mean grey)', meanOf(byKind(R, T.MYO)) - meanOf(byKind(R, T.OUTSIDE)), [25, 255], 'grey');
+  }
+  for (const nm of ['PSAX', 'A2C']) {
+    const R = renderBmode(nm, ED, {});
+    // (at matched depth: the myocardium within the liver's depth band, 10th-90th
+    // centile +-1 cm, so the comparison is of echogenicity, not of where the
+    // parasternal / apical beam happens to reach the liver; a view whose beams
+    // stay above the diaphragm, with under 0.5 cm2 of liver, has nothing to compare)
+    const lv = [], my = [];
+    for (let i = 0; i < R.SW * R.SH; i++) if (R.mask[i]) { if (R.kind[i] === T.LIVER) lv.push(i); else if (R.kind[i] === T.MYO) my.push(i); }
+    const lvCm2 = lv.length / R.pxPerCm ** 2;
+    if (lvCm2 < 0.5) assert('B-mode', `${nm}: myocardium minus liver (mean grey, liver iso or darker)`, true, `no liver in plane (${lvCm2.toFixed(2)} cm2)`);
+    else {
+      const ld = lv.map((i) => R.depth[i]).sort((a, b) => a - b), lo = ld[Math.floor(0.1 * ld.length)] - 1, hi = ld[Math.floor(0.9 * ld.length)] + 1;
+      const band = my.filter((i) => R.depth[i] >= lo && R.depth[i] <= hi).map((i) => R.grey[i]);
+      check('B-mode', `${nm}: myocardium minus liver (mean grey, liver iso or darker)`, meanOf(band.length > 200 ? band : byKind(R, T.MYO)) - meanOf(lv.map((i) => R.grey[i])), [0, 255], 'grey',
+        `${lvCm2.toFixed(1)} cm2 liver, myocardium at ${lo.toFixed(1)}-${hi.toFixed(1)} cm`);
+    }
+    if (nm === 'PSAX') check('B-mode', 'PSAX: RV cavity minus LV cavity (mean grey, no near-field haze)', meanOf(byKind(R, T.RV)) - meanOf(byKind(R, T.LV)), [-255, 12], 'grey');
+  }
+  {
+    // PLAX: column through the posterior wall to the pericardium beneath it
+    const R = renderBmode('PLAX', ED, {});
+    const pk = [], thick = [], pw = [], sept = [];
+    for (let th = -0.45; th <= 0.2; th += 0.01) {
+      const S = []; for (let d = 1; ; d += 0.02) { const q = beamSample(R, th, d); if (!q) break; S.push(q); }
+      let k = S.findIndex((q) => q.kind === T.LV); if (k < 0) continue;
+      let s1 = k - 1; while (s1 > 0 && S[s1].kind !== T.MYO) s1--;
+      let s0 = s1; while (s0 > 0 && S[s0].kind === T.MYO) s0--;
+      for (let q = s0 + 3; q < s1 - 2; q++) sept.push(S[q].grey);
+      while (k < S.length && S[k].kind === T.LV) k++;
+      const m0 = k; while (k < S.length && S[k].kind === T.MYO) k++; const m1 = k;
+      if (m1 - m0 < 20) continue;
+      for (let q = m0 + 3; q < m1 - 5; q++) pw.push(S[q].grey);
+      // the pericardium beneath it (as in the peak-above-wall check above)
+      let kp = m1; while (kp < S.length && S[kp].kind !== T.PERI_LINE && kp - m1 < 15) kp++;
+      if (kp >= S.length || S[kp].kind !== T.PERI_LINE) continue;
+      let p = 0, pi = m1; for (let q = m1 - 5; q < Math.min(S.length, m1 + 20); q++) if (S[q].grey > p) { p = S[q].grey; pi = q; }
+      let a = pi, b = pi; while (a > 0 && S[a - 1].grey > 0.85 * p) a--; while (b < S.length - 1 && S[b + 1].grey > 0.85 * p) b++;
+      pk.push(p); thick.push((b - a + 1) * 0.2);
+    }
+    const P = medOf(pk), PW = medOf(pw), SE = medOf(sept);
+    check('B-mode', 'PLAX: pericardial peak minus posterior-wall median (grey)', P - PW, [40, 255], 'grey', `${pk.length} beams, peak ${P}, wall ${PW}`);
+    check('B-mode', 'PLAX: pericardial band (> 85% of its peak) thickness', medOf(thick), [0, 3], 'mm');
+    check('B-mode', 'PLAX: posterior-wall median minus septal median (grey)', PW - SE, [-25, 25], 'grey', `septum ${SE}`);
+  }
+  {
+    // no extracardiac soft-tissue region > 1 cm2 renders fluid-dark (0.3 cm box
+    // mean < 30), outside air (beyond the pleura on its beam)
+    for (const nm of ['MELAA', 'MELAX', 'SC_IVC']) {
+      const R = renderBmode(nm, ED, {});
+      const W = R.SW, H = R.SH, r = Math.max(1, Math.round(0.15 * R.pxPerCm));
+      const dark = new Uint8Array(W * H);
+      for (let j = r; j < H - r; j++) for (let i = r; i < W - r; i++) {
+        const q = j * W + i;
+        if (!R.mask[q] || FLUIDS.has(R.kind[q]) || R.kind[q] === T.LUNG || R.depth[q] > R.lungD[Math.round(R.abin[q])] - 0.2) continue;
+        let s = 0, n = 0; for (let dj = -r; dj <= r; dj++) for (let di = -r; di <= r; di++) { const p = q + dj * W + di; if (R.mask[p]) { s += R.grey[p]; n++; } }
+        if (s / n < 30) dark[q] = 1;
+      }
+      let best = 0; const seen = new Uint8Array(W * H);
+      for (let q = 0; q < W * H; q++) if (dark[q] && !seen[q]) {
+        let n = 0; const st = [q]; seen[q] = 1;
+        while (st.length) { const p = st.pop(); n++; for (const d of [1, -1, W, -W]) { const z = p + d; if (z >= 0 && z < W * H && dark[z] && !seen[z]) { seen[z] = 1; st.push(z); } } }
+        best = Math.max(best, n);
+      }
+      check('B-mode', `${nm}: largest fluid-dark non-fluid region (soft tissue reads grey)`, best / (R.pxPerCm * R.pxPerCm), [0, 1], 'cm2');
+    }
+  }
+  {
+    // full curved sector at 17 cm (A4C): the fan never reaches the buffer's side
+    // edges and its bottom is an arc, not a flat cut
+    const R = renderBmode('A4C', ED, {});
+    let side = 0, maxW = 0, last = -1;
+    for (let j = 0; j < R.SH; j++) {
+      let lo = -1, hi = -1;
+      for (let i = 0; i < R.SW; i++) if (R.mask[j * R.SW + i]) { if (lo < 0) lo = i; hi = i; }
+      if (lo < 0) continue;
+      if (lo === 0 || hi === R.SW - 1) side++;
+      maxW = Math.max(maxW, hi - lo + 1); last = j;
+    }
+    let bw = 0; { let lo = -1, hi = -1; for (let i = 0; i < R.SW; i++) if (R.mask[last * R.SW + i]) { if (lo < 0) lo = i; hi = i; } bw = hi - lo + 1; }
+    check('B-mode', 'A4C 17 cm: sector rows touching the buffer side edges', side, [0, 0], 'rows');
+    check('B-mode', 'A4C 17 cm: deepest sector row width / fan max width (curved bottom)', bw / maxW, [0, 0.3], '');
+    // depth ruler: every label 2..16 drawn inside the canvas
+    const { EchoView } = await import('../js/echo.js');
+    const texts = [], noop = () => {};
+    const ctx = new Proxy({
+      createImageData: (w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+      measureText: () => ({ width: 0 }), getImageData: (x, y, w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+      createLinearGradient: () => ({ addColorStop: noop }), fillText: (t, x, y) => texts.push([String(t), x, y]),
+    }, { get: (t, k) => (k in t ? t[k] : noop), set: () => true });
+    const cv = { width: 430, height: 590, getContext: () => ctx, style: {} };
+    const ev = new EchoView(cv, null); ev._pinStride = 3; ev._stride = 3;
+    ev.viewName = 'A4C'; ev.colorOn = false; ev.showLabels = false; ev.depthCm = 17;
+    ev.render(GED, {}, TTE_VIEWS.A4C.probe(), 0);
+    const want = [2, 4, 6, 8, 10, 12, 14, 16];
+    const inC = want.filter((d) => texts.some(([t, x, y]) => t === String(d) && x >= 0 && x <= cv.width && y >= 0 && y <= cv.height));
+    check('B-mode', 'depth ruler at 17 cm: labels 2..16 drawn inside the canvas', inC.length, [want.length, want.length], `of ${want.length}`);
+  }
+}
+SECTION = 'TEE';
+{
+  // mirror-image artefact: the lung behind the descending aorta repeats it about
+  // the pleural plane (normalised cross-correlation of the grey in front of the
+  // plane with the grey at the mirrored points beyond it)
+  const R = renderBmode('DESCAO', ED, {});
+  const M = R.mirP, W = R.SW, a = [], b = [];
+  if (M) for (let j = 0; j < R.SH; j++) for (let i = 0; i < W; i++) {
+    const q = j * W + i; if (!R.mask[q]) continue;
+    const dist = (i - M[0]) * M[2] + (j - M[1]) * M[3];
+    if (dist > -0.3 * R.pxPerCm || dist < -3 * R.pxPerCm) continue;        // 0.3-3 cm in front of the plane
+    const mx = Math.round(i - 2 * dist * M[2]), my = Math.round(j - 2 * dist * M[3]);
+    if (mx < 0 || mx >= W || my < 0 || my >= R.SH) continue;
+    const p = my * W + mx; if (!R.mask[p] || R.depth[p] < R.lungD[Math.round(R.abin[p])] + 0.2) continue;
+    const th = Math.atan2(mx - R.cx, my - R.apexY); if (Math.abs(th) > R.half - 0.2) continue;
+    a.push(R.grey[q]); b.push(R.grey[p]);
+  }
+  let ncc = null;
+  if (a.length > 200) {
+    const ma = a.reduce((x, y) => x + y, 0) / a.length, mb = b.reduce((x, y) => x + y, 0) / b.length;
+    let sab = 0, saa = 0, sbb = 0;
+    for (let k = 0; k < a.length; k++) { const u = a[k] - ma, v = b[k] - mb; sab += u * v; saa += u * u; sbb += v * v; }
+    ncc = sab / Math.sqrt(saa * sbb);
+  }
+  check('B-mode', 'DESCAO: mirror image of the aorta beyond the pleura (NCC)', ncc, [0.3, 1], '', `${a.length} px pairs`);
+}
+SECTION = 'Pathology';
+{
+  // effusion: echo-free (as dark as blood), sharply bounded by bright layers
+  const T = TISSUE;
+  for (const nm of ['PLAX', 'A4C', 'SUBCOSTAL']) {
+    const R = renderBmode(nm, ED, { effusion: true }), W = R.SW, r = Math.max(1, Math.round(0.15 * R.pxPerCm));
+    const inner = (K) => {
+      const v = [];
+      for (let j = r; j < R.SH - r; j++) for (let i = r; i < W - r; i++) {
+        const q = j * W + i; if (!R.mask[q] || R.kind[q] !== K) continue;
+        let ok = true;
+        for (let dj = -r; dj <= r && ok; dj += r) for (let di = -r; di <= r; di += r) if (R.kind[q + dj * W + di] !== K) { ok = false; break; }
+        if (ok) v.push(R.grey[q]);
+      }
+      return v;
+    };
+    const mean = (v) => (v.length ? v.reduce((x, y) => x + y, 0) / v.length : null);
+    const fl = mean(inner(T.PERICARDIUM)), lv = mean(inner(T.LV));
+    const adj = [], rim = [];
+    for (let j = 3; j < R.SH - 3; j++) for (let i = 3; i < W - 3; i++) {
+      const q = j * W + i; if (!R.mask[q] || R.kind[q] === T.PERICARDIUM) continue;
+      let near = false;
+      for (let dj = -2; dj <= 2 && !near; dj++) for (let di = -2; di <= 2; di++) if (R.kind[q + dj * W + di] === T.PERICARDIUM) { near = true; break; }
+      if (near) { rim.push(R.grey[q]); if (R.kind[q] === T.MYO) adj.push(R.grey[q]); }
+    }
+    check('Effusion', `${nm}: fluid minus LV blood (interior mean grey)`, fl - lv, [-255, 5], 'grey', `fluid ${fl?.toFixed(0)}, LV ${lv?.toFixed(0)}`);
+    check('Effusion', `${nm}: adjacent myocardium minus fluid (mean grey)`, mean(adj) - fl, [60, 255], 'grey');
+    if (nm === 'PLAX') { rim.sort((x, y) => x - y); check('Effusion', 'PLAX: 95th-percentile grey of the 2 px rims of the fluid', rim[Math.floor(0.95 * rim.length)], [200, 255], 'grey'); }
+  }
+}
+
+// ---- Doppler: spectral traces at the standard sites, colour-flow shapes -----
+// Spectral rows read EchoView.spectralData (one cycle at the view's standard
+// site: per-column velocity toward the probe, mode, Nyquist, wrapped count).
+// Colour rows read the colour overlay of the full render, mapped back to heart
+// space through the sector geometry.
+{
+  SECTION = 'Doppler';
+  const P = { normal: {}, as: { aorticStenosis: true, lvh: true }, mr: { mr: true }, dcm: { dilated: true }, ms: { mitralStenosis: true } };
+  const spec = (pk, vn, opts = {}) => renderDoppler(vn, 0.3, P[pk], opts).spec;
+  const maxIn = (sp, a, b, sgn = 1) => { let m = 0; for (let c = 0; c < sp.cols; c++) { const ph = c / sp.cols; if (ph >= a && ph < b) m = Math.max(m, sgn * sp.vs[c]); } return m; };
+  const g = 'Spectral Doppler (standard site per view)';
+  const n4 = spec('normal', 'A4C');
+  assert(g, 'normal A4C: PW at the mitral leaflet tips', n4.mode === 'PW' && n4.site === 'mvTips', `${n4.mode} ${n4.site}`);
+  const E = maxIn(n4, 0.45, 0.75), A = maxIn(n4, 0.8, 1.0);
+  check(g, 'normal A4C: mitral E peak', E, [0.6, 1.0], 'm/s');
+  check(g, 'normal A4C: E/A', A > 0 ? E / A : null, [1, 2], '');
+  const n5 = spec('normal', 'A5C');
+  assert(g, 'normal A5C: PW in the LVOT', n5.mode === 'PW' && n5.site === 'lvot', `${n5.mode} ${n5.site}`);
+  check(g, 'normal A5C: LVOT peak (away from the probe)', n5.negMax, [0.8, 1.3], 'm/s', `toward ${n5.posMax.toFixed(2)}`);
+  const as5 = spec('as', 'A5C'), asL = spec('as', 'PLAX');
+  assert(g, 'severe AS A5C: CW through the aortic valve', as5.mode === 'CW' && as5.site === 'avCw', `${as5.mode} ${as5.site}`);
+  check(g, 'severe AS A5C: CW peak', as5.peak, [4, 5.5], 'm/s', `beam-flow angle ${as5.angleDeg.toFixed(0)} deg`);
+  check(g, 'severe AS: PLAX CW reading / A5C reading (v cos theta)', asL.peak / as5.peak, [0, 0.6], '', `PLAX ${asL.peak.toFixed(2)} m/s at ${asL.angleDeg.toFixed(0)} deg`);
+  // mitral closure (phase 0) to opening (first forward mitral flow after systole)
+  let MVO = 0.5; for (let ph = 0.3; ph < 0.8; ph += 0.002) if (hemodynamics(ph, P.mr).Qmv > 0) { MVO = ph; break; }
+  const hol = (sp, thr) => { let n = 0, k = 0; for (let c = 0; c < sp.cols; c++) { const ph = c / sp.cols; if (ph < MVO) { n++; if (-sp.vs[c] > thr) k++; } } return n ? k / n : 0; };
+  const mr4 = spec('mr', 'A4C');
+  assert(g, 'severe MR A4C: CW through the mitral valve', mr4.mode === 'CW' && mr4.site === 'mvCw', `${mr4.mode} ${mr4.site}`);
+  // the prolapse jet is eccentric (~37 deg to the apical beam): judged on the
+  // angle-corrected velocity, v / cos(theta) > 2 m/s
+  const cMR = Math.cos(mr4.angleDeg * Math.PI / 180);
+  check(g, 'severe MR A4C: fraction of MVC-MVO with angle-corrected |v| > 2 m/s (holosystolic)', hol(mr4, 2 * cMR), [0.9, 1], '', `MVO ${MVO.toFixed(3)}; peak ${mr4.negMax.toFixed(2)} m/s at ${mr4.angleDeg.toFixed(0)} deg`);
+  let MVOd = 0.5; for (let ph = 0.3; ph < 0.8; ph += 0.002) if (hemodynamics(ph, P.dcm).Qmv > 0) { MVOd = ph; break; }
+  const dc4 = spec('dcm', 'A4C');
+  // DCM: low LV systolic pressure (~100 mmHg) against a raised LAP (~20) gives a
+  // 70-80 mmHg LV-LA gradient, about 4.2-4.5 m/s, read through a small beam angle
+  check(g, 'DCM A4C: functional MR CW peak', dc4.negMax, [3.8, 5.2], 'm/s');
+  { let n = 0, k = 0; for (let c = 0; c < dc4.cols; c++) { const ph = c / dc4.cols; if (ph < MVOd) { n++; if (-dc4.vs[c] > 1.5) k++; } }
+    check(g, 'DCM A4C: functional MR fraction of MVC-MVO with |v| > 1.5 m/s', n ? k / n : 0, [0.85, 1], ''); }
+  const al = spec('ms', 'A4C', { site: 'mvTips', mode: 'PW', pwNyquist: 0.62 });
+  assert(g, 'PW gate on a ~2 m/s jet at Nyquist 0.62: stays PW and wraps (aliases)', al.mode === 'PW' && al.wrapped > 0, `${al.mode}, ${al.wrapped} wrapped samples`);
+  const n4c = spec('normal', 'A4C', { mode: 'CW' });
+  assert(g, 'mode is the operator\'s: forcing CW at the mitral site gives CW', n4c.mode === 'CW');
+
+  // colour flow
+  const gc = 'Colour flow (convergence, vena contracta, flame, Coanda, mosaic)';
+  const world = (R, i, j) => {
+    const x = (i - R.cx) / R.pxPerCm, y = (j - R.apexY) / R.pxPerCm, pr = R.probe;
+    return [pr.pos[0] + pr.dir[0] * y + pr.lat[0] * x, pr.pos[1] + pr.dir[1] * y + pr.lat[1] * x, pr.pos[2] + pr.dir[2] * y + pr.lat[2] * x];
+  };
+  const px2 = (R) => 1 / (R.pxPerCm * R.pxPerCm);
+  {
+    const R = renderDoppler('A4C', 0.56, {}, {});
+    const O = R.G.A.valves.mitral.c;
+    let n = 0, nRep = 0, nCol = 0;
+    for (let j = 0; j < R.SH; j++) for (let i = 0; i < R.SW; i++) {
+      const k = j * R.SW + i; if (R.alpha[k] < 0.5) continue;
+      nCol++; if (R.alpha[k] >= 0.9) nRep++;
+      if (R.kind[k] !== TISSUE.LA) continue;
+      const q = world(R, i, j);
+      if (Math.hypot(q[0] - O[0], q[1] - O[1], q[2] - O[2]) <= 2) n++;
+    }
+    check(gc, 'normal A4C early diastole: inflow colour on the LA side within 2 cm of the annulus', n * px2(R), [1, 99], 'cm2');
+    check(gc, 'colour replaces the grey (opaque) where flow is detected', nCol ? nRep / nCol : 0, [0.95, 1], '');
+    const b = R.box;
+    check(gc, 'colour box is a sub-sector ROI (fraction of the sector width)', b ? (b.t1 - b.t0) / (2 * R.echo.sectorHalf) : null, [0.2, 0.7], '');
+  }
+  {
+    const path = P.mr;
+    const R = renderDoppler('A4C', 0.25, path, {});
+    const G = R.G, O = G.A.valves.mitral.c, nrm = R.probe.normal;
+    // on-screen distance from the orifice (projected into the plane), atrial side only
+    const Op = sub(O, mul(nrm, dot(sub(O, R.probe.pos), nrm))), Vn = VALVE_DEFS.mitral.n;
+    const shell = (r0) => { let n = 0; for (let j = 0; j < R.SH; j++) for (let i = 0; i < R.SW; i++) {
+      const k = j * R.SW + i; if (R.alpha[k] < 0.5) continue;
+      const q = world(R, i, j), d = Math.hypot(q[0] - Op[0], q[1] - Op[1], q[2] - Op[2]);
+      if (Math.abs(d - r0) > 0.1 || dot(sub(q, O), Vn) < 0) continue;
+      const v = velocityAt(q[0], q[1], q[2], G, path); if (v && v.flow === FLOW.MR_JET) n++; }
+      return n * px2(R) / 0.2; };
+    const w0 = shell(0.5), w2 = shell(2.0);
+    check(gc, 'severe MR A4C: jet width 0.5 cm past the orifice (vena contracta)', w0, [0.1, 0.8], 'cm');
+    check(gc, 'severe MR A4C: jet width at 2 cm / at the vena contracta (flame)', w0 > 0 ? w2 / w0 : null, [2, 20], '', `${w2.toFixed(2)} cm at 2 cm`);
+    // eccentric posterior-leaflet prolapse jet: hugs the LA wall (Coanda)
+    const wd = []; let x0 = 1e9, x1 = -1, y0 = 1e9, y1 = -1;
+    for (let j = 0; j < R.SH; j++) for (let i = 0; i < R.SW; i++) {
+      const k = j * R.SW + i; if (R.alpha[k] < 0.5) continue;
+      const q = world(R, i, j);
+      if (Math.hypot(q[0] - O[0], q[1] - O[1], q[2] - O[2]) < 1.5) continue;
+      const v = velocityAt(q[0], q[1], q[2], G, path); if (!v || v.flow !== FLOW.MR_JET) continue;
+      wd.push(-lumenDist(q[0], q[1], q[2], G.A, 'LA_BODY'));
+      x0 = Math.min(x0, i); x1 = Math.max(x1, i); y0 = Math.min(y0, j); y1 = Math.max(y1, j);
+    }
+    wd.sort((a, b) => a - b);
+    check(gc, 'eccentric MR: median distance of the distal jet from the LA wall', wd.length ? wd[wd.length >> 1] : null, [-0.2, 1.0], 'cm', `${wd.length} px`);
+    // mosaic, not stripes: the hue field inside the jet has no periodic autocorrelation peak
+    const hv = (k) => R.rgb[k * 3 + 1] - 0.5 * (R.rgb[k * 3] + R.rgb[k * 3 + 2]);
+    const isJ = new Uint8Array(R.SW * R.SH);
+    let m = 0, cnt = 0;
+    for (let j = y0; j <= y1; j++) for (let i = x0; i <= x1; i++) { const k = j * R.SW + i; if (R.alpha[k] >= 0.5) { const q = world(R, i, j); const v = velocityAt(q[0], q[1], q[2], G, path); if (v && v.flow === FLOW.MR_JET && v.turbulent) { isJ[k] = 1; m += hv(k); cnt++; } } }
+    m /= cnt || 1;
+    let c0 = 0; for (let k = 0; k < isJ.length; k++) if (isJ[k]) c0 += (hv(k) - m) ** 2;
+    let worst = 0;
+    for (let dy = -8; dy <= 8; dy++) for (let dx = -8; dx <= 8; dx++) {
+      if (Math.abs(dx) < 4 && Math.abs(dy) < 4) continue;
+      let sc = 0, nn = 0, a2 = 0, b2 = 0;
+      for (let j = y0; j <= y1; j++) for (let i = x0; i <= x1; i++) { const k = j * R.SW + i, k2 = (j + dy) * R.SW + i + dx; if (!isJ[k] || !isJ[k2]) continue; const a = hv(k) - m, b = hv(k2) - m; sc += a * b; a2 += a * a; b2 += b * b; nn++; }
+      if (nn > 50) worst = Math.max(worst, sc / Math.sqrt(a2 * b2 + 1e-9));
+    }
+    check(gc, 'MR jet mosaic: largest off-zero hue autocorrelation (no stripes)', cnt > 50 ? worst : null, [-1, 0.3], '', `${cnt} turbulent px`);
+  }
+  {
+    const fs = await import('fs');
+    const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+    const mj = fs.readFileSync(new URL('../js/main.js', import.meta.url), 'utf8');
+    assert(gc, 'colour bar carries numeric +/- Nyquist labels (cm/s)', /class="ds-top">\+\d+</.test(html) && /class="ds-bot">&minus;\d+</.test(html) && /updateColorScale/.test(mj));
+  }
+}
+
+// ---- shunts, secondary signs of disease, 3D vessels (review 10) --------------
+{
+  SECTION = 'Pathology';
+  const g = 'Shunt haemodynamics';
+  // secundum ASD: a phasic low-velocity L->R signal, a Qp:Qs of a significant
+  // shunt and the right-heart volume load it brings
+  const asd = PATHS.asd, sA = hemoSummary(asd);
+  check(g, 'secundum ASD: Qp:Qs', sA.QpQs, [1.5, 3], '', `shunt ${sA.shuntVol.toFixed(0)} mL/beat`);
+  for (const vn of ['SUBCOSTAL', 'MEBICAVAL']) {
+    const sp = renderDoppler(vn, 0.3, asd, {}).spec;
+    let mx = 0, mn = 99;
+    for (let c = 0; c < sp.cols; c++) { const v = Math.abs(sp.vs[c]); mx = Math.max(mx, v); mn = Math.min(mn, v); }
+    assert(g, `secundum ASD ${vn}: PW at the atrial septum`, sp.mode === 'PW' && sp.site === 'asd', `${sp.mode} ${sp.site}`);
+    check(g, `secundum ASD ${vn}: PW peak`, mx, [0.9, 1.5], 'm/s', `beam-flow angle ${sp.angleDeg.toFixed(0)} deg`);
+    check(g, `secundum ASD ${vn}: phasic (max / min |v| over the cycle)`, mx / Math.max(mn, 0.01), [2, 999], '', `min ${mn.toFixed(2)} m/s`);
+  }
+  {
+    // L->R in late systole and early diastole; dips as the RA contracts, peaks after the LA does
+    const v = (ph) => hemodynamics(ph, asd).vAsd;
+    assert(g, 'secundum ASD: L->R in late systole and early diastole, dip at RA contraction', v(0.38) > 0.8 && v(0.57) > 1.0 && v(0.85) < v(0.9) - 0.2,
+      `0.38 ${v(0.38).toFixed(2)}, 0.57 ${v(0.57).toFixed(2)}, 0.85 ${v(0.85).toFixed(2)}, 0.90 ${v(0.9).toFixed(2)} m/s`);
+  }
+  {
+    const area = (key, t) => { const S = planeSample(TTE_VIEWS.A4C, geo(0, key), PATHS[key], 0.08); let n = 0; for (const l of S.lab) if (l === t) n++; return n * S.step * S.step; };
+    const rv = area('asd', TISSUE.RV), lv = area('asd', TISSUE.LV);
+    check(g, 'secundum ASD: A4C ED RV area / LV area (RV volume load)', rv / lv, [1.0, 2.5], '', `RV ${rv.toFixed(1)}, LV ${lv.toFixed(1)} cm2`);
+  }
+  {
+    // B-mode: a drop-out of the septum at the defect in the subcostal view (a
+    // >= 0.8 cm run of blood-dark pixels along the septal line, LA one side, RA the other)
+    const R = renderBmode('SUBCOSTAL', 0, asd), pr = R.probe, G = R.G;
+    const L = unit(cross(pr.normal, LM.IAS_N));
+    let q0 = sub(LM.IAS.asdC, mul(pr.normal, dot(sub(LM.IAS.asdC, pr.pos), pr.normal)));
+    q0 = sub(q0, mul(LM.IAS_N, dot(sub(q0, LM.IAS_P), LM.IAS_N)));
+    const pix = (q) => { const r = sub(q, pr.pos); return Math.round(R.apexY + dot(r, pr.dir) * R.pxPerCm) * R.SW + Math.round(R.cx + dot(r, pr.lat) * R.pxPerCm); };
+    let bl = 0, nb = 0;
+    for (let k = 0; k < R.SW * R.SH; k++) if (R.kind[k] === TISSUE.LA || R.kind[k] === TISSUE.RA) { bl += R.grey[k]; nb++; }
+    const thr = Math.max(25, 2.5 * bl / Math.max(1, nb));
+    let best = 0, cur = 0, wall = 0;
+    for (let t = -3; t <= 3; t += 0.05) {
+      const q = add(q0, mul(L, t));
+      const la = classify(...sub(q, mul(LM.IAS_N, 0.35)), G, asd).tissue === TISSUE.LA;
+      const ra = classify(...add(q, mul(LM.IAS_N, 0.35)), G, asd).tissue === TISSUE.RA;
+      if (!(la && ra)) { cur = 0; continue; }
+      const k = pix(q);
+      if (R.grey[k] < thr) { cur += 0.05; best = Math.max(best, cur); } else { cur = 0; wall += 0.05; }
+    }
+    check(g, 'secundum ASD SUBCOSTAL B-mode: septal drop-out at the defect', best, [0.8, 3], 'cm', `septal tissue ${wall.toFixed(2)} cm beside it, grey threshold ${thr.toFixed(0)}`);
+  }
+  // VSD: the jet follows the LV-RV gradient, with a modest shunt
+  const sV = hemoSummary(PATHS.vsd);
+  check(g, 'restrictive VSD: peak jet velocity (Bernoulli on LV - RV systolic)', sV.vVsdPeak, [4.0, 5.5], 'm/s', `LV ${sV.PlvSys.toFixed(0)} mmHg`);
+  check(g, 'restrictive VSD: jet peak vs sqrt((LVsys - RVsys 26) / 4)', sV.vVsdPeak / Math.sqrt((sV.PlvSys - 26) / 4), [0.9, 1.1], '');
+  check(g, 'restrictive VSD: Qp:Qs', sV.QpQs, [1.1, 1.6], '');
+  assert(g, 'restrictive VSD: systolic jet, low-velocity in diastole', Math.abs(hemodynamics(0.2, PATHS.vsd).vVsd) > 4 && Math.abs(hemodynamics(0.75, PATHS.vsd).vVsd) < 1.5);
+  check(g, 'normal heart: no shunt (Qp:Qs)', hemoSummary({}).QpQs, [1, 1.0001], '');
+
+  const g2 = 'Secondary signs';
+  {
+    // severe AS: post-stenotic dilatation of the ascending aorta and an enlarged LA
+    const key = 'as', G0 = geo(0, key), GS = geo(esOf(key), key);
+    const asc = G0.A.ao.asc, ua = norm(sub(asc.b, asc.a)), c = add(asc.a, mul(ua, 1.4));
+    let best = 0;
+    for (let a = 0; a < Math.PI; a += 0.1) {
+      const e1 = unit(cross(ua, [1, 0, 0])), e2 = cross(ua, e1), d = add(mul(e1, Math.cos(a)), mul(e2, Math.sin(a)));
+      const r = run(G0, sub(c, mul(d, 3)), d, (t, p) => lumenDist(p[0], p[1], p[2], G0.A, 'AOROOT') < 0, 6);
+      best = Math.max(best, len(r));
+    }
+    check(g2, 'severe AS: proximal ascending aorta (post-stenotic dilatation)', best, [3.8, 4.8]);
+    const cl = add(GS.A.valves.aortic.c, mul(U, 0.8)), r = run(GS, cl, perpAo, isT(TISSUE.LA), 10, 0, 0, PATHS.as);
+    check(g2, 'severe AS: LA AP diameter (PLAX, ES)', len(r), [4.0, 5.0]);
+  }
+  {
+    // severe MS: spontaneous echo contrast in the LA
+    const lag = (path) => { const R = renderBmode('A4C', 0.3, path); let s = 0, n = 0; for (let k = 0; k < R.SW * R.SH; k++) if (R.kind[k] === TISSUE.LA) { s += R.grey[k]; n++; } return n ? s / n : 0; };
+    const ms = lag(PATHS.ms), nl = lag({});
+    check(g2, 'severe MS: mean LA blood grey (A4C) / normal (spontaneous echo contrast)', ms / Math.max(1, nl), [1.5, 8], '', `${ms.toFixed(1)} vs ${nl.toFixed(1)}`);
+  }
+  {
+    // chronic septal infarct: a thinned, echo-bright scar
+    const key = 'rwma', G0 = geo(0, key), A = G0.A, y = A.lv.apexY + 4.0;
+    const wallRun = (G, dir, path) => { const lv = run(G, [0, y, 0], dir, isT(TISSUE.LV), 6, 0, 0.3, path); if (!lv) return null; return run(G, [0, y, 0], dir, isT(TISSUE.MYO), 8, lv[1], 0, path); };
+    const sw = wallRun(G0, [-1, 0, 0], PATHS.rwma), nw = wallRun(GED, [-1, 0, 0], {});
+    check(g2, 'chronic septal infarct: ED septal thickness (mid)', len(sw), [0.4, 0.7], 'cm', `normal ${len(nw).toFixed(2)} cm`);
+    const R = renderBmode('A4C', 0, PATHS.rwma), pr = R.probe;
+    const greyAt = (q) => { const r = sub(q, pr.pos); const i0 = Math.round(R.cx + dot(r, pr.lat) * R.pxPerCm), j0 = Math.round(R.apexY + dot(r, pr.dir) * R.pxPerCm); let s = 0, n = 0; const rr = Math.round(0.5 * R.pxPerCm);
+      for (let j = j0 - rr; j <= j0 + rr; j++) for (let i = i0 - rr; i <= i0 + rr; i++) { const k = j * R.SW + i; if (R.kind[k] === TISSUE.MYO) { s += R.grey[k]; n++; } } return n ? s / n : 0; };
+    const lv = run(G0, [0, y, 0], [-1, 0, 0], isT(TISSUE.LV), 6, 0, 0.3, PATHS.rwma), lvL = run(G0, [0, y, 0], [1, 0, 0], isT(TISSUE.LV), 6, 0, 0.3, PATHS.rwma);
+    const qs = [-(lv[1] + len(sw) / 2), y, 0], ql = [lvL[1] + 0.5, y, 0];
+    const gs = greyAt(qs), gl = greyAt(ql);
+    check(g2, 'chronic septal infarct: scar grey minus lateral wall grey (A4C ED)', gs - gl, [20, 120], 'grey', `septum ${gs.toFixed(0)}, lateral ${gl.toFixed(0)}`);
+  }
+  {
+    const fs = await import('fs');
+    const mj = fs.readFileSync(new URL('../js/main.js', import.meta.url), 'utf8');
+    const line = mj.split('\n').find((l) => /^\s*effusion:\s*\{\s*look:/.test(l)) || '';
+    assert(g2, 'effusion checklist no longer promises a swinging heart (no tamponade variant)', line && !/swinging/i.test(line));
+  }
+
+  // 3D panel: the great vessels, coronaries and CS as separate, legend-coloured meshes
+  SECTION = '3D';
+  const g3 = '3D vessels';
+  const { VESSELS, VESSEL_BOX, VESSEL_CELL, VENOUS, ARTERIAL } = await import('../js/vessels3d.js');
+  const { buildMesh } = await import('../js/marching.js');
+  const BOX = { min: [-7.4, -9.4, -4.6], max: [5.2, 6.0, 6.6] };
+  for (const key of ['arch', 'desc', 'PA', 'coronary', 'CS', 'IVC', 'SVC', 'aorticRoot']) {
+    const v = VESSELS.find((q) => q.key === key);
+    const m = v && buildMesh((x, y, z) => v.fn(x, y, z, GED.A), v.moving ? BOX : VESSEL_BOX, v.moving ? 0.36 : VESSEL_CELL);
+    const tri = m ? m.indices.length / 3 : 0;
+    check(g3, `3D mesh '${key}': triangles`, tri, [100, 1e7], '');
+  }
+  {
+    const fs = await import('fs');
+    const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+    const sw = (re) => { const m = html.match(re); return m ? parseInt(m[1], 16) : null; };
+    const deoxy = sw(/background:#([0-9a-f]{6})"><\/i>Deoxygenated/i), oxy = sw(/background:#([0-9a-f]{6})"><\/i>Oxygenated/i);
+    const col = (k) => VESSELS.find((q) => q.key === k).color;
+    assert(g3, '3D: PA in the legend\'s deoxygenated colour, the aorta in the oxygenated', col('PA') === deoxy && col('arch') === oxy && col('aorticRoot') === oxy && col('PA') !== col('aorticRoot'),
+      `PA ${col('PA').toString(16)}, legend ${deoxy && deoxy.toString(16)} / ${oxy && oxy.toString(16)}`);
+  }
 }
 
 // ---- report ------------------------------------------------------------------

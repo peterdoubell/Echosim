@@ -6,9 +6,10 @@
 // (BART) convention with a wall filter and aliasing, on-image anatomical
 // labels, live measurements, and a scrolling spectral-Doppler trace.
 
-import { classify, velocityAt, geometryAt, hemoSummary, TISSUE, VALVE_DEFS, FLOW, AORTIC_CUSPS, shuntLabel, stenosisCw } from './cardiac-model.js';
-import { LM, rapEstimate } from './anatomy.js';
+import { classify, velocityAt, geometryAt, hemoSummary, hemodynamics, TISSUE, VALVE_DEFS, FLOW, AORTIC_CUSPS, shuntLabel, stenosisCw, FLOW_AXES, FLOW_SITES, membSite } from './cardiac-model.js';
+import { LM, rapEstimate, diaphragmBelow, rwmaBlend, lumenDist } from './anatomy.js';
 import { clamp } from './mathutils.js';
+import { ALL_VIEWS } from './views.js';
 
 // Human-readable labels for the flow compartment that produced the frame's peak
 // velocity (surfaced to the UI as metrics.peakLabel for teaching context).
@@ -23,6 +24,7 @@ const FLOW_LABELS = {
   [FLOW.ASD_JET]: 'ASD jet',
   [FLOW.TR_JET]: 'TR jet',
   [FLOW.PV_FLOW]: 'pulmonary vein',
+  [FLOW.HV_FLOW]: 'hepatic vein',
 };
 
 // Echogenicity of the body wall at fractional depth f (0 = skin, 1 = pleura /
@@ -44,10 +46,20 @@ function chestWall(f, n, nn) {
 // interface echo (_specular, Z 1.85), so a thick or grazing cut through the
 // layer never renders as a solid bright slab. Converted once to amplitude.
 const DB = {
-  blood: -60, myo: -28, valve: -15, calc: -4, peri: -24, liver: -26, fat: -36,
-  vwall: -26, vein: -52, soft: -50, lung: -48,
+  blood: -60, myo: -28, valve: -15, calc: -4, peri: -24, liver: -32, fat: -36,
+  vwall: -26, vein: -52, soft: -46, lung: -48, medi: -38,
 };
 const AMP = Object.fromEntries(Object.entries(DB).map(([k, v]) => [k, Math.pow(10, v / 20)]));
+// Spontaneous echo contrast: amplitude gain (x3..x27, mean ~x10, about +20 dB) of
+// LA blood in a smooth cloud pattern that swirls about the LA centre with the
+// cardiac phase, so the smoke drifts rather than flickering like the speckle.
+function secSmoke(x, y, z, G) {
+  const c = G.A.la.c, a = 2 * Math.PI * G.phase * 0.5;
+  const dx = x - c[0], dz = z - c[2], dy = y - c[1];
+  const u = dx * Math.cos(a) - dz * Math.sin(a), w = dx * Math.sin(a) + dz * Math.cos(a);
+  const f = 0.5 + 0.5 * Math.sin(2.3 * u + 0.7 + 0.9 * dy) * Math.cos(1.9 * w - 0.4) * Math.sin(1.7 * dy + 1.6 * u + 1.1);
+  return 3 + 24 * f * f;
+}
 // Legacy linear echogenicity (0..1, tuned for the old power-law display) mapped
 // onto the same log scale, for the body-wall layers and effusion lines.
 const DR_REF = 55;
@@ -77,7 +89,7 @@ const ALPHA = {
   [TISSUE.LV]: 0.18, [TISSUE.RV]: 0.18, [TISSUE.LA]: 0.18, [TISSUE.RA]: 0.18,
   [TISSUE.AORTA]: 0.18, [TISSUE.VEIN]: 0.18, [TISSUE.PERICARDIUM]: 0.1,
   [TISSUE.MYO]: 0.52, [TISSUE.VALVE]: 0.8, [TISSUE.PERI_LINE]: 0.8, [TISSUE.VWALL]: 0.7,
-  [TISSUE.LIVER]: 0.5, [TISSUE.FAT]: 0.6, [TISSUE.OUTSIDE]: 0.5, [TISSUE.LUNG]: 0.5,
+  [TISSUE.LIVER]: 0.5, [TISSUE.FAT]: 0.6, [TISSUE.OUTSIDE]: 0.42, [TISSUE.LUNG]: 0.5,
 };
 // Default TGC slope: compensates the average soft-tissue/blood path, so tissue
 // is roughly flat with depth and the far field slightly darker and noisier.
@@ -87,11 +99,17 @@ const ALPHA_TGC = 0.38;
 // myocardium ~1.68, fat ~1.38, dense fibrous tissue ~1.8), used for the specular
 // interface echoes. OUTSIDE (mediastinal fat / connective tissue) is set low so
 // the parietal pericardium stands out as the strongest reflector, as on a scan.
-const PERI_K = TISSUE.PERI_LINE, PERI_GAIN = 4.5;    // pericardial interface: gain, cos^4 lobe
+const PERI_K = TISSUE.PERI_LINE, PERI_GAIN = 8;      // pericardial interface: gain, cos^16 lobe
+// views whose extracardiac OUTSIDE tissue is all moderately echogenic mediastinal /
+// abdominal soft tissue (suprasternal and subcostal windows)
+const MEDI_VIEWS = { SSN: 1, SUBCOSTAL: 1, SC_IVC: 1 };
+// fluid labels (blood pools, venous blood, effusion), indexed by tissue kind
+const FLUID_K = new Uint8Array(16);
+for (const k of [TISSUE.LV, TISSUE.RV, TISSUE.LA, TISSUE.RA, TISSUE.AORTA, TISSUE.VEIN, TISSUE.PERICARDIUM]) FLUID_K[k] = 1;
 const Z_OF = {
   [TISSUE.OUTSIDE]: 1.62, [TISSUE.MYO]: 1.68, [TISSUE.LV]: 1.61, [TISSUE.RV]: 1.61,
   [TISSUE.LA]: 1.61, [TISSUE.RA]: 1.61, [TISSUE.AORTA]: 1.61, [TISSUE.VALVE]: 1.72,
-  [TISSUE.PERICARDIUM]: 1.53, [TISSUE.LUNG]: 1.62, [TISSUE.PERI_LINE]: 1.85,
+  [TISSUE.PERICARDIUM]: 1.61, [TISSUE.LUNG]: 1.62, [TISSUE.PERI_LINE]: 1.85,
   [TISSUE.LIVER]: 1.66, [TISSUE.VEIN]: 1.61, [TISSUE.FAT]: 1.40, [TISSUE.VWALL]: 1.70,
 };
 
@@ -125,7 +143,10 @@ const EXTRA_LABELS = [
 // ~0.36 mm/px axially, so endocardial borders and speckle grain resolve finely on
 // capable hardware; the FPS-adaptive stride (up to 3) coarsens the SAMPLING on slow
 // machines while the larger buffer still upscales less blockily than before.
-const SW = 336;
+// The buffer is wide enough for the WHOLE sector at full depth (fan radius
+// SH * 0.94 px at a 0.66 rad half-angle, ~242 px either side of the apex), so the
+// fan keeps its curved bottom and is never cut off at the sides in deep views.
+const SW = 496;
 const SH = 420;
 const WALL_FILTER = 0.06; // m/s colour dead-zone (suppresses near-zero flow)
 
@@ -151,6 +172,102 @@ const ELEV_DIV = 0.025;   // cm half-thickness added per cm away from that focus
 // softening. A larger (e.g. 4x4 Bayer) pattern samples the slab more finely but
 // needs a wider kernel to cancel, and visibly blotches where the beam is tight.
 const ELEV_DITHER = Float32Array.from([-1, 0.333, -0.333, 1]); // sums to zero
+
+// ---- spectral Doppler: standard sample sites and per-view defaults ----------
+// A scanner's PW gate / CW cursor is put where the standard dataset takes each
+// trace: mitral inflow PW at the leaflet tips (A4C), LVOT PW just below the
+// aortic valve and CW through it (A5C), TR CW (A4C / RVIT / PSAX-AV), and so on.
+// Each site is a point in heart space, fixed while the heart moves through it
+// (as a real gate is), placed on the valve as it sits in the phase the trace is
+// read in: diastole ('E', at peak inflow) for inflow, systole ('S') otherwise.
+// `axis` is the flow direction there, for the beam-to-flow angle readout.
+const _add = (a, b, s) => [a[0] + b[0] * s, a[1] + b[1] * s, a[2] + b[2] * s];
+const DAX = FLOW_AXES;
+const mrAxis = (path) => (path.mr ? DAX.mrEcc : DAX.mr);
+const hasMR = (path) => !!(path.mr || path.dilated);
+export const DOPPLER_SITES = {
+  mvTips: { name: 'Mitral inflow', label: 'mitral inflow at the leaflet tips', mode: 'PW', ref: 'E',
+    at: (A) => _add(A.valves.mitral.c, DAX.mitralIn, 0.5), axis: () => DAX.mitralIn, box: (A) => A.valves.mitral.c },
+  mvCw: { name: 'Mitral valve CW', label: 'CW through the mitral valve', mode: 'CW', ref: (p) => (hasMR(p) ? 'S' : 'E'),
+    at: (A) => A.valves.mitral.c,
+    axis: (p) => (hasMR(p) ? mrAxis(p) : DAX.mitralIn),
+    box: (A, p) => (hasMR(p) ? _add(A.valves.mitral.c, mrAxis(p), 1.5) : A.valves.mitral.c) },
+  lvot: { name: 'LVOT', label: 'LVOT, just below the aortic valve', mode: 'PW', ref: 'S',
+    at: (A) => _add(A.valves.aortic.c, DAX.lvot, -1.0), axis: () => DAX.lvot, box: (A) => A.valves.aortic.c },
+  avCw: { name: 'Aortic valve CW', label: 'CW through the aortic valve', mode: 'CW', ref: 'S',
+    at: (A) => A.valves.aortic.c, axis: () => DAX.lvot, box: (A) => A.valves.aortic.c },
+  tvTips: { name: 'Tricuspid inflow', label: 'tricuspid inflow at the leaflet tips', mode: 'PW', ref: 'E',
+    at: (A) => _add(A.valves.tricuspid.c, DAX.tricuspidIn, 0.5), axis: () => DAX.tricuspidIn, box: (A) => A.valves.tricuspid.c },
+  tvCw: { name: 'Tricuspid valve CW', label: 'CW through the tricuspid valve', mode: 'CW', ref: (p) => (p.tr ? 'S' : 'E'),
+    at: (A) => A.valves.tricuspid.c, axis: (p) => (p.tr ? DAX.tr : DAX.tricuspidIn),
+    box: (A, p) => (p.tr ? _add(A.valves.tricuspid.c, DAX.tr, 1.5) : A.valves.tricuspid.c) },
+  rvot: { name: 'RVOT', label: 'RVOT, below the pulmonary valve', mode: 'PW', ref: 'S',
+    at: (A) => _add(A.valves.pulmonic.c, DAX.rvot, -0.5), axis: () => DAX.rvot, box: (A) => A.valves.pulmonic.c },
+  asd: { name: 'Atrial septum', label: 'interatrial septum (shunt flow)', mode: 'PW', ref: 'S',
+    at: () => FLOW_SITES.asd, axis: () => DAX.asd, box: () => FLOW_SITES.asd },
+  vsd: { name: 'VSD CW', label: 'CW across the VSD', mode: 'CW', ref: 'S',
+    at: (A, p, G) => (p.vsd === 'perimembranous' ? membSite(G).c : FLOW_SITES.vsd),
+    axis: (p, G) => (p.vsd === 'perimembranous' ? membSite(G).rad : DAX.vsd),
+    box: (A, p, G) => (p.vsd === 'perimembranous' ? membSite(G).c : FLOW_SITES.vsd) },
+  ascAo: { name: 'Ascending aorta CW', label: 'CW down the ascending aorta', mode: 'CW', ref: 'S',
+    at: (A) => _add(A.valves.aortic.c, DAX.lvot, 1.5), axis: () => DAX.lvot, box: (A) => _add(A.valves.aortic.c, DAX.lvot, 1.5) },
+};
+// The view's standard spectral-Doppler site for a pathology (null: no standard
+// trace in this view). Lesion-first: a regurgitant or stenotic valve the view is
+// built to interrogate takes CW; otherwise the view's routine PW trace.
+export function dopplerDefault(view, path = {}) {
+  const mr = hasMR(path), ms = !!path.mitralStenosis, as = !!path.aorticStenosis, tr = !!path.tr;
+  switch (view) {
+    case 'PLAX': return as ? 'avCw' : 'mvTips';
+    case 'PSAX': return path.vsd ? 'vsd' : null;
+    case 'PSAX_AV': return tr ? 'tvCw' : as ? 'avCw' : path.asd ? 'asd' : 'rvot';
+    case 'PSAX_MV': return ms ? 'mvCw' : 'mvTips';
+    case 'A4C': case 'ME4C':
+      return (mr || ms) ? 'mvCw' : tr ? 'tvCw' : path.vsd ? 'vsd' : path.asd ? 'asd' : 'mvTips';
+    case 'A5C': return as ? 'avCw' : 'lvot';
+    case 'A3C': return as ? 'avCw' : (mr || ms) ? 'mvCw' : 'lvot';
+    case 'A2C': case 'ME2C': return (mr || ms) ? 'mvCw' : 'mvTips';
+    case 'SUBCOSTAL': return path.asd ? 'asd' : path.vsd ? 'vsd' : tr ? 'tvCw' : 'tvTips';
+    case 'RVIT': return tr ? 'tvCw' : 'tvTips';
+    case 'SSN': return null;   // flow beyond the aortic root (arch) is not modelled; ascAo is user-selectable
+    case 'MELAX': return (mr || ms) ? 'mvCw' : as ? 'avCw' : 'mvTips';
+    case 'MEAVSAX': return tr ? 'tvCw' : path.asd ? 'asd' : 'rvot';
+    case 'MEBICAVAL': return path.asd ? 'asd' : null;
+    case 'MERVIO': return tr ? 'tvCw' : 'rvot';
+    default: return null;            // SC_IVC, MELAA, TGSAX, DESCAO: no modelled standard trace
+  }
+}
+// Phase a site is placed in: peak mitral inflow ('E') or peak ejection ('S').
+const _refPhaseCache = new WeakMap();
+function refPhases(path) {
+  let r = _refPhaseCache.get(path);
+  if (r) return r;
+  const s = hemoSummary(path);
+  let e = 0.56, eq = -1;
+  for (let ph = 0.45; ph < 0.8; ph += 0.01) { const q = hemodynamics(ph, path).Qmv; if (q > eq) { eq = q; e = ph; } }
+  let sp = 0.2, sq = -1;
+  for (let ph = 0.04; ph < 0.4; ph += 0.01) { const q = hemodynamics(ph, path).Qao; if (q > sq) { sq = q; sp = ph; } }
+  r = { E: geometryAt(e, path), S: geometryAt(sp, path), tMin: s.tMinVol };
+  _refPhaseCache.set(path, r);
+  return r;
+}
+// Doppler transmit frequency (MHz) for a given imaging frequency: cardiac PW/CW
+// and colour run lower than the B-mode (~2 MHz transthoracic, ~3.5-4 MHz TEE).
+const dopF = (fImg) => (fImg > 4 ? 3.8 : 2.0);
+// Highest unambiguous (Nyquist) velocity (m/s) for a sample at depth d (cm):
+// PRF <= c / (2 d), v_N = PRF c / (4 f0) = c^2 / (8 f0 d).
+const nyqLimit = (dCm, fMHz) => (1540 * 1540) / (8 * fMHz * 1e6 * Math.max(0.5, dCm) / 100);
+// Stand-in lead-II ECG (mV) over one cycle, phase 0 = QRS / mitral closure.
+function ecgAt(ph) {
+  const w = (c, s) => { let d = ph - c; d -= Math.round(d); return Math.exp(-(d / s) * (d / s)); };
+  return 0.14 * w(0.77, 0.022) - 0.12 * w(0.975, 0.006) + 1.0 * w(0.988, 0.006) - 0.25 * w(0.004, 0.007) + 0.3 * w(0.31, 0.045);
+}
+// deterministic hash -> [0,1)
+function hash01(a, b) {
+  let h = Math.imul(a, 0x8da6b343) ^ Math.imul(b, 0xd8163841);
+  h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d); h = Math.imul(h ^ (h >>> 12), 0x297a2d39); h ^= h >>> 15;
+  return (h >>> 0) / 4294967296;
+}
 
 export class EchoView {
   constructor(canvas, spectralCanvas) {
@@ -220,6 +337,26 @@ export class EchoView {
     // steered spectral gate: world point + line-of-sight velocity of this frame's
     // peak flow (null when no significant flow — _spectral falls back to centre).
     this._peakGate = null;
+
+    // Spectral Doppler. The gate / CW cursor sits at the view's standard site
+    // (dopplerDefault) unless the user picks one (dopplerSite = a DOPPLER_SITES
+    // key); dopplerMode 'auto' uses the site's mode (PW or CW), 'PW' / 'CW' force
+    // it. pwNyquist null = the PRF limit at the gate depth. rrSec scales the
+    // time axis. spectralData exposes the last sweep (per-column velocities,
+    // mode, scale, aliasing) for the UI and the audits.
+    this.dopplerSite = null;
+    this.dopplerMode = 'auto';
+    this.pwNyquist = null;
+    this.rrSec = 60 / 72;
+    this._dGate = null;
+    this.spectralData = null;
+    this._specCache = null;
+    // Colour box (ROI): width as a fraction of the sector, centred on the
+    // Doppler site. A wider / deeper box costs frame rate (more colour lines,
+    // each a packet of pulses) and a deeper one lowers the Nyquist limit (PRF).
+    this.cboxSize = 0.45;
+    this.colorNyquist = this.nyquist;
+    this._cbox = null;
 
     // memoised fixed-phase geometry for _computeMetrics (recomputed only when the
     // path/pathology object identity changes).
@@ -408,6 +545,11 @@ export class EchoView {
     // world point + line-of-sight velocity of the peak-flow sample this frame,
     // used to steer the spectral (PW) gate onto the actual jet.
     let pkx = 0, pky = 0, pkz = 0, pkLos = 0, pkTurb = false, hasPeak = false;
+    // spectral gate first: the colour box is centred on it
+    const dGate = this._resolveGate(G, path, probe);
+    const cb = this._colorBox(dGate);
+    const cT0 = cb.t0, cT1 = cb.t1, cD0 = cb.d0, cD1 = cb.d1, cNyq = cb.nyq;
+    const colorOn = this.colorOn;
     const t0 = (typeof performance !== 'undefined' ? performance.now() : 0);
     const st = this._stride;
     const refl = this._refl, depthBuf = this._depth, abin = this._abin;
@@ -437,14 +579,38 @@ export class EchoView {
     // into the reflectivity + context buffers. The B-mode grey is NOT formed here:
     // reflectivity is first PSF-convolved, then display-processed (TGC, artifacts,
     // log compression) and finally composited with the crisp Doppler overlay.
+    const rMax = SH * 0.94;
+    const inFan = (x, y) => {
+      const dy = y - apexY;
+      if (dy <= 0) return false;
+      const dx = x - cx;
+      return Math.abs(Math.atan2(dx, dy)) <= half && dx * dx + dy * dy <= rMax * rMax;
+    };
     const store = (i, j, e, depth, kind, mask, ab, dr, dg, db, da) => {
+      if (st === 1) {
+        const idx = j * SW + i;
+        refl[idx] = e; depthBuf[idx] = depth; kindBuf[idx] = kind;
+        maskBuf[idx] = mask; abin[idx] = ab;
+        dalpha[idx] = da;
+        if (da > 0) { const c3 = idx * 3; dcol[c3] = dr; dcol[c3 + 1] = dg; dcol[c3 + 2] = db; }
+        return;
+      }
+      // coarse sampling: the tissue label / reflectivity / colour are shared by the
+      // block, but the sector mask, depth and beam index are per pixel, so the fan
+      // keeps a smooth curved border and the TGC / PSF do not step block by block
       for (let bj = j; bj < j + st && bj < SH; bj++) {
         for (let bi = i; bi < i + st && bi < SW; bi++) {
           const idx = bj * SW + bi;
-          refl[idx] = e; depthBuf[idx] = depth; kindBuf[idx] = kind;
-          maskBuf[idx] = mask; abin[idx] = ab;
-          dalpha[idx] = da;
-          if (da > 0) { const c3 = idx * 3; dcol[c3] = dr; dcol[c3 + 1] = dg; dcol[c3 + 2] = db; }
+          const inside = mask && inFan(bi, bj);
+          refl[idx] = inside ? e : 0; kindBuf[idx] = inside ? kind : TISSUE.OUTSIDE;
+          maskBuf[idx] = inside ? 1 : 0;
+          if (inside) {
+            const ddx = bi - cx, ddy = bj - apexY;
+            depthBuf[idx] = Math.sqrt(ddx * ddx + ddy * ddy) / pxPerCm;
+            abin[idx] = clamp((Math.atan2(ddx, ddy) + half) * halfInv * NA - 0.5, 0, NA - 1);
+          } else { depthBuf[idx] = 0; abin[idx] = 0; }
+          dalpha[idx] = inside ? da : 0;
+          if (inside && da > 0) { const c3 = idx * 3; dcol[c3] = dr; dcol[c3 + 1] = dg; dcol[c3 + 2] = db; }
         }
       }
     };
@@ -453,11 +619,20 @@ export class EchoView {
     // dither can be looked up without a per-sample division in the hot loop.
     for (let j = 0, bj = 0; j < SH; j += st, bj++) {
       for (let i = 0, bi = 0; i < SW; i += st, bi++) {
-        const dx = i - cx;
-        const dy = j - apexY;
+        // sample at the block anchor, or (coarse sampling, block straddling the
+        // fan border) at its centre-most pixel inside the fan
+        let sx = i, sy = j;
+        if (st > 1 && !inFan(sx, sy)) {
+          let found = false;
+          for (let bj2 = j; bj2 < j + st && bj2 < SH && !found; bj2++) {
+            for (let bi2 = i; bi2 < i + st && bi2 < SW; bi2++) if (inFan(bi2, bj2)) { sx = bi2; sy = bj2; found = true; break; }
+          }
+        }
+        const dx = sx - cx;
+        const dy = sy - apexY;
         const rpix = Math.hypot(dx, dy);
         const theta = Math.atan2(dx, dy);
-        if (Math.abs(theta) > half || dy <= 0 || rpix > SH * 0.94) {
+        if (Math.abs(theta) > half || dy <= 0 || rpix > rMax) {
           store(i, j, 0, 0, TISSUE.OUTSIDE, 0, 0, 0, 0, 0, 0);
           continue;
         }
@@ -480,11 +655,13 @@ export class EchoView {
         // offset across the slab, and the PSF convolution downstream averages
         // neighbours that sampled different offsets — a Monte-Carlo estimate of
         // the partial-volume average at essentially no extra sampling cost.
+        let eOff = 0;
         if (elevOn) {
           const hw = (this.elevMin + Math.abs(depth - this.elevFocus) * this.elevDiv) * elevAmp;
           // indexed by SAMPLING BLOCK, not pixel, so the pattern survives striding
           const off = hw * ELEV_DITHER[((bj & 1) << 1) | (bi & 1)];
           wx += enx * off; wy += eny * off; wz += enz * off;
+          eOff = off;
         }
 
         const t = classify(wx, wy, wz, G, path);
@@ -524,32 +701,42 @@ export class EchoView {
           // Fibre anisotropy: ventricular myofibres run circumferentially, and
           // backscatter is strongest when the beam crosses them at right angles
           // (along the wall normal) — so in PSAX the anterior and inferior
-          // segments read brighter than the septal and lateral ones (~6 dB).
+          // segments read brighter than the septal and lateral ones. Kept to
+          // ~2 dB: any more and the PLAX posterior wall (beam along its normal)
+          // outshines the septum and merges with the pericardial line beneath it.
           if (wy < baseY + 0.3) {
             const rr = Math.hypot(wx, wz);
             if (rr > 0.5) {
               const c = (bd[0] * wx + bd[2] * wz) / rr;
-              e *= Math.sqrt(0.25 + 0.75 * c * c);
+              e *= Math.sqrt(0.6 + 0.4 * c * c);
             }
+          }
+          // effusion: the visceral pericardium (epicardium) is a thin bright line
+          // on the myocardium where the fluid begins one short step further along
+          // the beam — drawn on the wall side so the fluid itself stays black
+          if (path.effusion && classify(wx + 0.08 * bd[0], wy + 0.08 * bd[1], wz + 0.08 * bd[2], G, path).tissue === TISSUE.PERICARDIUM) e = AMP.peri * 3;
+          // chronic infarct: the thinned akinetic segment is fibrous scar, up to
+          // ~6 dB brighter than the viable myocardium round it
+          else if (path.rwma && G.A.lv.rwma && G.A.lv.rwma.chronic && lumenDist(wx, wy, wz, G.A, 'LV_EPI') < 0.05) {
+            const g = rwmaBlend(wx, wy, wz, G.A) / Math.max(0.01, G.A.lv.rwma.sev);
+            if (g > 0.05) e *= 1 + Math.min(1, g);
           }
         }
         else if (kind === TISSUE.VALVE) e = calc ? AMP.calc : AMP.valve;
         else if (kind === TISSUE.LV || kind === TISSUE.RV ||
                  kind === TISSUE.LA || kind === TISSUE.RA ||
-                 kind === TISSUE.AORTA) e = AMP.blood;
+                 kind === TISSUE.AORTA) {
+          e = AMP.blood;
+          // rheumatic MS: spontaneous echo contrast ('smoke') in the stagnant LA and
+          // its appendage — faint swirling clouds of aggregated red cells, slowly
+          // rotating through the cycle (the blood speckle still re-draws each frame)
+          if (kind === TISSUE.LA && path.mitralStenosis && path.grade !== 'mild') e *= secSmoke(wx, wy, wz, G);
+        }
         else if (kind === TISSUE.PERICARDIUM) {
-          e = legacyAmp(0.003); // echo-free effusion: distinctly dark, sharply bounded
-          // inner (visceral) pericardial line where the effusion abuts myocardium:
-          // probe one short step TOWARD the transducer for the myo interface.
-          const nbIn = classify(wx - 0.2 * bd[0], wy - 0.2 * bd[1], wz - 0.2 * bd[2], G, path);
-          if (nbIn.tissue === TISSUE.MYO) e = legacyAmp(0.85);
-          else {
-            // mirror: thin bright parietal-pericardium / lung line on the OUTER
-            // side — probe one step AWAY from the transducer; a non-fluid,
-            // non-myo neighbour there marks the fluid->outside interface.
-            const nbOut = classify(wx + 0.2 * bd[0], wy + 0.2 * bd[1], wz + 0.2 * bd[2], G, path);
-            if (nbOut.tissue !== TISSUE.PERICARDIUM && nbOut.tissue !== TISSUE.MYO) e = legacyAmp(0.8);
-          }
+          // effusion: a transudate is anechoic, as dark as the blood pool or darker
+          // (no cells to scatter), so it reads as a black band between two bright
+          // pericardial layers
+          e = AMP.blood * 0.7;
         }
         else if (depth < this.nearFieldCm && (kind === TISSUE.OUTSIDE || kind === TISSUE.LUNG || kind === TISSUE.LIVER)) {
           // body wall under the transducer: skin (bright), subcutaneous fat
@@ -564,7 +751,22 @@ export class EchoView {
         else if (kind === TISSUE.VWALL) e = AMP.vwall;
         else if (kind === TISSUE.VEIN) e = AMP.vein;
         else if (kind === TISSUE.LUNG) e = AMP.lung;
-        else e = AMP.soft;                        // mediastinal / thoracic soft tissue
+        else {
+          // mediastinal / thoracic soft tissue: fat and loose connective tissue,
+          // moderately echogenic, never fluid-dark. All of it in a TEE sector (the
+          // mediastinum around the oesophagus), and directly under a transthoracic
+          // window (anterior mediastinal fat, the arch's concavity from the notch,
+          // the abdominal wall over the liver), easing deeper to the darker
+          // soft-tissue background beside and behind the heart. Below the diaphragm
+          // (subcostal windows) it is abdominal wall / retroperitoneal tissue, and
+          // from the notch the superior mediastinum round the arch, and through the
+          // liver window the posterior mediastinum behind the heart: medi throughout.
+          if (this.nearFieldCm < 0.5 || MEDI_VIEWS[this.viewName] || diaphragmBelow(wx, wy, wz) > 0.5) e = AMP.medi;
+          else {
+            const u = clamp((depth - this.nearFieldCm - 2.5) / 2.5, 0, 1);
+            e = AMP.medi + (AMP.soft - AMP.medi) * u;
+          }
+        }
 
         // reflectivity `e` is the scatterer field; TGC / artifacts / log
         // compression are applied AFTER the PSF convolution (see _psfBlur +
@@ -572,7 +774,7 @@ export class EchoView {
         let dR = 0, dG = 0, dB = 0, dA = 0;
 
         // --- colour Doppler overlay ---
-        if (this.colorOn && depth < this.depthCm * 0.92) {
+        if (colorOn && depth >= cD0 && depth <= cD1 && theta >= cT0 && theta <= cT1) {
           const vel = velocityAt(wx, wy, wz, G, path);
           if (vel && vel.speed > 0.05) {
             // line-of-sight velocity: beamDir points away from probe
@@ -589,19 +791,11 @@ export class EchoView {
               pkx = wx; pky = wy; pkz = wz;
               pkLos = los; pkTurb = vel.turbulent; hasPeak = true;
             }
-            // Depth-dependent EFFECTIVE Nyquist: PRF falls with depth so deeper
-            // flow aliases earlier. this.nyquist stays the display baseline;
-            // nyqEff drives the colour aliasing + wall-filter scaling only.
-            const refDepth = this.depthCm * 0.5;
-            const nyqEff = this.nyquist * clamp(refDepth / Math.max(depth, refDepth), 0.5, 1);
-            // Wall filter scales with the effective Nyquist (PRF), so the colour
-            // dead-zone shrinks with the velocity scale at depth.
-            const wf = WALL_FILTER * nyqEff / this.nyquist;
+            // One PRF for the whole colour box (set by its deepest line), so one
+            // Nyquist limit; the wall filter scales with it.
+            const nyqEff = cNyq;
+            const wf = WALL_FILTER * nyqEff / Math.max(this.nyquist, 1e-3);
             if (alos > wf) {           // wall filter: suppress near-zero flow
-              // Colour-over-tissue priority keyed on the PRE-GAIN echogenicity e
-              // (gain/TGC/log independent) rather than the fully-scaled brightness
-              // b: only paint over near-anechoic blood, and changing the gain no
-              // longer mutes the PISA/jet by pushing b past a brightness threshold.
               // Colour writes only over a genuine blood pool (LV/RV/LA/RA/AORTA)
               // AND where the pre-gain echo is truly anechoic, so the low-
               // echogenicity speckle tail of myocardium never takes colour.
@@ -609,21 +803,20 @@ export class EchoView {
                               kind === TISSUE.LA || kind === TISSUE.RA ||
                               kind === TISSUE.AORTA;
               if (isBlood && e < 0.01) {
-                // Position-seeded jitter dithers the aliasing wrap boundary so a
-                // fast jet breaks into a TRUE mosaic instead of coherent hue-wrap
-                // stripes. Two spatial-frequency terms (a low-frequency sequential
-                // sample plus a high-frequency scrambled sample) sum toward
-                // ~±0.5*nyqEff so the aliasing boundary shatters rather than bands.
-                // Brightness in dopplerColor stays on the UNPERTURBED magnitude, so
-                // this shifts only where the wrap lands, never how bright flow reads.
-                const jLo = this.noise[(j * SW + i) % this.noise.length] - 0.5;
-                const jHi = this.noise[((i * 131 + j * 57) & 0x7fffffff) % this.noise.length] - 0.5;
-                const jitter = (jLo * 0.6 + jHi * 0.45) * nyqEff;
+                // Turbulent flow holds a random spread of velocities in every
+                // resolution cell, so its colour is a random mosaic: a per-cell
+                // random velocity (hashed from ~1.5 mm cells, re-drawn each frame
+                // like the blood scatterers) whose spread grows with the jet speed.
+                // Laminar flow keeps clean colour (and a clean reversal if it aliases).
+                let jitter = 0;
+                if (vel.turbulent) {
+                  const jc = 6.5;
+                  jitter = scatGauss(Math.floor(wx * jc), Math.floor(wy * jc), Math.floor(wz * jc), bloodSalt ^ 0x2545f491) *
+                    nyqEff * Math.min(1.1, 0.35 + alos / (3 * nyqEff));
+                }
                 const col = dopplerColor(los, nyqEff, vel.turbulent, jitter);
-                // translucent mosaic: alpha grows with detectable velocity so
-                // B-mode tissue stays visible under slow flow
-                const mag = clamp((alos - wf) / (nyqEff - wf), 0, 1);
-                dA = 0.40 + 0.34 * mag; // visible even for slow (normal) inflow
+                // colour REPLACES the grey wherever flow is detected (write priority)
+                dA = 0.92;
                 dR = col[0]; dG = col[1]; dB = col[2];
               }
             }
@@ -632,8 +825,31 @@ export class EchoView {
 
         const ab = clamp((theta + half) * halfInv * NA - 0.5, 0, NA - 1);
         store(i, j, e, depth, kind, 1, ab, dR, dG, dB, dA);
-        for (let bj2 = j; bj2 < j + st && bj2 < SH; bj2++) {
-          for (let bi2 = i; bi2 < i + st && bi2 < SW; bi2++) { const q = bj2 * SW + bi2; sI[q] = gI; sQ[q] = gQ; }
+        if (st === 1) { const q = j * SW + i; sI[q] = gI; sQ[q] = gQ; }
+        else {
+          // coarse sampling: the label is shared by the block, but every pixel
+          // draws its OWN scatterers at its own material position. A block-constant
+          // scatterer field would read as blotchy 3 px speckle and, being spatially
+          // correlated, would leave the speckle envelope several dB too bright after
+          // the PSF (whose normalisation assumes an uncorrelated field).
+          for (let bj2 = j; bj2 < j + st && bj2 < SH; bj2++) {
+            for (let bi2 = i; bi2 < i + st && bi2 < SW; bi2++) {
+              const q = bj2 * SW + bi2;
+              if (!maskBuf[q]) continue;
+              const pdx = bi2 - cx, pdy = bj2 - apexY;
+              const pd = Math.sqrt(pdx * pdx + pdy * pdy) / pxPerCm, pth = Math.atan2(pdx, pdy);
+              const pc = Math.cos(pth), ps = Math.sin(pth);
+              let px = P[0] + pd * (pc * probe.dir[0] + ps * probe.lat[0]) + enx * eOff;
+              let py = P[1] + pd * (pc * probe.dir[1] + ps * probe.lat[1]) + eny * eOff;
+              let pz = P[2] + pd * (pc * probe.dir[2] + ps * probe.lat[2]) + enz * eOff;
+              if (!isBloodK) {
+                if (py < baseY + 0.3) { py = apxY + (py - apxY) * lsyInv; px *= rS; pz *= rS; }
+                else py -= dMy;
+              }
+              const jx = Math.floor(px * SCAT_CELL), jy = Math.floor(py * SCAT_CELL), jz = Math.floor(pz * SCAT_CELL);
+              sI[q] = scatGauss(jx, jy, jz, salt); sQ[q] = scatGauss(jx, jy, jz, salt ^ 0x5bd1e995);
+            }
+          }
         }
       }
     }
@@ -683,6 +899,7 @@ export class EchoView {
     this._geo = geo;
     this.cmPerPx = 1 / (scale * pxPerCm);
     this._overlays(ctx, geo);
+    this._dopplerOverlay(ctx, geo);
     if (this.showLabels) this._labels(ctx, geo, G, path, probe);
     this._computeMetrics(G, path, peakSpeed, peakFlow);
     this._spectral(G, path, probe);
@@ -734,8 +951,14 @@ export class EchoView {
   // step size and its radial share the incidence angle. Added to the
   // reflectivity BEFORE the PSF, so interface echoes take the beam's real width.
   _specular(cx, apexY) {
-    const kind = this._kind, refl = this._refl, mask = this._mask, Z = this._zimp;
+    const kind = this._kind, mask = this._mask, Z = this._zimp;
     const n = SW * SH;
+    // the interface echoes go to their own buffer and join the reflectivity in
+    // _psfBlur AFTER the elevation-dither average: that average (taps at +-2
+    // sampling blocks) would otherwise smear a bright line several px into the
+    // fluid beside it at coarse sampling
+    if (!this._specAdd) this._specAdd = new Float32Array(n);
+    const refl = this._specAdd; refl.fill(0); this._specPending = true;
     for (let i = 0; i < n; i++) Z[i] = Z_OF[kind[i]] || 1.45;
     const h = Math.max(1, this._stride);
     const Zs = this._zsm, T = this._ztmp;
@@ -770,12 +993,20 @@ export class EchoView {
         const c4 = c2 * c2;                                  // narrow specular lobe: near-parallel walls drop out
         // the parietal pericardium (and the liver capsule / diaphragm it fuses
         // with) is a dense collagen sheet between soft tissues: the strongest
-        // reflector of a parasternal image, with a broader lobe than a wall-blood
-        // boundary, so it stays the brightest line wherever it is cut obliquely
+        // reflector of a parasternal image: a strong but narrow (cos^16) lobe, so it
+        // is a thin saturated line where the beam meets it square-on (the PLAX
+        // posterior pericardium) rather than a broad bright band under the wall
         const pk = PERI_K;
         const peri = kind[idx] === pk || kind[idx - h] === pk || kind[idx + h] === pk ||
           kind[idx - h * SW] === pk || kind[idx + h * SW] === pk;
-        const lobe = peri ? PERI_GAIN * c4 : GAIN * c4 * c4;
+        const c8 = c4 * c4;
+        let lobe = peri ? PERI_GAIN * c8 * c8 : GAIN * c8;
+        // the interface echo belongs to the boundary, not the lumen: the smoothed
+        // step spans +-2h px, so (at coarse sampling especially) it would otherwise
+        // spill a grey haze several px into a blood pool or effusion. Keep it on
+        // the boundary pixel and the tissue side; inside the fluid it fades out.
+        if (FLUID_K[kind[idx]] && FLUID_K[kind[idx - 1]] && FLUID_K[kind[idx + 1]] &&
+            FLUID_K[kind[idx - SW]] && FLUID_K[kind[idx + SW]]) lobe *= 0.15;
         refl[idx] += lobe * R * (0.75 + 0.5 * this.noise[idx % this.noise.length]);
       }
     }
@@ -807,6 +1038,7 @@ export class EchoView {
       let sh = 1;            // persistent distal shadow behind calcium
       let att = 0;           // accumulated attenuation (dB)
       let lastFluid = -1e9;  // depth of the last blood / effusion sample on this beam
+      let runStart = -1e9, runLen = 0, runPeri = false;   // that fluid run: start, length, effusion?
       lungD[a] = 1e9;
       const base = a * NS;
       for (let s = 0; s < NS; s++) {
@@ -834,12 +1066,19 @@ export class EchoView {
         att += 0.5 * (al === undefined ? 0.5 : al) * kAtt;   // to the sample centre
         shadow[base + s] = sh;
         if (kind === TISSUE.LV || kind === TISSUE.RV || kind === TISSUE.LA || kind === TISSUE.RA ||
-            kind === TISSUE.AORTA || kind === TISSUE.VEIN || kind === TISSUE.PERICARDIUM) lastFluid = depth;
-        // enhancement capped at +4 dB just behind the fluid, easing to +2.5 dB for
-        // tissue far beyond it (a scanner's TGC/processing keeps a deep organ, or
-        // the soft tissue behind the atria, from outshining the myocardium)
+            kind === TISSUE.AORTA || kind === TISSUE.VEIN || kind === TISSUE.PERICARDIUM) {
+          if (depth - lastFluid > 1.5 * dStep) runStart = depth;   // a new fluid run starts
+          lastFluid = depth;
+          runPeri = kind === TISSUE.PERICARDIUM;
+          runLen = depth - runStart + dStep;
+        }
+        // enhancement capped at +2.5 dB behind the fluid (+2 dB behind a thin
+        // effusion, under 2 cm): a scanner's TGC/processing keeps a deep organ, the
+        // soft tissue behind the atria, or the posterior LV wall from outshining
+        // the septum. (The easing term below only matters when cNear > 2.5.)
         const past = depth - lastFluid;
-        const cap = past < 3 ? 4 : past > 5 ? 2.5 : 4 - 1.5 * (past - 3) * (past - 3) * (6 - past) / 4;
+        const cNear = runPeri && runLen < 2 ? 1.5 : 2, cFar = Math.min(2.5, cNear);
+        const cap = past < 3 ? cNear : past > 5 ? cFar : cNear - (cNear - cFar) * (past - 3) * (past - 3) * (6 - past) / 4;
         enh[base + s] = Math.pow(10, Math.min(cap, kTgc * depth - att) / 20);
         att += 0.5 * (al === undefined ? 0.5 : al) * kAtt;
       }
@@ -941,6 +1180,11 @@ export class EchoView {
           refl[idx] = 0.25 * (u + 2 * tmp[idx] + d);
         }
       }
+    }
+    if (this._specPending) {                     // interface echoes from _specular
+      const sa = this._specAdd;
+      for (let i = 0; i < w * h; i++) refl[i] += sa[i];
+      this._specPending = false;
     }
     const freqScale = clamp(3.0 / this.freqMHz, 0.5, 2.0); // ref 3 MHz; higher freq => tighter PSF
     const [hLat, hAx] = this._harmonicScale();
@@ -1072,6 +1316,34 @@ export class EchoView {
     // view); brighter through the thin oesophageal wall
     const pleuraAmp = (this.nearFieldCm || 0) < 0.5 ? 0.45 : 0.1;
     const lSlope = this._lungSlope, lTaper = this._lungTaper, lGrain = this._lungGrain;
+    // Mirror-image artefact: the aerated lung behind a TEE view is a near-perfect
+    // specular mirror, so echoes from the tissue in front of it (classically the
+    // descending aorta) return a second time and appear mirrored about the pleural
+    // line, at depth 2*d_pleura - d. The linear (pre-compression) echo of each
+    // pixel is kept so the mirrored copy can be read back from the shallower,
+    // already-composited part of the same beam. Modelled for the descending-aorta
+    // views, where the lung meets the aorta face-on; the lung at the edges of the
+    // other TEE sectors and the transthoracic pleura are not mirrored here.
+    const mirAmp = (this.nearFieldCm || 0) < 0.5 && this.viewName === 'DESCAO' ? 0.3 : 0;
+    // the reflecting plane: tangent to the pleura on the beam that meets it most
+    // squarely (well inside the line), as [x, y, nx, ny] in buffer px
+    let mirP = null;
+    if (mirAmp > 0) {
+      let best = 0.35, a0 = -1;
+      for (let a = 0; a < this._NA; a++) {
+        if (lungD[a] > 1e8 || lTaper[a] < 0.9) continue;
+        const sa = Math.abs(lSlope[a]); if (sa < best) { best = sa; a0 = a; }
+      }
+      if (a0 >= 0) {
+        const th0 = -half + (a0 + 0.5) / this._NA * 2 * half, s0 = lSlope[a0];
+        const n0 = Math.hypot(1, s0), sn = Math.sin(th0), cs = Math.cos(th0);
+        // normal = (e_r - s e_theta) / |..|, e_r = (sin, cos), e_theta = (cos, -sin)
+        mirP = [cx + sn * lungD[a0] * pxPerCm, apexY + cs * lungD[a0] * pxPerCm, (sn - s0 * cs) / n0, (cs + s0 * sn) / n0];
+      }
+    }
+    this._mirP = mirP;                             // (exposed for the headless audits)
+    if (!this._lin) this._lin = new Float32Array(SW * SH);
+    const lin = this._lin;
     const DRinv = 20 / (this.dynRange || 55);
     // image-quality accumulators (target = myocardium, background = LV blood)
     const NB = 48; const hMyo = new Float32Array(NB), hLv = new Float32Array(NB);
@@ -1093,6 +1365,7 @@ export class EchoView {
         let s = (depth * dInv) | 0; if (s >= NS) s = NS - 1;
         const abase = Math.round(abin[idx]) * NS + s;
         b *= shadow[abase] * enh[abase];
+        lin[idx] = b;
         // aerated lung: a bright pleural line then reverberation A-lines at
         // multiples of its depth, fading — no anatomy is seen through air
         // Gated by the BEAM's pleural depth (not the per-pixel tissue label, whose
@@ -1124,9 +1397,38 @@ export class EchoView {
             }
             // reverberation haze beyond the air (~ -40 dB, below tissue), streaked
             // along the beams by the same coarse lateral grain as the pleural line
-            const haze = 0.01 * (0.35 + 1.3 * (lGrain[ab0] * (1 - fr) + lGrain[ab1] * fr)) * Math.exp(-(depth - dl) / 4) * (0.4 + 0.6 * spk[idx]);
+            // (reverberation, not tissue: only lightly speckled)
+            let haze = 0.01 * (0.35 + 1.3 * (lGrain[ab0] * (1 - fr) + lGrain[ab1] * fr)) * Math.exp(-(depth - dl) / 4) * (0.7 + 0.3 * spk[idx]);
+            // mirror image of the tissue in front of the pleura (TEE): the beam
+            // reflects off the pleura, so the echo at depth d comes from the point
+            // the reflected beam reaches, i.e. the image point mirrored across the
+            // reflecting plane (the pleura's tangent plane where it faces the probe
+            // squarely; see mirP below). The copy replaces most of the reverberation
+            // haze where it falls, so its lumen reads dark too.
+            let mir = 0;
+            if (mirP && depth >= dl) {
+              const ddx = i - mirP[0], ddy = j - mirP[1];
+              const dist = ddx * mirP[2] + ddy * mirP[3];
+              if (dist > 0) {
+                const mx = Math.round(i - 2 * dist * mirP[2]), my = Math.round(j - 2 * dist * mirP[3]);
+                if (mx >= 0 && mx < SW && my >= 0 && my < j) {
+                  const q = my * SW + mx;
+                  if (mask[q]) {
+                    // fade toward the mirrored sector edges and apex, so the copy
+                    // has no hard mirrored fan border
+                    const mdx = mx - cx, mdy = my - apexY;
+                    const eF = clamp((half - Math.abs(Math.atan2(mdx, mdy))) / 0.15, 0, 1);
+                    const aF = clamp((Math.hypot(mdx, mdy) / pxPerCm - 0.3) / 0.5, 0, 1);
+                    const mv = tp * (0.4 + 0.6 * ci) * Math.min(1, (depth - dl) / 0.15) * eF * eF * aF *
+                      Math.min(1, dist / (0.4 * pxPerCm));
+                    mir = mirAmp * mv * lin[q] * (0.6 + 0.8 * spk[idx]);
+                    haze *= 1 - 0.75 * mv;
+                  }
+                }
+              }
+            }
             const wa = w * (0.3 + 0.7 * tp);                              // a partial air hit at the ends
-            b = b * (1 - wa) + wa * (0.02 * b + (pl * (0.55 + 0.9 * spk[idx]) + al * (0.5 + 0.8 * spk[idx]) + haze) * gain);
+            b = b * (1 - wa) + wa * (0.02 * b + (pl * (0.55 + 0.9 * spk[idx]) + al * (0.5 + 0.8 * spk[idx]) + haze) * gain + mir);
           }
         }
         // subtle near-field reverberation: faint repeating echoes close to the
@@ -1188,40 +1490,172 @@ export class EchoView {
     ctx.fillStyle = 'rgba(150,220,190,0.65)';
     ctx.font = '10px monospace';
     ctx.lineWidth = 1;
+    // depth rings across the fan, and a depth ruler down the right-hand side of
+    // the image (as on a scanner) with a tick every centimetre and a label every
+    // 2 cm, so every depth to the bottom of the field can be read
+    const W = this.canvas.width;
+    const rx = Math.min(W - 4, ox + SW * scale + 18);         // ruler x (canvas px)
+    const yOf = (d) => oy + (apexY + d * pxPerCm) * scale;
     for (let d = 2; d <= this.depthCm; d += 2) {
       const rp = d * pxPerCm;
-      const ex = cx + Math.sin(half) * rp, ey = apexY + Math.cos(half) * rp;
       ctx.beginPath();
       ctx.arc(ox + cx * scale, oy + apexY * scale, rp * scale, Math.PI / 2 - half, Math.PI / 2 + half);
       ctx.stroke();
-      ctx.fillText(d + '', ox + (ex + 4) * scale, oy + ey * scale);
     }
-    // Focal-zone marker on the depth scale — the caret every scanner puts beside
-    // the depth ruler so the operator can see where the beam is narrowest.
+    ctx.strokeStyle = 'rgba(150,220,190,0.55)';
+    ctx.beginPath();
+    ctx.moveTo(rx, yOf(0)); ctx.lineTo(rx, yOf(this.depthCm));
+    for (let d = 0; d <= this.depthCm + 1e-6; d += 1) {
+      const tl = d % 2 === 0 ? 6 : 3;
+      ctx.moveTo(rx - tl, yOf(d)); ctx.lineTo(rx, yOf(d));
+    }
+    ctx.stroke();
+    if ('textAlign' in ctx) { ctx.textAlign = 'right'; ctx.textBaseline = 'middle'; }
+    for (let d = 2; d <= this.depthCm; d += 2) ctx.fillText(d + '', rx - 8, yOf(d));
+    // Focal-zone marker on the depth ruler — the caret every scanner puts beside
+    // it so the operator can see where the beam is narrowest.
     const fz = this._focusCm();
     if (fz > 0.5 && fz < this.depthCm) {
-      const rp = fz * pxPerCm;
-      const fx = ox + (cx + Math.sin(half) * rp) * scale;
-      const fy = oy + (apexY + Math.cos(half) * rp) * scale;
+      const fy = yOf(fz), fx = rx + 1;
       ctx.fillStyle = 'rgba(150,220,190,0.95)';
       ctx.beginPath();
-      ctx.moveTo(fx + 2, fy);
-      ctx.lineTo(fx + 9, fy - 4);
-      ctx.lineTo(fx + 9, fy + 4);
+      ctx.moveTo(fx, fy);
+      ctx.lineTo(fx + 7, fy - 4);
+      ctx.lineTo(fx + 7, fy + 4);
       ctx.closePath();
       ctx.fill();
     }
-    if (this.colorOn && this.showColorBox) {
-      ctx.strokeStyle = 'rgba(90,200,255,0.5)';
-      ctx.setLineDash([4, 3]);
+    ctx.restore();
+  }
+
+  // Resolve this frame's spectral-Doppler site onto the imaging plane: the gate
+  // (PW) or CW focus is the site projected into the plane, on a beam from the
+  // transducer, clamped into the sector. Records the beam-to-flow angle, which
+  // is what every Doppler reading depends on (v_measured = v cos(theta)).
+  _resolveGate(G, path, probe) {
+    const key = this.dopplerSite || dopplerDefault(this.viewName, path);
+    const site = key ? DOPPLER_SITES[key] : null;
+    if (!site) { this._dGate = null; return null; }
+    const ref = typeof site.ref === 'function' ? site.ref(path) : site.ref;
+    const Gr = refPhases(path)[ref] || G;
+    // A view that tracks a landmark slides the probe with the cycle; the Doppler
+    // beam is set once, from where the probe sits at the site's reference phase,
+    // so it stays put (and its one-cycle sweep stays cached) while the image tracks.
+    const vw = ALL_VIEWS[this.viewName];
+    let P = probe.pos;
+    if (vw && vw.track && G.A && Gr.A) {
+      const o1 = vw.track(G.A), o0 = vw.track(Gr.A);
+      P = [P[0] - o1[0] + o0[0], P[1] - o1[1] + o0[1], P[2] - o1[2] + o0[2]];
+    }
+    const D = probe.dir, L = probe.lat, N = probe.normal;
+    const polar = (q) => {
+      const rx = q[0] - P[0], ry = q[1] - P[1], rz = q[2] - P[2];
+      const al = rx * D[0] + ry * D[1] + rz * D[2], la = rx * L[0] + ry * L[1] + rz * L[2];
+      return { theta: Math.atan2(la, al), depth: Math.hypot(al, la), off: rx * N[0] + ry * N[1] + rz * N[2] };
+    };
+    const half = this.sectorHalf;
+    const q = site.at(Gr.A, path, Gr);
+    const g = polar(q);
+    const theta = clamp(g.theta, -half * 0.97, half * 0.97);
+    let depth = clamp(g.depth, 0.8, this.depthCm * 0.94);
+    const ct = Math.cos(theta), st = Math.sin(theta);
+    let dir = [ct * D[0] + st * L[0], ct * D[1] + st * L[1], ct * D[2] + st * L[2]];
+    // The Doppler beam has the slice's elevation thickness and the operator
+    // fine-tilts for the best signal, so when the site lies within ~1.2 cm of the
+    // displayed plane the beam is aimed through the site itself (the cursor is
+    // drawn at its projection). Further off, the view does not show the site and
+    // the beam stays in the plane.
+    const inside = Math.abs(g.theta) <= half * 0.97 && g.depth <= this.depthCm * 0.94 && g.depth >= 0.8;
+    if (inside && Math.abs(g.off) <= 1.2) {
+      const rx = q[0] - P[0], ry = q[1] - P[1], rz = q[2] - P[2], rl = Math.hypot(rx, ry, rz) || 1;
+      dir = [rx / rl, ry / rl, rz / rl];
+      depth = rl;
+    }
+    const ax = site.axis(path, Gr);
+    const cosA = dir[0] * ax[0] + dir[1] * ax[1] + dir[2] * ax[2];
+    const b = polar(site.box(Gr.A, path, Gr));
+    const modeDef = typeof site.mode === 'function' ? site.mode(path) : site.mode;
+    const mode = this.dopplerMode === 'PW' || this.dopplerMode === 'CW' ? this.dopplerMode : modeDef;
+    this._dGate = {
+      key, name: site.name, label: site.label, mode, theta, depth, dir, P0: P,
+      p: [P[0] + dir[0] * depth, P[1] + dir[1] * depth, P[2] + dir[2] * depth],
+      angleDeg: Math.acos(Math.min(1, Math.abs(cosA))) * 180 / Math.PI, cosA,
+      offPlane: Math.abs(g.off), outside: Math.abs(g.theta) > half * 0.97 || g.depth > this.depthCm * 0.94,
+      box: { theta: clamp(b.theta, -half, half), depth: clamp(b.depth, 1, this.depthCm * 0.9) },
+    };
+    return this._dGate;
+  }
+
+  // Colour box (ROI) for this frame: centred on the Doppler site (or mid-sector),
+  // `cboxSize` of the sector wide. Sets the box Nyquist limit (capped by the PRF
+  // its deepest line allows) and a modelled acquisition frame rate: each frame
+  // fires the B-mode lines plus, per colour line, a packet of pulses to the box
+  // bottom, so a wider or deeper box is slower.
+  _colorBox(gate) {
+    const half = this.sectorHalf;
+    const size = clamp(this.cboxSize || 0.45, 0.15, 1);
+    const bw = size * half;
+    const tc = gate ? clamp(gate.box.theta, -half + bw, half - bw) : 0;
+    const span = Math.min(this.depthCm * 0.92, 3 + 0.6 * this.depthCm * size);
+    const dc = gate ? gate.box.depth : this.depthCm * 0.5;
+    let d1 = Math.min(this.depthCm * 0.94, dc + span * 0.5);
+    const d0 = Math.max(0.4, d1 - span);
+    d1 = Math.min(this.depthCm * 0.94, d0 + span);
+    const fD = dopF(this.freqMHz);
+    const nyq = Math.min(this.nyquist, nyqLimit(d1, fD));
+    const tB = 2 * this.depthCm / 154000, tC = 2 * d1 / 154000;     // s per line (c = 1540 m/s)
+    const nC = Math.round(64 * bw / half), ENS = 8;
+    const fps = 1 / (128 * tB + (this.colorOn ? nC * ENS * tC : 0));
+    this.colorNyquist = nyq;
+    this.metrics.acqFps = fps;
+    this._cbox = { t0: tc - bw, t1: tc + bw, d0, d1, nyq, fps, prf: nyq * 4 * fD * 1e6 / 1540 };
+    return this._cbox;
+  }
+
+  // Doppler cursor on the image: the beam line, the PW sample volume (two short
+  // bars) or the CW focus mark, and the colour box outline.
+  _dopplerOverlay(ctx, g) {
+    const { ox, oy, scale, cx, apexY, pxPerCm } = g;
+    const toXY = (th, d) => [ox + (cx + Math.sin(th) * d * pxPerCm) * scale, oy + (apexY + Math.cos(th) * d * pxPerCm) * scale];
+    ctx.save();
+    const b = this._cbox;
+    if (this.colorOn && this.showColorBox && b) {
+      ctx.strokeStyle = 'rgba(120,210,255,0.75)';
+      ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(ox + cx * scale, oy + apexY * scale);
-      const r2 = this.depthCm * 0.92 * pxPerCm;
-      ctx.lineTo(ox + (cx + Math.sin(half * 0.92) * r2) * scale, oy + (apexY + Math.cos(half * 0.92) * r2) * scale);
-      ctx.arc(ox + cx * scale, oy + apexY * scale, r2 * scale, Math.PI / 2 - half * 0.92, Math.PI / 2 + half * 0.92);
-      ctx.lineTo(ox + cx * scale, oy + apexY * scale);
+      const A0 = Math.PI / 2 - b.t1, A1 = Math.PI / 2 - b.t0;
+      ctx.arc(ox + cx * scale, oy + apexY * scale, b.d0 * pxPerCm * scale, A0, A1);
+      ctx.lineTo(...toXY(b.t0, b.d1));
+      ctx.arc(ox + cx * scale, oy + apexY * scale, b.d1 * pxPerCm * scale, A1, A0, true);
+      ctx.closePath();
       ctx.stroke();
+      ctx.fillStyle = 'rgba(150,220,255,0.85)';
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText(`CF ±${Math.round(b.nyq * 100)} cm/s  PRF ${(b.prf / 1000).toFixed(1)} kHz  ${Math.round(b.fps)} Hz`, 6, 14);
+    }
+    const dg = this._dGate;
+    if (dg && this.showDopplerCursor !== false) {
+      const [x0, y0] = toXY(dg.theta, 0.2), [x1, y1] = toXY(dg.theta, this.depthCm * 0.94);
+      ctx.strokeStyle = 'rgba(235,235,235,0.55)';
+      ctx.setLineDash([2, 4]);
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
       ctx.setLineDash([]);
+      const nx = Math.cos(dg.theta), ny = -Math.sin(dg.theta);     // across the beam (screen)
+      ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+      ctx.lineWidth = 1.5;
+      if (dg.mode === 'PW') {
+        for (const s of [-0.18, 0.18]) {
+          const [xs, ys] = toXY(dg.theta, dg.depth + s);
+          ctx.beginPath(); ctx.moveTo(xs - nx * 6, ys - ny * 6); ctx.lineTo(xs + nx * 6, ys + ny * 6); ctx.stroke();
+        }
+      } else {
+        const [xs, ys] = toXY(dg.theta, dg.depth);
+        ctx.beginPath();
+        ctx.moveTo(xs, ys - 5); ctx.lineTo(xs + 4, ys); ctx.lineTo(xs, ys + 5); ctx.lineTo(xs - 4, ys); ctx.closePath();
+        ctx.stroke();
+      }
     }
     ctx.restore();
   }
@@ -1365,7 +1799,7 @@ export class EchoView {
     // plane-dependent 2-D sample. RAP is read off the modelled IVC (size + sniff
     // collapse), so the estimate agrees with the plethoric IVC of TR / PH.
     const vTR = (G.hemo && G.hemo.vTRPeak) || 0;
-    if (path.tr && vTR > 1.5) {
+    if (vTR > 1.5) {            // (TR, or the functional TR of severe MS)
       const rap = rapEstimate(G.A.ivc);
       this.metrics.pasp = 4 * vTR * vTR + rap;
     } else {
@@ -1373,141 +1807,229 @@ export class EchoView {
     }
   }
 
+  // Spectral Doppler over one cardiac cycle at the resolved site (_resolveGate).
+  // PW reads a small sample volume at the gate; CW reads EVERY velocity along
+  // the whole beam (its envelope is the maximum along the line). Both measure
+  // only the component along the beam (v cos theta), and PW wraps (aliases)
+  // above its Nyquist limit, set by the PRF the gate depth allows. The display
+  // is a greyscale power spectrum: laminar PW is a thin bright band with a dark
+  // window under it, turbulent flow and CW fill toward the baseline.
   _spectral(G, path, probe) {
     if (!this.sctx) return;
     const ctx = this.sctx;
     const W = this.spectral.width, H = this.spectral.height;
-    const nyq = this.nyquist;
-    const zero = H * 0.5;
-    const amp = H * 0.46;
-
-    // Fixed sample gate: this frame's steered peak-flow location if there is a
-    // jet, else a central mid-beam gate. The beam direction at the gate gives
-    // the line-of-sight projection.
-    let gx, gy, gz;
-    const gate = this._peakGate;
-    if (gate) { gx = gate.x; gy = gate.y; gz = gate.z; }
-    else {
-      const bd0 = this.beamDir(probe, 0);
-      const gd = Math.min(this.depthCm * 0.4, 7.5);
-      gx = probe.pos[0] + gd * bd0[0]; gy = probe.pos[1] + gd * bd0[1]; gz = probe.pos[2] + gd * bd0[2];
-    }
-    const bx = gx - probe.pos[0], by = gy - probe.pos[1], bz = gz - probe.pos[2];
-    const bl = Math.hypot(bx, by, bz) || 1;
-    const bdx = bx / bl, bdy = by / bl, bdz = bz / bl; // unit gate beam direction
-
-    // Sweep the WHOLE cardiac cycle every frame so the trace is always a full,
-    // dense velocity-time waveform (E/A inflow, systolic jet envelope, …) that
-    // resets cleanly per case — no stale history carried between pathologies.
+    const plotH = Math.max(20, Math.round(H * 0.84));
     const step = 2;
-    const cols = Math.ceil(W / step);
-    const vs = this._sweepV || (this._sweepV = new Float32Array(2048));
-    const tb = this._sweepT || (this._sweepT = new Uint8Array(2048));
-    // A genuine jet (turbulent core / clearly above inflow) is displayed like CW:
-    // the trace peak must read the frame's TRUE jet-core speed (the value feeding
-    // metrics.peakVel), not the gated line-of-sight sample — a jet running across
-    // the beam or straddling a thin vena contracta under-reads otherwise. Normal
-    // laminar inflow keeps the honest gated line-of-sight (PW) sample.
-    const isJet = !!(gate && gate.jet);
-    const coreSpeed = gate ? (gate.cw > 0.1 ? gate.cw : gate.speed) : 0;
-    let peakAbs = 0;
+    const cols = Math.min(1024, Math.ceil(W / step));
+    const gate = this._dGate;
+    if (!gate) {
+      ctx.fillStyle = '#04060a';
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = 'rgba(150,200,240,0.6)';
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText('No standard spectral Doppler trace in this view', 6, plotH * 0.5);
+      this._drawEcg(ctx, W, H, plotH, G);
+      this.spectralData = { mode: null, site: null, cols: 0, vs: new Float32Array(0) };
+      return;
+    }
+    const mode = gate.mode;
+    const fD = dopF(this.freqMHz);
+    const P = gate.P0 || probe.pos, dir = gate.dir;
+    // The sweep is cached: a view that tracks a landmark moves the probe a
+    // little every frame, and re-sampling a cycle per frame is far too slow, so
+    // it is redone only when the beam moves by more than ~1.5 deg or 3 mm.
+    const key = [mode, gate.key, cols, this.depthCm].join('|');
+    let S = this._specCache;
+    const moved = !S || Math.hypot(gate.p[0] - S.p[0], gate.p[1] - S.p[1], gate.p[2] - S.p[2]) > 0.3 ||
+      dir[0] * S.dir[0] + dir[1] * S.dir[1] + dir[2] * S.dir[2] < 0.99966;
+    if (!S || S.key !== key || S.path !== path || moved) {
+      S = this._specCache = this._sweep(path, P, dir, gate, mode, cols, key);
+      S.p = gate.p.slice(); S.dir = dir.slice();
+    }
+    // PW velocity scale: set to fit the signal (as the sonographer would), but
+    // never above the Nyquist limit the PRF allows at the gate depth, so flow
+    // faster than that limit wraps around (aliases)
+    const nyqMax = nyqLimit(gate.depth, fD);
+    const fit = [0.4, 0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0].find((x) => x >= 1.25 * Math.max(S.posMax, S.negMax)) || 3.0;
+    const nyqPW = this.pwNyquist || Math.min(nyqMax, fit);
+    // ---- scale and baseline ----
+    let scale, fTop;
+    if (mode === 'PW') { scale = nyqPW; fTop = 0.5; }
+    else {
+      const m = Math.max(S.posMax, S.negMax, 0.5) * 1.12;
+      scale = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 8].find((x) => x >= m) || Math.ceil(m);
+      fTop = S.posMax < 0.3 * S.negMax ? 0.24 : S.negMax < 0.3 * S.posMax ? 0.76 : 0.5;
+    }
+    const zeroY = fTop * plotH;
+    const kpx = (mode === 'PW' ? plotH * 0.5 : Math.max(fTop, 1 - fTop) * plotH * 0.94) / scale;   // px per m/s
+    const vTop = zeroY / kpx, vBot = -(plotH - zeroY) / kpx;                                      // display range
+    // ---- power spectrum raster (cols x plotH) ----
+    const NP = cols * plotH;
+    if (!this._specP || this._specP.length < NP) this._specP = new Float32Array(NP);
+    const Pw = this._specP; Pw.fill(0, 0, NP);
+    const dv = 1 / kpx;                                  // m/s per row
+    const span = vTop - vBot;
+    const wrap = (u) => (mode === 'PW' ? u - 2 * scale * Math.round(u / (2 * scale)) : u);
+    const addAt = (c, u, w) => {
+      const uu = wrap(u);
+      if (uu > vTop || uu < vBot) return;
+      const r = Math.min(plotH - 1, Math.max(0, Math.round((vTop - uu) / dv)));
+      Pw[r * cols + c] += w;
+    };
+    let wrapped = 0;
     for (let c = 0; c < cols; c++) {
-      const ph = c / cols;
-      const Gp = geometryAt(ph, path);
-      const vel = velocityAt(gx, gy, gz, Gp, path);
-      let v = 0;
-      if (vel) {
-        const losb = vel.vx * bdx + vel.vy * bdy + vel.vz * bdz;
-        // jet: angle-corrected true core speed, signed by beam projection (CW-like);
-        // laminar inflow: honest line-of-sight PW sample.
-        v = isJet ? (losb < 0 ? -1 : 1) * vel.speed : losb;
+      for (let k = S.start[c]; k < S.start[c + 1]; k++) {
+        const v = S.v[k], w = S.w[k], turb = S.t[k] === 1, av = Math.abs(v), sg = v < 0 ? -1 : 1;
+        if (av < 0.03) continue;
+        if (mode === 'PW' && av > nyqPW) wrapped++;
+        if (mode === 'PW') {
+          // spectral band: laminar = narrow band just below the modal velocity
+          // (dark window beneath); turbulent = broad, down toward the baseline
+          const lo = turb ? av * 0.15 : Math.max(0, av * 0.86 - 0.03), hi = av + (turb ? 0.12 : 0.035);
+          const n = Math.max(2, Math.ceil((hi - lo) / (dv * 0.7)));
+          for (let i = 0; i <= n; i++) {
+            const u = lo + (hi - lo) * i / n, t = (u - lo) / (hi - lo + 1e-9);
+            addAt(c, sg * u, w * (0.35 + 0.65 * t) * (u > av ? Math.max(0, 1 - (u - av) / (hi - av + 1e-9)) : 1) / n * 6);
+          }
+        } else {
+          // CW: each scatterer along the beam adds a line at its own velocity
+          // (spread by turbulence), and the beam's sweep through slower flow fills
+          // the spectrum below it toward the baseline
+          const sig = 0.05 + (turb ? 0.12 : 0.02);
+          const n0 = Math.ceil(2.5 * sig / dv);
+          for (let i = -n0; i <= n0; i++) { const u = av + i * dv; if (u > 0) addAt(c, sg * u, w * Math.exp(-((i * dv) / sig) * ((i * dv) / sig))); }
+          const nf = Math.ceil(av / dv), wf = w * (turb ? 0.22 : 0.08);
+          for (let i = 1; i < nf; i++) addAt(c, sg * i * dv, wf);
+        }
       }
-      vs[c] = v; tb[c] = vel && vel.turbulent ? 1 : 0;
-      const a = Math.abs(v); if (a > peakAbs) peakAbs = a;
     }
-    // Scale the swept jet envelope so its peak equals the tracked true jet-core
-    // speed: a severe MR/AS jet then shows ~5.5 / ~4.7 m/s on the trace, matching
-    // the Measurements Peak V, instead of the gate straddling the vena contracta.
-    if (isJet && coreSpeed > 0.1 && peakAbs > 1e-3) {
-      const k = coreSpeed / peakAbs;
-      for (let c = 0; c < cols; c++) vs[c] *= k;
-      peakAbs = coreSpeed;
+    // normalise on a high percentile, add speckle (exponential power) and a
+    // receiver-noise floor, log-compress over ~32 dB
+    let pref = 0;
+    { const sample = []; for (let i = 0; i < NP; i += 7) if (Pw[i] > 0) sample.push(Pw[i]);
+      sample.sort((a, b) => a - b); pref = sample.length ? sample[Math.floor(sample.length * 0.97)] : 1; }
+    if (!this._specImg || this._specImg.width !== W || this._specImg.height !== H) this._specImg = ctx.createImageData(W, H);
+    const img = this._specImg, d = img.data;
+    const DR = 32, gain = this.gain || 1;
+    for (let r = 0; r < H; r++) {
+      for (let x = 0; x < W; x++) {
+        const o = (r * W + x) * 4;
+        let I = 0;
+        if (r < plotH) {
+          const c = Math.min(cols - 1, (x / step) | 0);
+          const u = hash01(c * 7 + (x & 1), r);
+          const p = (Pw[r * cols + c] / pref) * gain * (-Math.log(1 - 0.995 * u)) + 0.0015 * hash01(r * 13 + 5, c * 3 + x);
+          I = (10 * Math.log10(p + 1e-9) + DR) / DR;
+          I = I < 0 ? 0 : I > 1 ? 1 : I;
+        }
+        d[o] = 4 + I * 232; d[o + 1] = 6 + I * 236; d[o + 2] = 10 + I * 240; d[o + 3] = 255;
+      }
     }
-    const aliased = peakAbs > nyq + 1e-6;
-    const scaleV = Math.max(nyq, peakAbs) * 1.12; // auto-scale to fit the peak
-    const mode = aliased ? 'CW' : 'PW';
-
-    // background + calibrated gridlines + baseline
-    ctx.fillStyle = '#04060a';
-    ctx.fillRect(0, 0, W, H);
-    ctx.strokeStyle = 'rgba(90,130,170,0.16)';
+    ctx.putImageData(img, 0, 0);
+    // ---- overlays: grid + velocity labels, baseline, cursor, readouts ----
+    ctx.font = '9px monospace';
+    const gstep = [0.2, 0.5, 1, 2].find((s) => s * kpx >= 13) || 2;   // label spacing >= 13 px
     ctx.lineWidth = 1;
-    for (let q = 1; q <= 2; q++) {
-      const dy = (q / 2) * amp;
-      ctx.beginPath(); ctx.moveTo(0, zero - dy); ctx.lineTo(W, zero - dy); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(0, zero + dy); ctx.lineTo(W, zero + dy); ctx.stroke();
+    for (let v = -Math.floor(-vBot / gstep) * gstep; v <= vTop + 1e-6; v += gstep) {
+      if (Math.abs(v) < 1e-6) continue;
+      const y = zeroY - v * kpx;
+      ctx.strokeStyle = 'rgba(90,130,170,0.18)';
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W - 30, y); ctx.stroke();
+      ctx.fillStyle = 'rgba(150,200,240,0.75)';
+      ctx.textAlign = 'right';
+      ctx.fillText((v > 0 ? '+' : '') + v.toFixed(gstep < 0.5 ? 1 : 1), W - 3, y + 3);
     }
-    ctx.strokeStyle = 'rgba(120,160,200,0.4)';
-    ctx.beginPath(); ctx.moveTo(0, zero); ctx.lineTo(W, zero); ctx.stroke();
-
-    // filled velocity envelope (toward probe = above baseline)
-    for (let c = 0; c < cols; c++) {
-      const v = vs[c];
-      const y = clamp(zero - (-v / scaleV) * amp, 1, H - 1);
-      const bright = clamp(Math.abs(v) / scaleV, 0, 1);
-      if (bright < 0.02) continue;
-      const x = c * step;
-      // filled column from baseline to the envelope, brighter with velocity
-      ctx.fillStyle = `rgba(${150 + 80 * bright},${210 + 30 * bright},${180},${0.22 + 0.5 * bright})`;
-      ctx.fillRect(x, Math.min(zero, y), step, Math.abs(y - zero));
-      // spectral broadening band for turbulent flow
-      if (tb[c]) {
-        const sp = amp * 0.32 * bright;
-        ctx.fillStyle = `rgba(120,235,150,${0.10 + 0.25 * bright})`;
-        ctx.fillRect(x, y - sp * 0.5, step, sp);
-      }
-    }
-    // bright envelope contour
-    ctx.strokeStyle = 'rgba(200,240,210,0.85)';
-    ctx.lineWidth = 1.2;
-    ctx.beginPath();
-    for (let c = 0; c < cols; c++) {
-      const y = clamp(zero - (-vs[c] / scaleV) * amp, 1, H - 1);
-      const x = c * step;
-      if (c === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-
-    // moving time cursor at the current cardiac phase
+    ctx.strokeStyle = 'rgba(140,190,230,0.6)';
+    ctx.beginPath(); ctx.moveTo(0, zeroY); ctx.lineTo(W, zeroY); ctx.stroke();
     const cxp = (G.phase % 1) * W;
     ctx.strokeStyle = 'rgba(255,90,77,0.8)';
-    ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(cxp, 0); ctx.lineTo(cxp, H); ctx.stroke();
-
-    // labels: scale, mode (PW/CW), sweep + time
-    ctx.fillStyle = 'rgba(150,200,240,0.7)';
-    ctx.font = '9px monospace';
     ctx.textAlign = 'left';
-    ctx.fillText(mode + '  m/s', 4, 11);
-    ctx.textAlign = 'right';
-    ctx.fillText('+' + scaleV.toFixed(1), W - 4, 11);
-    ctx.fillText('-' + scaleV.toFixed(1), W - 4, H - 4);
-    ctx.textAlign = 'left';
-    ctx.fillStyle = 'rgba(150,200,240,0.5)';
-    ctx.fillText('1 cardiac cycle', 4, H - 4);
-
-    // peak-velocity caliper (true peak, always legible even when colour aliases)
-    if (peakAbs > 0.12) {
-      const py = zero - (peakAbs / scaleV) * amp;
-      ctx.strokeStyle = 'rgba(255,210,90,0.7)';
+    ctx.fillStyle = 'rgba(170,215,245,0.9)';
+    ctx.fillText(`${mode}  ${gate.name}  θ ${Math.round(gate.angleDeg)}°  m/s`, 4, 10);
+    ctx.fillStyle = 'rgba(150,200,240,0.6)';
+    if (mode === 'PW') ctx.fillText(`Nyquist ±${nyqPW.toFixed(2)}  gate ${gate.depth.toFixed(1)} cm`, 4, 20);
+    // peak readout: CW from the envelope; PW only when it is not aliased
+    let peak = 0, sign = 1;
+    if (S.negMax >= S.posMax) { peak = S.negMax; sign = -1; } else { peak = S.posMax; }
+    const aliased = mode === 'PW' && wrapped > 0;
+    if (aliased) {
+      ctx.fillStyle = 'rgba(255,190,110,0.95)';
+      ctx.font = '600 10px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText('aliased above Nyquist: use CW', W - 34, 11);
+    } else if (peak > 0.12) {
+      const py = zeroY - sign * peak * kpx;
+      ctx.strokeStyle = 'rgba(255,210,90,0.6)';
       ctx.setLineDash([3, 3]);
-      ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(W, py); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(W - 30, py); ctx.stroke();
       ctx.setLineDash([]);
       ctx.fillStyle = 'rgba(255,225,140,0.95)';
       ctx.textAlign = 'right';
       ctx.font = '600 10px monospace';
-      ctx.fillText('peak ' + peakAbs.toFixed(1) + ' m/s' + (aliased ? ' (aliased in colour)' : ''), W - 6, py - 3 < 8 ? py + 12 : py - 3);
+      ctx.fillText('peak ' + peak.toFixed(1) + ' m/s', W - 34, py - 3 < 9 ? py + 11 : py - 3);
     }
+    this._drawEcg(ctx, W, H, plotH, G);
+    this.spectralData = {
+      mode, site: gate.key, label: gate.label, angleDeg: gate.angleDeg, cols, vs: S.vs.slice(0, cols),
+      nyq: mode === 'PW' ? nyqPW : null, scale, baseline: fTop, wrapped, aliased,
+      peak, peakSign: sign, posMax: S.posMax, negMax: S.negMax,
+    };
+  }
+
+  // One cycle of Doppler samples on the gate beam: PW, a 7-point (3 mm) sample volume
+  // around the gate; CW, every 0.2 cm along the whole beam. Velocities are the
+  // components toward the transducer (positive = toward, above the baseline).
+  _sweep(path, P, dir, gate, mode, cols, key) {
+    const offs = [];
+    if (mode === 'PW') for (let o = -0.15; o <= 0.151; o += 0.05) offs.push(gate.depth + o);
+    else for (let dd = 0.4; dd <= this.depthCm * 0.98; dd += 0.12) offs.push(dd);
+    const cap = cols * offs.length;
+    const v = new Float32Array(cap), w = new Float32Array(cap), t = new Uint8Array(cap);
+    const start = new Int32Array(cols + 1), vs = new Float32Array(cols);
+    let n = 0, posMax = 0, negMax = 0;
+    for (let c = 0; c < cols; c++) {
+      start[c] = n;
+      const Gp = geometryAt(c / cols, path);
+      let best = 0;
+      for (const dd of offs) {
+        const vel = velocityAt(P[0] + dir[0] * dd, P[1] + dir[1] * dd, P[2] + dir[2] * dd, Gp, path);
+        if (!vel) continue;
+        const vt = -(vel.vx * dir[0] + vel.vy * dir[1] + vel.vz * dir[2]);
+        if (Math.abs(vt) < 0.02) continue;
+        v[n] = vt; w[n] = vel.turbulent ? 1.6 : 1; t[n] = vel.turbulent ? 1 : 0; n++;
+        if (Math.abs(vt) > Math.abs(best)) best = vt;
+      }
+      const vc = best;            // the modal (brightest-edge) velocity of the column
+      vs[c] = vc;
+      if (best > posMax) posMax = best;
+      if (-best > negMax) negMax = -best;
+    }
+    start[cols] = n;
+    return { key, path, v, w, t, start, vs, posMax, negMax };
+  }
+
+  // ECG strip and time scale under the spectrum (0.1 s ticks, 0.5 s major).
+  _drawEcg(ctx, W, H, plotH, G) {
+    ctx.fillStyle = '#04060a';
+    ctx.fillRect(0, plotH, W, H - plotH);
+    const mid = plotH + (H - plotH) * 0.62, amp = (H - plotH) * 0.5;
+    ctx.strokeStyle = 'rgba(90,230,120,0.85)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = 0; x <= W; x += 1) { const y = mid - ecgAt(x / W) * amp; if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
+    ctx.stroke();
+    const rr = this.rrSec || 0.833;
+    ctx.strokeStyle = 'rgba(150,200,240,0.55)';
+    for (let k = 0, ts = 0; ts <= rr + 1e-6; k++, ts = k * 0.1) {
+      const x = ts / rr * W, major = k % 5 === 0;
+      ctx.beginPath(); ctx.moveTo(x, plotH); ctx.lineTo(x, plotH + (major ? 5 : 3)); ctx.stroke();
+    }
+    ctx.fillStyle = 'rgba(150,200,240,0.55)';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('ECG  0.1 s/tick', 4, H - 2);
   }
 }
 
