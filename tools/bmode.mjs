@@ -78,3 +78,33 @@ export function speckleAxis(R, th, d, half = 12) {
   const perp = Math.atan2(-Math.sin(th), Math.cos(th)) * 180 / Math.PI;
   return { ang, perp };
 }
+
+// Colour-Doppler + spectral render of one view (same per-view settings as
+// renderBmode) with stub canvases. Returns the colour overlay (alpha, rgb) per
+// buffer pixel with the tissue kind / depth maps, and the spectral sweep
+// (EchoView.spectralData) at the view's standard Doppler site, or at `opts.site`
+// / `opts.mode` / `opts.pwNyquist` when given. The spectral canvas is 440 px wide.
+let EVD = null;
+export function renderDoppler(name, phase = 0, path = {}, opts = {}) {
+  if (!EVD) { EVD = new EchoView(stubCanvas(), { width: 440, height: 120, getContext: () => stubCtx() }); EVD._pinStride = 1; EVD._stride = 1; }
+  const e = EVD;
+  const tee = TEE_VIEWS[name], vw = tee || TTE_VIEWS[name] || EXTRA_VIEWS[name];
+  const base = vw.probe();
+  e.viewName = name; e.colorOn = opts.color !== false; e.showLabels = false;
+  e.dopplerSite = opts.site || null; e.dopplerMode = opts.mode || 'auto'; e.pwNyquist = opts.pwNyquist || null;
+  if (opts.nyquist) e.nyquist = opts.nyquist; else e.nyquist = 0.62;
+  if (opts.cboxSize) e.cboxSize = opts.cboxSize; else e.cboxSize = 0.45;
+  if (tee) { e.depthCm = tee.depth; e.freqMHz = 5.5; e.nearFieldCm = 0.3; e.elevFocus = 4.0; e.elevMin = 0.05; e.elevDiv = 0.015; }
+  else {
+    e.freqMHz = 2.7; e.elevFocus = 8.0; e.elevMin = 0.09; e.elevDiv = 0.025;
+    e.nearFieldCm = name === 'SUBCOSTAL' ? 1.6 : /^A\dC$/.test(name) ? 1.4 : 2.0;
+    e.depthCm = vw.depth || 16;
+  }
+  const G = geometryAt(phase, path);
+  let probe = { ...base };
+  if (vw.track) { const o = vw.track(G.A); probe = { ...base, pos: add(base.pos, o), target: base.target && add(base.target, o) }; }
+  e.render(G, path, probe, 0);
+  const SW = e.img.width, SH = e.img.height;
+  return { SW, SH, alpha: e._dalpha, rgb: e._dcol, kind: e._kind, depth: e._depth, cx: SW * 0.5, apexY: SH * 0.04,
+    pxPerCm: (SH * 0.92) / e.depthCm, spec: e.spectralData, gate: e._dGate, box: e._cbox, G, probe, echo: e };
+}

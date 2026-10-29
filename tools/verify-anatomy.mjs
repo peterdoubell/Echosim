@@ -23,7 +23,8 @@ import { geometryAt, classify, TISSUE, hemoSummary, hemodynamics, membSite, MEMB
 import { LM, REF, lumenDist, mitralLift, BODY_AX, diaphragmBelow, rwmaBlend, stomachDist, rapEstimate } from '../js/anatomy.js';
 import { MS_AREA } from '../js/hemodynamics.js';
 import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, ALL_VIEWS as ALL_V } from '../js/views.js';
-import { renderBmode, beamSample, speckleAxis } from './bmode.mjs';
+import { renderBmode, beamSample, speckleAxis, renderDoppler } from './bmode.mjs';
+import { velocityAt, VALVE_DEFS } from '../js/cardiac-model.js';
 
 const VERBOSE = process.argv.includes('--verbose');
 const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
@@ -2140,6 +2141,122 @@ SECTION = 'Pathology';
     check('Effusion', `${nm}: fluid minus LV blood (interior mean grey)`, fl - lv, [-255, 5], 'grey', `fluid ${fl?.toFixed(0)}, LV ${lv?.toFixed(0)}`);
     check('Effusion', `${nm}: adjacent myocardium minus fluid (mean grey)`, mean(adj) - fl, [60, 255], 'grey');
     if (nm === 'PLAX') { rim.sort((x, y) => x - y); check('Effusion', 'PLAX: 95th-percentile grey of the 2 px rims of the fluid', rim[Math.floor(0.95 * rim.length)], [200, 255], 'grey'); }
+  }
+}
+
+// ---- Doppler: spectral traces at the standard sites, colour-flow shapes -----
+// Spectral rows read EchoView.spectralData (one cycle at the view's standard
+// site: per-column velocity toward the probe, mode, Nyquist, wrapped count).
+// Colour rows read the colour overlay of the full render, mapped back to heart
+// space through the sector geometry.
+{
+  SECTION = 'Doppler';
+  const P = { normal: {}, as: { aorticStenosis: true, lvh: true }, mr: { mr: true }, dcm: { dilated: true }, ms: { mitralStenosis: true } };
+  const spec = (pk, vn, opts = {}) => renderDoppler(vn, 0.3, P[pk], opts).spec;
+  const maxIn = (sp, a, b, sgn = 1) => { let m = 0; for (let c = 0; c < sp.cols; c++) { const ph = c / sp.cols; if (ph >= a && ph < b) m = Math.max(m, sgn * sp.vs[c]); } return m; };
+  const g = 'Spectral Doppler (standard site per view)';
+  const n4 = spec('normal', 'A4C');
+  assert(g, 'normal A4C: PW at the mitral leaflet tips', n4.mode === 'PW' && n4.site === 'mvTips', `${n4.mode} ${n4.site}`);
+  const E = maxIn(n4, 0.45, 0.75), A = maxIn(n4, 0.8, 1.0);
+  check(g, 'normal A4C: mitral E peak', E, [0.6, 1.0], 'm/s');
+  check(g, 'normal A4C: E/A', A > 0 ? E / A : null, [1, 2], '');
+  const n5 = spec('normal', 'A5C');
+  assert(g, 'normal A5C: PW in the LVOT', n5.mode === 'PW' && n5.site === 'lvot', `${n5.mode} ${n5.site}`);
+  check(g, 'normal A5C: LVOT peak (away from the probe)', n5.negMax, [0.8, 1.3], 'm/s', `toward ${n5.posMax.toFixed(2)}`);
+  const as5 = spec('as', 'A5C'), asL = spec('as', 'PLAX');
+  assert(g, 'severe AS A5C: CW through the aortic valve', as5.mode === 'CW' && as5.site === 'avCw', `${as5.mode} ${as5.site}`);
+  check(g, 'severe AS A5C: CW peak', as5.peak, [4, 5.5], 'm/s', `beam-flow angle ${as5.angleDeg.toFixed(0)} deg`);
+  check(g, 'severe AS: PLAX CW reading / A5C reading (v cos theta)', asL.peak / as5.peak, [0, 0.6], '', `PLAX ${asL.peak.toFixed(2)} m/s at ${asL.angleDeg.toFixed(0)} deg`);
+  // mitral closure (phase 0) to opening (first forward mitral flow after systole)
+  let MVO = 0.5; for (let ph = 0.3; ph < 0.8; ph += 0.002) if (hemodynamics(ph, P.mr).Qmv > 0) { MVO = ph; break; }
+  const hol = (sp, thr) => { let n = 0, k = 0; for (let c = 0; c < sp.cols; c++) { const ph = c / sp.cols; if (ph < MVO) { n++; if (-sp.vs[c] > thr) k++; } } return n ? k / n : 0; };
+  const mr4 = spec('mr', 'A4C');
+  assert(g, 'severe MR A4C: CW through the mitral valve', mr4.mode === 'CW' && mr4.site === 'mvCw', `${mr4.mode} ${mr4.site}`);
+  // the prolapse jet is eccentric (~37 deg to the apical beam): judged on the
+  // angle-corrected velocity, v / cos(theta) > 2 m/s
+  const cMR = Math.cos(mr4.angleDeg * Math.PI / 180);
+  check(g, 'severe MR A4C: fraction of MVC-MVO with angle-corrected |v| > 2 m/s (holosystolic)', hol(mr4, 2 * cMR), [0.9, 1], '', `MVO ${MVO.toFixed(3)}; peak ${mr4.negMax.toFixed(2)} m/s at ${mr4.angleDeg.toFixed(0)} deg`);
+  let MVOd = 0.5; for (let ph = 0.3; ph < 0.8; ph += 0.002) if (hemodynamics(ph, P.dcm).Qmv > 0) { MVOd = ph; break; }
+  const dc4 = spec('dcm', 'A4C');
+  check(g, 'DCM A4C: functional MR CW peak', dc4.negMax, [4.2, 5.2], 'm/s');
+  { let n = 0, k = 0; for (let c = 0; c < dc4.cols; c++) { const ph = c / dc4.cols; if (ph < MVOd) { n++; if (-dc4.vs[c] > 1.5) k++; } }
+    check(g, 'DCM A4C: functional MR fraction of MVC-MVO with |v| > 1.5 m/s', n ? k / n : 0, [0.85, 1], ''); }
+  const al = spec('ms', 'A4C', { site: 'mvTips', mode: 'PW', pwNyquist: 0.62 });
+  assert(g, 'PW gate on a ~2 m/s jet at Nyquist 0.62: stays PW and wraps (aliases)', al.mode === 'PW' && al.wrapped > 0, `${al.mode}, ${al.wrapped} wrapped samples`);
+  const n4c = spec('normal', 'A4C', { mode: 'CW' });
+  assert(g, 'mode is the operator\'s: forcing CW at the mitral site gives CW', n4c.mode === 'CW');
+
+  // colour flow
+  const gc = 'Colour flow (convergence, vena contracta, flame, Coanda, mosaic)';
+  const world = (R, i, j) => {
+    const x = (i - R.cx) / R.pxPerCm, y = (j - R.apexY) / R.pxPerCm, pr = R.probe;
+    return [pr.pos[0] + pr.dir[0] * y + pr.lat[0] * x, pr.pos[1] + pr.dir[1] * y + pr.lat[1] * x, pr.pos[2] + pr.dir[2] * y + pr.lat[2] * x];
+  };
+  const px2 = (R) => 1 / (R.pxPerCm * R.pxPerCm);
+  {
+    const R = renderDoppler('A4C', 0.56, {}, {});
+    const O = R.G.A.valves.mitral.c;
+    let n = 0, nRep = 0, nCol = 0;
+    for (let j = 0; j < R.SH; j++) for (let i = 0; i < R.SW; i++) {
+      const k = j * R.SW + i; if (R.alpha[k] < 0.5) continue;
+      nCol++; if (R.alpha[k] >= 0.9) nRep++;
+      if (R.kind[k] !== TISSUE.LA) continue;
+      const q = world(R, i, j);
+      if (Math.hypot(q[0] - O[0], q[1] - O[1], q[2] - O[2]) <= 2) n++;
+    }
+    check(gc, 'normal A4C early diastole: inflow colour on the LA side within 2 cm of the annulus', n * px2(R), [1, 99], 'cm2');
+    check(gc, 'colour replaces the grey (opaque) where flow is detected', nCol ? nRep / nCol : 0, [0.95, 1], '');
+    const b = R.box;
+    check(gc, 'colour box is a sub-sector ROI (fraction of the sector width)', b ? (b.t1 - b.t0) / (2 * R.echo.sectorHalf) : null, [0.2, 0.7], '');
+  }
+  {
+    const path = P.mr;
+    const R = renderDoppler('A4C', 0.25, path, {});
+    const G = R.G, O = G.A.valves.mitral.c, nrm = R.probe.normal;
+    // on-screen distance from the orifice (projected into the plane), atrial side only
+    const Op = sub(O, mul(nrm, dot(sub(O, R.probe.pos), nrm))), Vn = VALVE_DEFS.mitral.n;
+    const shell = (r0) => { let n = 0; for (let j = 0; j < R.SH; j++) for (let i = 0; i < R.SW; i++) {
+      const k = j * R.SW + i; if (R.alpha[k] < 0.5) continue;
+      const q = world(R, i, j), d = Math.hypot(q[0] - Op[0], q[1] - Op[1], q[2] - Op[2]);
+      if (Math.abs(d - r0) > 0.1 || dot(sub(q, O), Vn) < 0) continue;
+      const v = velocityAt(q[0], q[1], q[2], G, path); if (v && v.flow === FLOW.MR_JET) n++; }
+      return n * px2(R) / 0.2; };
+    const w0 = shell(0.5), w2 = shell(2.0);
+    check(gc, 'severe MR A4C: jet width 0.5 cm past the orifice (vena contracta)', w0, [0.1, 0.8], 'cm');
+    check(gc, 'severe MR A4C: jet width at 2 cm / at the vena contracta (flame)', w0 > 0 ? w2 / w0 : null, [2, 20], '', `${w2.toFixed(2)} cm at 2 cm`);
+    // eccentric posterior-leaflet prolapse jet: hugs the LA wall (Coanda)
+    const wd = []; let x0 = 1e9, x1 = -1, y0 = 1e9, y1 = -1;
+    for (let j = 0; j < R.SH; j++) for (let i = 0; i < R.SW; i++) {
+      const k = j * R.SW + i; if (R.alpha[k] < 0.5) continue;
+      const q = world(R, i, j);
+      if (Math.hypot(q[0] - O[0], q[1] - O[1], q[2] - O[2]) < 1.5) continue;
+      const v = velocityAt(q[0], q[1], q[2], G, path); if (!v || v.flow !== FLOW.MR_JET) continue;
+      wd.push(-lumenDist(q[0], q[1], q[2], G.A, 'LA_BODY'));
+      x0 = Math.min(x0, i); x1 = Math.max(x1, i); y0 = Math.min(y0, j); y1 = Math.max(y1, j);
+    }
+    wd.sort((a, b) => a - b);
+    check(gc, 'eccentric MR: median distance of the distal jet from the LA wall', wd.length ? wd[wd.length >> 1] : null, [-0.2, 1.0], 'cm', `${wd.length} px`);
+    // mosaic, not stripes: the hue field inside the jet has no periodic autocorrelation peak
+    const hv = (k) => R.rgb[k * 3 + 1] - 0.5 * (R.rgb[k * 3] + R.rgb[k * 3 + 2]);
+    const isJ = new Uint8Array(R.SW * R.SH);
+    let m = 0, cnt = 0;
+    for (let j = y0; j <= y1; j++) for (let i = x0; i <= x1; i++) { const k = j * R.SW + i; if (R.alpha[k] >= 0.5) { const q = world(R, i, j); const v = velocityAt(q[0], q[1], q[2], G, path); if (v && v.flow === FLOW.MR_JET && v.turbulent) { isJ[k] = 1; m += hv(k); cnt++; } } }
+    m /= cnt || 1;
+    let c0 = 0; for (let k = 0; k < isJ.length; k++) if (isJ[k]) c0 += (hv(k) - m) ** 2;
+    let worst = 0;
+    for (let dy = -8; dy <= 8; dy++) for (let dx = -8; dx <= 8; dx++) {
+      if (Math.abs(dx) < 4 && Math.abs(dy) < 4) continue;
+      let sc = 0, nn = 0, a2 = 0, b2 = 0;
+      for (let j = y0; j <= y1; j++) for (let i = x0; i <= x1; i++) { const k = j * R.SW + i, k2 = (j + dy) * R.SW + i + dx; if (!isJ[k] || !isJ[k2]) continue; const a = hv(k) - m, b = hv(k2) - m; sc += a * b; a2 += a * a; b2 += b * b; nn++; }
+      if (nn > 50) worst = Math.max(worst, sc / Math.sqrt(a2 * b2 + 1e-9));
+    }
+    check(gc, 'MR jet mosaic: largest off-zero hue autocorrelation (no stripes)', cnt > 50 ? worst : null, [-1, 0.3], '', `${cnt} turbulent px`);
+  }
+  {
+    const fs = await import('fs');
+    const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+    const mj = fs.readFileSync(new URL('../js/main.js', import.meta.url), 'utf8');
+    assert(gc, 'colour bar carries numeric +/- Nyquist labels (cm/s)', /class="ds-top">\+\d+</.test(html) && /class="ds-bot">&minus;\d+</.test(html) && /updateColorScale/.test(mj));
   }
 }
 
