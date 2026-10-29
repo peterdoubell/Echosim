@@ -19,7 +19,8 @@
 // commit that added it: it is printed but does not set the exit code.
 //
 // Usage: node tools/verify-anatomy.mjs [--verbose]     (exit 0 = all pass)
-import { geometryAt, classify, TISSUE, hemoSummary, hemodynamics, membSite, MEMB_T, VSD_RADIUS, shuntLabel, stenosisCw, FLOW } from '../js/cardiac-model.js';
+import { geometryAt, classify, TISSUE, hemoSummary, hemodynamics, membSite, MEMB_T, VSD_RADIUS, shuntLabel, stenosisCw, FLOW, eaRatio, trEnvelope } from '../js/cardiac-model.js';
+import { measureModel } from '../js/report.js';
 import { LM, REF, lumenDist, mitralLift, BODY_AX, diaphragmBelow, rwmaBlend, stomachDist, rapEstimate } from '../js/anatomy.js';
 import { MS_AREA } from '../js/hemodynamics.js';
 import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, ALL_VIEWS as ALL_V } from '../js/views.js';
@@ -1936,8 +1937,10 @@ SECTION = 'Pathology';
     const iv = geo(0, key).A.ivc, d = 2 * iv.r, rap = rapEstimate(iv);
     const want = d > 2.1 && iv.collapse < 0.5 ? 15 : d <= 2.1 && iv.collapse > 0.5 ? 3 : 8;
     const plethoric = !!(PATHS[key].tr || PATHS[key].rvpo);
+    // severe MS: secondary pulmonary hypertension dilates the IVC (still collapsing): RAP 8
+    const expect = plethoric ? 15 : PATHS[key].mitralStenosis ? 8 : 3;
     assert('RAP', `${key}: RAP ${rap} mmHg matches the IVC (${d.toFixed(1)} cm, ${Math.round(iv.collapse * 100)} % sniff collapse)`,
-      rap === want && (plethoric ? rap === 15 : rap === 3));
+      rap === want && rap === expect);
   }
   // F29: compensated severe AS is not hypotensive — the LV carries the gradient
   const sAs = hemoSummary(PATHS.as);
@@ -1948,6 +1951,76 @@ SECTION = 'Pathology';
   check('Haemodynamics', 'PH: LV EDV (circulation, underfilled)', sPh.EDV, [80, 105], 'mL', `normal ${sum.EDV.toFixed(0)} mL`);
   const edvPh = volume(geo(0, 'phtn'), 'LV', LVBOX);
   check('Haemodynamics', 'PH: geometry EDV vs circulation EDV', Math.abs(edvPh - sPh.EDV) / sPh.EDV * 100, [0, 12], '%', `voxel ${edvPh.toFixed(0)} mL`);
+}
+
+{
+  // Review 10: a compliant LA (pulmonary-vein inflow, annular descent, active
+  // contraction) and mitral inertance shape the transmitral inflow and the LA
+  // pressure waveform; the right heart's contractility, size and septal motion
+  // follow its loading.
+  const ms = (v) => (v == null ? null : v * 1000);
+  check('Mitral inflow', 'normal: E acceleration time (MVO to E peak)', ms(sum.eAccel), [70, 110], 'ms');
+  check('Mitral inflow', 'normal: E deceleration time', ms(sum.eDT), [160, 240], 'ms');
+  // at 72 bpm the E wave (accel ~95 + DT ~165 ms after MVO at 0.517) ends at ~0.84,
+  // so diastasis is the short nadir before the A wave; it must not shut the valve
+  check('Mitral inflow', 'normal: diastasis nadir (flow between E and A / E peak)', sum.diastasis, [0.02, 0.15], '');
+  check('Mitral inflow', 'normal: E/A', eaRatio({}), [1.0, 2.0], '');
+  check('Mitral inflow', 'normal: E velocity', geo(0).hemo.vMitPeak, [0.7, 1.0], 'm/s');
+  const sMs = hemoSummary(PATHS.ms);
+  check('Mitral inflow', 'severe MS: pressure half-time of the CW envelope', ms(sMs.pht), [180, 280], 'ms', `220/PHT ${(0.22 / sMs.pht).toFixed(2)} cm2`);
+  check('Mitral inflow', 'severe MS: 220/PHT vs planimetered MVA', 0.22 / sMs.pht, [MS_AREA.severe - 0.25, MS_AREA.severe + 0.25], 'cm2');
+  assert('Mitral inflow', 'severe MS: A-wave bump on the CW envelope', sMs.aPresent);
+  const sMr = hemoSummary(PATHS.mr);
+  check('Mitral inflow', 'severe MR: LA v-wave (peak systolic LAP)', sMr.PlaVWave, [25, 50], 'mmHg', `mean LAP ${sMr.PlaMean.toFixed(0)}`);
+  const sD = hemoSummary(PATHS.dcm);
+  check('Mitral inflow', 'DCM: restrictive E/A', eaRatio(PATHS.dcm), [1.8, 4], '', `LAP ${sD.PlaMean.toFixed(0)} mmHg, EF ${sD.EF.toFixed(0)} %`);
+  check('Mitral inflow', 'DCM: E deceleration time', ms(sD.eDT), [80, 150], 'ms');
+  // the drawn LA empties as the circulation's LA does: the stiff MS atrium barely moves
+  const laA = (key, ph) => { const S = planeSample(TTE_VIEWS.A4C, geo(ph, key), PATHS[key], 0.1); return areaOf(S, cellsWhere(S, (l) => l === TISSUE.LA)); };
+  const laChange = (key) => { const lo = laA(key, 0), hi = laA(key, 0.5); return (hi - lo) / hi * 100; };
+  // (in the A4C plane the area change is the LA long-axis stretch, its reservoir strain)
+  const laN = laChange('normal');
+  check('LA', 'normal: A4C LA area change (max -> ED)', laN, [20, 45], '%');
+  check('LA', 'severe MS: A4C LA area change (max -> ED)', laChange('ms'), [5, Math.min(30, laN * 0.8)], '%', `normal ${laN.toFixed(0)} %`);
+
+  const MM = (key) => measureModel({ ...PATHS[key], grade: 'severe' });
+  const mN = MM('normal'), mPh = MM('phtn'), mD = MM('dcm'), mTr = MM('tr'), mMs = MM('ms');
+  check('Right heart', 'normal: TAPSE', mN.tapse / 10, [2.0, 2.8], 'cm');
+  check('Right heart', 'PH: TAPSE', mPh.tapse / 10, [1.0, 1.6], 'cm');
+  check('Right heart', 'PH: RV FAC (A4C)', mPh.rvfac, [15, 35], '%', `normal ${mN.rvfac.toFixed(0)} %`);
+  check('Right heart', 'DCM: TAPSE', mD.tapse / 10, [0.8, 1.7], 'cm');
+  check('Right heart', 'severe TR: RVD1', mTr.rvd1 / 10, [4.2, 6.5], 'cm');
+  check('Right heart', 'severe MS: PASP (4 vTR^2 + RAP)', mMs.pasp, [50, 70], 'mmHg', `TR ${mMs.trVmax.toFixed(1)} m/s, RAP ${mMs.rap}`);
+  // severe TR: early-peaking triangular CW envelope; PH: rounded mid-systolic
+  const trPk = (key) => { let b = 0, bp = 0; for (let p = 0.02; p < 0.48; p += 0.002) { const e = trEnvelope(p, { ...PATHS[key], grade: 'severe' }); if (e > b) { b = e; bp = p; } } return (bp - 0.02) / 0.46 * 100; };
+  check('Right heart', 'severe TR: CW peak time (% of systole)', trPk('tr'), [15, 40], '%', `PH ${trPk('phtn').toFixed(0)} %`);
+  // septal geometry: LV eccentricity index (PSAX, D2 parallel / D1 perpendicular to
+  // the septum, through the LV centroid), at ED and LV end-systole
+  const eiAt = (key, ph) => {
+    const G = geo(ph, key), S = planeSample(TTE_VIEWS.PSAX, G, PATHS[key], 0.1);
+    const big = (pred) => components(S, pred).comps.reduce((m, c) => (c.length > m.length ? c : m), []);
+    const lv = big((l) => l === TISSUE.LV), rv = big((l) => l === TISSUE.RV);
+    const cen = (cs) => { let x = 0, y = 0; for (const k of cs) { x += S.X(k % S.nx); y += S.D(Math.floor(k / S.nx)); } return [x / cs.length, y / cs.length]; };
+    const c = cen(lv), r = cen(rv), inLv = new Set(lv);
+    let u = [r[0] - c[0], r[1] - c[1]]; const L = Math.hypot(u[0], u[1]); u = [u[0] / L, u[1] / L];
+    const chord = (d) => {
+      let n = 0;
+      for (let t = -6; t <= 6; t += 0.02) {
+        const x = c[0] + d[0] * t, y = c[1] + d[1] * t, i = Math.round((x + S.X(0) * -1) / S.step), j = Math.round(y / S.step);
+        if (i >= 0 && i < S.nx && j >= 0 && j < S.nd && inLv.has(j * S.nx + i)) n++;
+      }
+      return n * 0.02;
+    };
+    return chord([-u[1], u[0]]) / chord(u);
+  };
+  const ei = (key) => [eiAt(key, 0), eiAt(key, esOf(key))];
+  const [phEd, phEs] = ei('phtn');
+  check('Right heart', 'PH: LV eccentricity index at ED (PSAX)', phEd, [1.1, 2], '', `normal ${eiAt('normal', 0).toFixed(2)}`);
+  check('Right heart', 'PH: eccentricity index ES minus ED (systolic D-shape)', phEs - phEd, [0.15, 1], '', `ES ${phEs.toFixed(2)}`);
+  for (const key of ['tr', 'asd']) {
+    const [ed, es] = ei(key);
+    check('Right heart', `${key}: eccentricity index ED minus ES (diastolic flattening)`, ed - es, [0.08, 1], '', `ED ${ed.toFixed(2)}, ES ${es.toFixed(2)}`);
+  }
 }
 
 {
@@ -2178,7 +2251,9 @@ SECTION = 'Pathology';
   check(g, 'severe MR A4C: fraction of MVC-MVO with angle-corrected |v| > 2 m/s (holosystolic)', hol(mr4, 2 * cMR), [0.9, 1], '', `MVO ${MVO.toFixed(3)}; peak ${mr4.negMax.toFixed(2)} m/s at ${mr4.angleDeg.toFixed(0)} deg`);
   let MVOd = 0.5; for (let ph = 0.3; ph < 0.8; ph += 0.002) if (hemodynamics(ph, P.dcm).Qmv > 0) { MVOd = ph; break; }
   const dc4 = spec('dcm', 'A4C');
-  check(g, 'DCM A4C: functional MR CW peak', dc4.negMax, [4.2, 5.2], 'm/s');
+  // DCM: low LV systolic pressure (~100 mmHg) against a raised LAP (~20) gives a
+  // 70-80 mmHg LV-LA gradient, about 4.2-4.5 m/s, read through a small beam angle
+  check(g, 'DCM A4C: functional MR CW peak', dc4.negMax, [3.8, 5.2], 'm/s');
   { let n = 0, k = 0; for (let c = 0; c < dc4.cols; c++) { const ph = c / dc4.cols; if (ph < MVOd) { n++; if (-dc4.vs[c] > 1.5) k++; } }
     check(g, 'DCM A4C: functional MR fraction of MVC-MVO with |v| > 1.5 m/s', n ? k / n : 0, [0.85, 1], ''); }
   const al = spec('ms', 'A4C', { site: 'mvTips', mode: 'PW', pwNyquist: 0.62 });

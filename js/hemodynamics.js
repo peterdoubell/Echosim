@@ -3,7 +3,8 @@
 // Replaces the old kinematic "scale the cavity by a phase curve" hack with a
 // real, self-consistent circulation: a time-varying-elastance left ventricle
 // (E(t)·(V−V0)) coupled to a two-element Windkessel systemic afterload (R,C),
-// a mitral inflow resistance fed by a left-atrial/venous filling pressure, and
+// a mitral inflow (resistance + inertance) fed by a compliant, contracting left
+// atrium that fills from the pulmonary veins, and
 // an aortic valve that opens only when Plv > Pao. Integrating this to its limit
 // cycle yields a physiological LV pressure–volume loop, from which EDV / ESV /
 // stroke volume / EF and the instantaneous transvalvular gradients emerge —
@@ -48,15 +49,15 @@ function activation(tau) {
   return 0;
 }
 
-// Left-atrial pressure source: a resting reservoir pressure plus a late-diastolic
-// a-wave (atrial kick ~τ 0.9). Elevated resting LAP models MS / MR congestion.
-function atrialP(tau, p) {
-  // the a-wave peaks just before the QRS (atrial systole ends at mitral closure,
-  // ~40-60 ms before ejection); wrap-safe so its tail continues across tau = 0
-  let dd = tau - (0.95); dd -= Math.round(dd);
+// Left-atrial activation (atrial systole): a Gaussian bump peaking ~80 ms before
+// the QRS, so that the inertial A-wave flow it drives has decelerated to zero
+// just as the ventricle contracts (mitral closure at the QRS, T1 ~25 ms later);
+// wrap-safe so its tail continues across tau = 0. It raises the LA elastance, so
+// the a-wave and the A wave come out of the LA volume it holds.
+function atrialAct(tau) {
+  let dd = tau - (0.905); dd -= Math.round(dd);
   const d = dd / 0.045;
-  const aWave = Math.exp(-d * d);
-  return p.Pla0 + p.aWave * aWave;
+  return Math.exp(-d * d);
 }
 
 // Per-pathology circulation parameters. Normal values are calibrated to
@@ -66,9 +67,35 @@ function circParams(path) {
     Emax: 2.7,   // end-systolic elastance (contractility)
     Emin: 0.085, // diastolic (passive) elastance / stiffness
     V0: 10,      // unstressed LV volume
-    Pla0: 8.0,   // resting left-atrial / filling pressure (raised → stronger E wave)
-    aWave: 4.4,  // atrial-kick pressure bump (tuned → E-dominant normal filling, E/A≈1.1)
-    Rmv: 0.010,  // mitral (inflow) resistance
+    // Left atrium: a compliant chamber, Pla = Ela(t)·(Vla − V0la), filled from the
+    // pulmonary veins (a venous pressure behind a small resistance Rpv) and
+    // emptied through the mitral valve. Ela rises by aWave·ElaMin at atrial
+    // systole (the booster pump), so the a-wave, the reservoir filling in systole,
+    // the MR v-wave and the E-wave deceleration all come from the LA volume.
+    // Pla0 is the chronic MEAN LA pressure: the pulmonary venous pressure behind
+    // Rpv is set, cycle by cycle, to Pla0 + Rpv x (mean vein inflow), so the mean
+    // LAP of the solved loop is Pla0 while its waveform (a, x, v, y) is free.
+    Pla0: 8.0,
+    Rpv: 0.040,  // pulmonary-vein -> LA resistance (phasic S/D vein flow, a still diastasis)
+    ElaMin: 0.20, // passive LA elastance (stiff in MS, compliant in chronic MR)
+    aWave: 1.1,  // atrial activation: Ela rises to ElaMin·(1 + aWave) at the A wave
+    V0la: 10,    // unstressed LA volume
+    // Annular descent: as the LV long axis shortens in systole the mitral annulus
+    // is pulled toward the apex and the LA lengthens, so the atrium gains capacity
+    // (its reservoir phase, and the systolic pulmonary-vein S wave). laDesc is the
+    // capacity gained at a normal end-systole (annulus area x MAPSE, ~8 cm2 x 1.5 cm);
+    // it follows the LV long-axis shortening, rho^0.24 as in the geometry.
+    laDesc: 20,
+    Rmv: 0.009,  // mitral (inflow) resistance
+    // Mitral inertance (blood mass across the annulus): the E wave accelerates over
+    // ~80-100 ms instead of jumping to its peak, overshoots, decelerates to a
+    // near-still diastasis, then the A wave.
+    Lmv: 0.0009,
+    // Stenotic mitral ORIFICE (MS): a Bernoulli loss, dP = Kmv·Q² (= 4v² with
+    // v = Q / area), on top of Rmv. With it the transmitral velocity falls
+    // linearly as the LA empties (the "ski slope"), at a rate set by the orifice
+    // area and the chamber elastances — the pressure half-time.
+    Kmv: 0,
     // Rao 0.018 gave a peak LV→aorta gradient of ~14 mmHg in a NORMAL heart,
     // which on echo reads as mild aortic stenosis; a normal valve is 2-5 mmHg.
     // AS overrides Rao explicitly per grade below, so this only affects normals.
@@ -91,10 +118,18 @@ function circParams(path) {
     p.Rsys *= 1.3;
   }
   if (path.lvh && !path.dilated) { p.Emin = 0.12; }               // stiff, hypertrophied → higher LVEDP
-  if (path.dilated) { p.Emax = 0.60; p.Emin = 0.060; p.V0 = 30; p.Rsys = 1.30; p.Cao = 1.4; p.Pla0 = 13; }
+  if (path.dilated) {
+    p.Emax = 0.60; p.V0 = 30; p.Rsys = 1.30; p.Cao = 1.4;
+    // advanced DCM: a raised filling pressure into a stiffer, overfilled LV and a
+    // failing, dilated atrium (weak booster) give the RESTRICTIVE pattern that goes
+    // with an LVEF ~25 % and functional MR: a tall E wave that decelerates fast
+    // (DT < 150 ms) and a small A (E/A > 2), not impaired relaxation.
+    p.Pla0 = 18; p.Emin = 0.075;
+    p.ElaMin = 0.35; p.V0la = 40; p.aWave = 0.2; p.laDesc = 8;
+  }
   // DCM: annular dilatation and leaflet tethering leave a central FUNCTIONAL MR
   // (moderate: regurgitant fraction ~30 %) even with structurally normal leaflets
-  if (path.dilated && !path.mr) { p.Rmr = 1.2; }
+  if (path.dilated && !path.mr) { p.Rmr = 1.05; }
   if (path.mr) {
     // Regurgitant orifice + congested LA, plus the chronic volume-overload
     // REMODELLING of primary MR: the LV dilates (unstressed volume V0 rises) so it
@@ -107,16 +142,36 @@ function circParams(path) {
     // ejection at a peak aortic flow ~1.3x normal, so the cusps opened for only
     // two-thirds of systole. The (subclinically) lower end-systolic elastance of
     // chronic volume overload gives LVET ~230 ms at a near-normal peak aortic flow.
-    p.Rmr = ({ mild: 1.6, moderate: 0.9, severe: 0.38 })[g];
-    p.Pla0 = ({ mild: 9, moderate: 11, severe: 14 })[g];
+    // The LA takes the regurgitant volume in systole: a dilated chamber (V0la up)
+    // whose pressure climbs to a v-wave (severe: >= 25 mmHg) that blunts the
+    // late-systolic MR velocity, then empties fast into the LV (a tall E wave,
+    // E-dominant inflow); its booster function wanes as it dilates.
+    p.Rmr = ({ mild: 1.6, moderate: 0.85, severe: 0.33 })[g];
+    p.Pla0 = ({ mild: 9, moderate: 12, severe: 17 })[g];
     p.V0 = ({ mild: 20, moderate: 34, severe: 40 })[g];
     p.Emax = Math.min(p.Emax, ({ mild: 2.7, moderate: 2.4, severe: 1.8 })[g]);
-    p.aWave = 6;
+    p.ElaMin = ({ mild: 0.25, moderate: 0.32, severe: 0.4 })[g];
+    p.V0la = ({ mild: 25, moderate: 38, severe: 50 })[g];
+    p.aWave = ({ mild: 0.9, moderate: 0.7, severe: 0.5 })[g];
+    p.laDesc = ({ mild: 18, moderate: 14, severe: 10 })[g];
   }
   if (path.mitralStenosis) {                                      // narrow inflow, high LAP
-    p.Rmv = ({ mild: 0.043, moderate: 0.078, severe: 0.128 })[g];
+    // a Bernoulli orifice (effective area ~0.68 x the planimetered MS_AREA, the
+    // contraction of the funnel-shaped jet) behind a dilated, STIFF atrium filled
+    // through congested pulmonary veins: the LA rises to a v-wave in systole and
+    // empties slowly through the whole of diastole, so the gradient (and the CW
+    // velocity) decays along a ski slope whose pressure half-time follows the
+    // area; the fibrosed atrium keeps only a weak booster (reduced A bump). The
+    // rigid rheumatic annulus barely descends.
+    const aEff = 0.684 * MS_AREA[g];
+    p.Kmv = 1 / (2500 * aEff * aEff);
+    p.Rmv = 0.005;
     p.Pla0 = ({ mild: 12, moderate: 16, severe: 20 })[g];
-    p.aWave = 8;
+    p.ElaMin = ({ mild: 0.4, moderate: 0.6, severe: 0.8 })[g];
+    p.V0la = ({ mild: 50, moderate: 60, severe: 70 })[g];
+    p.Rpv = ({ mild: 0.2, moderate: 0.35, severe: 0.5 })[g];
+    p.laDesc = ({ mild: 12, moderate: 8, severe: 5 })[g];
+    p.aWave = 0.6;
   }
   if (path.rvpo) {
     // pulmonary hypertension: the failing right heart delivers less to the left
@@ -145,7 +200,10 @@ export function gradeOf(path = {}) {
 function simulate(path) {
   const p = circParams(path);
   const dt = CYCLE / STEPS;
-  let Vlv = 120, Pao = 80, Qao = 0;
+  let Vlv = 120, Pao = 80, Qao = 0, Vla = 50, Qmv = 0;
+  let edvPrev = 120, edvRun = 0;      // last cycle's EDV (annular-descent reference)
+  let Ppv = p.Pla0 + p.Rpv * 90, qpvSum = 0;   // pulmonary venous pressure (see Pla0)
+  const descNorm = 1 - Math.pow(0.4, 0.24);
   // LVOT/aortic inertance (mmHg·s²/mL) and aortic characteristic impedance (mmHg·s/mL)
   const L = 0.0015, Zc = 0.08;
 
@@ -154,19 +212,32 @@ function simulate(path) {
     Pao: new Float64Array(NSAMPLE), Vlv: new Float64Array(NSAMPLE),
     Qmv: new Float64Array(NSAMPLE), Qao: new Float64Array(NSAMPLE),
     Qmr: new Float64Array(NSAMPLE), Pla: new Float64Array(NSAMPLE),
+    Vla: new Float64Array(NSAMPLE), Qpv: new Float64Array(NSAMPLE),
   };
 
   for (let cyc = 0; cyc < NCYCLE; cyc++) {
     const record = cyc === NCYCLE - 1;
     let sIdx = 0;
+    if (cyc > 0) { edvPrev = edvRun; Ppv = p.Pla0 + p.Rpv * qpvSum / STEPS; }
+    edvRun = 0; qpvSum = 0;
     for (let s = 0; s < STEPS; s++) {
       const tau = s / STEPS;
       const a = activation(tau);
       const E = p.Emin + (p.Emax - p.Emin) * a;
       const Plv = E * (Vlv - p.V0);
-      const Pla = atrialP(tau, p);
-      // valves (diode + resistance); mitral opens when LA>LV (diastole)
-      const Qmv = Pla > Plv ? (Pla - Plv) / p.Rmv : 0;
+      if (Vlv > edvRun) edvRun = Vlv;
+      const desc = p.laDesc * Math.max(0, 1 - Math.pow(Math.min(1, Vlv / edvPrev), 0.24)) / descNorm;
+      const Pla = p.ElaMin * (1 + p.aWave * atrialAct(tau)) * Math.max(0, Vla - p.V0la - desc);
+      // mitral valve: a diode with resistance AND inertance (semi-implicit, like
+      // the aortic outflow below); it opens when LA > LV and shuts as the
+      // forward flow decelerates to zero
+      if (Qmv > 0 || Pla > Plv) {
+        Qmv = (Qmv + dt / p.Lmv * (Pla - Plv)) / (1 + dt * (p.Rmv + p.Kmv * Qmv) / p.Lmv);
+        if (Qmv < 0) Qmv = 0;
+      }
+      // pulmonary-vein inflow (bidirectional: atrial systole pushes a little back)
+      const Qpv = (Ppv - Pla) / p.Rpv;
+      qpvSum += Qpv;
       // aortic outflow has INERTIA (blood mass in the LVOT / proximal aorta) and
       // meets the aorta's characteristic impedance: the flow accelerates over
       // ~80-100 ms to a mid-systolic peak instead of jumping to its maximum the
@@ -179,6 +250,7 @@ function simulate(path) {
       const Qmr = (p.Rmr !== Infinity && Plv > Pla) ? (Plv - Pla) / p.Rmr : 0;
       const Qsys = (Pao - p.Pven) / p.Rsys;
       Vlv += (Qmv - Qao - Qmr) * dt;
+      Vla += (Qpv + Qmr - Qmv) * dt;
       Pao += ((Qao - Qsys) / p.Cao) * dt;
       if (Vlv < 0) Vlv = 0;
 
@@ -189,6 +261,7 @@ function simulate(path) {
           tr.phase[sIdx] = sIdx / NSAMPLE;
           tr.Plv[sIdx] = Plv; tr.Pao[sIdx] = Pao + Zc * Qao; tr.Vlv[sIdx] = Vlv;   // Pao: ascending-aortic pressure
           tr.Qmv[sIdx] = Qmv; tr.Qao[sIdx] = Qao; tr.Qmr[sIdx] = Qmr; tr.Pla[sIdx] = Pla;
+          tr.Vla[sIdx] = Vla; tr.Qpv[sIdx] = Qpv;
           sIdx++;
         }
       }
@@ -198,7 +271,7 @@ function simulate(path) {
   // summary scalars from the recorded cycle
   let EDV = -1e9, ESV = 1e9, PlvSys = -1e9, PaoSys = -1e9, PaoDia = 1e9;
   let grad = 0, fwd = 0, regurg = 0, tMin = 0, PlaAtSys = 0, gradMV = 0, mvSum = 0, mvN = 0;
-  let QaoMax = 0, QmvMax = 0, QmrMax = 0, iQmax = 0, iOpen = -1, iClose = -1;
+  let QaoMax = 0, QmvMax = 0, QmrMax = 0, iQmax = 0, iOpen = -1, iClose = -1, mrGradMax = 0;
   const dtS = CYCLE / NSAMPLE;
   for (let i = 0; i < NSAMPLE; i++) {
     if (tr.Vlv[i] > EDV) EDV = tr.Vlv[i];
@@ -216,6 +289,7 @@ function simulate(path) {
     }
     if (tr.Qmv[i] > QmvMax) QmvMax = tr.Qmv[i];
     if (tr.Qmr[i] > QmrMax) QmrMax = tr.Qmr[i];
+    if (tr.Qmr[i] > 0.5 && tr.Plv[i] - tr.Pla[i] > mrGradMax) mrGradMax = tr.Plv[i] - tr.Pla[i];
     fwd += tr.Qao[i] * dtS;
     regurg += tr.Qmr[i] * dtS;
   }
@@ -231,10 +305,89 @@ function simulate(path) {
     regurgFraction: SV > 0 ? clamp(regurg / SV, 0, 1) : 0,
     tMinVol: tMin,
     QaoMax, QmvMax, QmrMax, // per-cycle peak flows, for jet-velocity envelopes
+    mrGradMax,              // peak LV-LA gradient while regurgitating (MR jet Vmax = sqrt(/4))
     accelTime: (iQmax - iOpen) * dtS, ejectTime: (iClose - iOpen + 1) * dtS,
     Pla0: p.Pla0,           // chronic LA pressure (drives LA remodelling in the anatomy)
   };
+  Object.assign(sum, laMetrics(tr), inflowMetrics(tr));
   return { tr, sum, params: p };
+}
+
+// LA pressure and volume over the cycle: mean LAP, the systolic v-wave peak, the
+// a-wave peak, and the reservoir (max), pre-atrial-contraction and minimum volumes
+// with the passive (conduit) and active (booster) emptying fractions.
+function laMetrics(tr) {
+  let pSum = 0, vWave = 0, aWaveP = 0, vMax = -1e9, vMin = 1e9;
+  for (let i = 0; i < NSAMPLE; i++) {
+    const ph = tr.phase[i];
+    pSum += tr.Pla[i];
+    if (ph < 0.56 && tr.Pla[i] > vWave) vWave = tr.Pla[i];
+    if ((ph >= 0.84 || ph < 0.03) && tr.Pla[i] > aWaveP) aWaveP = tr.Pla[i];
+    if (tr.Vla[i] > vMax) vMax = tr.Vla[i];
+    if (tr.Vla[i] < vMin) vMin = tr.Vla[i];
+  }
+  const vPreA = tr.Vla[Math.round(0.84 * NSAMPLE)];
+  return {
+    PlaMean: pSum / NSAMPLE, PlaVWave: vWave, PlaAWave: aWaveP,
+    LAVmax: vMax, LAVmin: vMin, LAVpreA: vPreA,
+    laPassiveEF: vMax > 0 ? (vMax - vPreA) / vMax : 0,
+    laActiveEF: vPreA > 0 ? (vPreA - vMin) / vPreA : 0,
+    laTotalEF: vMax > 0 ? (vMax - vMin) / vMax : 0,
+  };
+}
+
+// Mitral-inflow (E/A) envelope metrics read off the modelled transmitral flow.
+// The Doppler velocity is the flow scaled by a constant orifice area (and in MS
+// the E-wave peak IS the Bernoulli peak gradient), so the timing and shape ratios
+// below are what a PW/CW trace of the inflow shows:
+//   eAccel  time from mitral opening to the E peak (s)
+//   eDT     deceleration time: E peak to where the deceleration slope (fitted
+//           between 85 % and 45 % of E) reaches baseline (s)
+//   pht     pressure half-time: E peak to E/sqrt(2) on the velocity (s), the
+//           early (steep) slope extrapolated if the A wave arrives first
+//   diastasis  lowest flow between the E and A waves as a fraction of E
+//   eaFlow  E / A peak-flow ratio; aPresent: an A-wave bump above the pre-A flow
+function inflowMetrics(tr) {
+  const dtS = CYCLE / NSAMPLE, Q = tr.Qmv;
+  let iO = -1;
+  for (let i = Math.round(0.3 * NSAMPLE); i < NSAMPLE; i++) if (Q[i] > 0.5) { iO = i; break; }
+  if (iO < 0) return {};
+  const iAon = Math.round(0.86 * NSAMPLE);
+  let iE = iO;
+  for (let i = iO; i < iAon; i++) { if (Q[i] > Q[iE]) iE = i; else if (Q[i] < 0.7 * Q[iE]) break; }
+  const E = Q[iE];
+  const cross = (frac) => {          // first time after the E peak the flow drops below frac·E
+    for (let i = iE; i < iAon; i++) if (Q[i] <= frac * E) {
+      const f = (Q[i - 1] - frac * E) / Math.max(1e-9, Q[i - 1] - Q[i]);
+      return (i - 1 + f) * dtS;
+    }
+    return null;
+  };
+  const tE = iE * dtS, t85 = cross(0.85), t45 = cross(0.45);
+  let eDT = null;
+  if (t85 != null && t45 != null && t45 > t85) eDT = (t85 - tE) + 0.85 * (t45 - t85) / 0.40;
+  else if (t85 != null) {             // slow (ski-slope) decay: slope from the peak to the pre-A flow
+    const qA = Q[iAon - 1], tA = (iAon - 1) * dtS;
+    eDT = E > qA ? (tA - tE) * E / (E - qA) : null;
+  }
+  let pht = cross(Math.SQRT1_2);
+  if (pht != null) pht -= tE;
+  else {
+    const qA = Q[iAon - 1], tA = (iAon - 1) * dtS;
+    pht = E > qA ? (tA - tE) * (1 - Math.SQRT1_2) * E / (E - qA) : null;
+  }
+  // diastasis: the flow nadir between the E and A waves (up to the A-wave upstroke)
+  let dMin = Infinity, q75 = 0;
+  for (let i = iE; i < Math.round(0.90 * NSAMPLE); i++) dMin = Math.min(dMin, Q[i]);
+  for (let i = Math.round(0.75 * NSAMPLE); i <= Math.round(0.82 * NSAMPLE); i++) q75 = Math.max(q75, Q[i]);
+  let A = 0;
+  for (let i = iAon - 4; i < NSAMPLE + 8; i++) A = Math.max(A, Q[i % NSAMPLE]);
+  const preA = Q[iAon - 6];
+  return {
+    mvoPhase: iO / NSAMPLE, eAccel: (iE - iO) * dtS, eDT, pht,
+    diastasis: E > 0 ? dMin / E : 0, lateDiastolic: E > 0 ? q75 / E : 0, eaFlow: A > 0 ? E / A : null,
+    aPresent: A > preA * 1.15 + 2,
+  };
 }
 
 // ---- memoisation ---------------------------------------------------------
@@ -282,9 +435,29 @@ export function hemodynamics(phase, path = {}) {
 // Scalar summary of the loop (EDV/ESV/SV/EF/pressures/gradient/regurg fraction).
 export function hemoSummary(path = {}) { return solved(path).sum; }
 
+// LA phasic function relative to the normal heart: c = conduit (passive) and
+// b = booster (active) emptying fractions of this circulation over the normal
+// ones. The anatomy scales its atrial reservoir/conduit/booster curve by these,
+// so the drawn LA empties as this case's LA does (a stiff MS atrium barely
+// moves; a failing DCM atrium loses its booster). {c: 1, b: 1} for a normal heart.
+const _laCache = new Map();
+export function laPhasic(path = {}) {
+  const key = sig(path);
+  let r = _laCache.get(key);
+  if (!r) {
+    const s = solved(path).sum, n = solved({}).sum;
+    const rel = (a, b) => clamp(b > 0 ? a / b : 1, 0.15, 1.4);
+    r = key === sig({}) ? { c: 1, b: 1 } : { c: rel(s.laPassiveEF, n.laPassiveEF), b: rel(s.laActiveEF, n.laActiveEF) };
+    _laCache.set(key, r);
+  }
+  return r;
+}
+
 // Mitral-inflow E/A ratio from the modelled diastolic flow: peak early (E, rapid
-// filling just after mitral opening) over peak late (A, atrial kick). Normal filling
-// is E-dominant (≈ 0.8–1.5); it falls below 1 with impaired relaxation. Memoised.
+// filling just after mitral opening, which the mitral inertance puts ~100 ms
+// later) over peak late (A, atrial kick). Normal filling is E-dominant (~1-2); it
+// falls below 1 with impaired relaxation and exceeds 2 when a high LA pressure
+// meets a stiff LV (restrictive). Memoised.
 let _eaPath = null, _eaVal;
 export function eaRatio(path = {}) {
   if (path === _eaPath) return _eaVal;
@@ -292,7 +465,7 @@ export function eaRatio(path = {}) {
   let e = 0, a = 0;
   for (let i = 0; i < NSAMPLE; i++) {
     const ph = i / NSAMPLE, q = tr.Qmv[i];
-    if (ph >= 0.36 && ph < 0.62) { if (q > e) e = q; }
+    if (ph >= 0.36 && ph < 0.72) { if (q > e) e = q; }
     else if (ph >= 0.80) { if (q > a) a = q; }
   }
   _eaVal = a > 0 ? e / a : null;
