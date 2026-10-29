@@ -7,7 +7,7 @@
 // labels, live measurements, and a scrolling spectral-Doppler trace.
 
 import { classify, velocityAt, geometryAt, hemoSummary, hemodynamics, TISSUE, VALVE_DEFS, FLOW, AORTIC_CUSPS, shuntLabel, stenosisCw, FLOW_AXES, FLOW_SITES, membSite } from './cardiac-model.js';
-import { LM, rapEstimate, diaphragmBelow } from './anatomy.js';
+import { LM, rapEstimate, diaphragmBelow, rwmaBlend, lumenDist } from './anatomy.js';
 import { clamp } from './mathutils.js';
 import { ALL_VIEWS } from './views.js';
 
@@ -50,6 +50,16 @@ const DB = {
   vwall: -26, vein: -52, soft: -46, lung: -48, medi: -38,
 };
 const AMP = Object.fromEntries(Object.entries(DB).map(([k, v]) => [k, Math.pow(10, v / 20)]));
+// Spontaneous echo contrast: amplitude gain (x3..x27, mean ~x10, about +20 dB) of
+// LA blood in a smooth cloud pattern that swirls about the LA centre with the
+// cardiac phase, so the smoke drifts rather than flickering like the speckle.
+function secSmoke(x, y, z, G) {
+  const c = G.A.la.c, a = 2 * Math.PI * G.phase * 0.5;
+  const dx = x - c[0], dz = z - c[2], dy = y - c[1];
+  const u = dx * Math.cos(a) - dz * Math.sin(a), w = dx * Math.sin(a) + dz * Math.cos(a);
+  const f = 0.5 + 0.5 * Math.sin(2.3 * u + 0.7 + 0.9 * dy) * Math.cos(1.9 * w - 0.4) * Math.sin(1.7 * dy + 1.6 * u + 1.1);
+  return 3 + 24 * f * f;
+}
 // Legacy linear echogenicity (0..1, tuned for the old power-law display) mapped
 // onto the same log scale, for the body-wall layers and effusion lines.
 const DR_REF = 55;
@@ -704,11 +714,23 @@ export class EchoView {
           // on the myocardium where the fluid begins one short step further along
           // the beam — drawn on the wall side so the fluid itself stays black
           if (path.effusion && classify(wx + 0.08 * bd[0], wy + 0.08 * bd[1], wz + 0.08 * bd[2], G, path).tissue === TISSUE.PERICARDIUM) e = AMP.peri * 3;
+          // chronic infarct: the thinned akinetic segment is fibrous scar, up to
+          // ~6 dB brighter than the viable myocardium round it
+          else if (path.rwma && G.A.lv.rwma && G.A.lv.rwma.chronic && lumenDist(wx, wy, wz, G.A, 'LV_EPI') < 0.05) {
+            const g = rwmaBlend(wx, wy, wz, G.A) / Math.max(0.01, G.A.lv.rwma.sev);
+            if (g > 0.05) e *= 1 + Math.min(1, g);
+          }
         }
         else if (kind === TISSUE.VALVE) e = calc ? AMP.calc : AMP.valve;
         else if (kind === TISSUE.LV || kind === TISSUE.RV ||
                  kind === TISSUE.LA || kind === TISSUE.RA ||
-                 kind === TISSUE.AORTA) e = AMP.blood;
+                 kind === TISSUE.AORTA) {
+          e = AMP.blood;
+          // rheumatic MS: spontaneous echo contrast ('smoke') in the stagnant LA and
+          // its appendage — faint swirling clouds of aggregated red cells, slowly
+          // rotating through the cycle (the blood speckle still re-draws each frame)
+          if (kind === TISSUE.LA && path.mitralStenosis && path.grade !== 'mild') e *= secSmoke(wx, wy, wz, G);
+        }
         else if (kind === TISSUE.PERICARDIUM) {
           // effusion: a transudate is anechoic, as dark as the blood pool or darker
           // (no cells to scatter), so it reads as a black band between two bright

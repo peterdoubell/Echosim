@@ -348,7 +348,8 @@ Known open (tagged in the audit):
 - The ME4C RV is 0.65 cm short of the LV apex at ES (target 0.8).
 - A marginal straight liver-edge stretch in PSAX-MV at ES.
 - The LSPV is not a separate tube beside the LAA in the ME LAA view.
-- No left brachiocephalic vein, and no Qp:Qs shunt model.
+- Shunts (ASD, VSD) flow against a prescribed RA / RV pressure curve: the right
+  heart is not lumped-modelled, so Qp:Qs comes from the left heart alone.
 - Speckle and PSF stay horizontal rather than following the sector arcs.
 
 ## Known limitations

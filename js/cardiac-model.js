@@ -360,6 +360,10 @@ function hemoFrame(hd, path, rvHd, phaseRV) {
     regurgFraction: s.regurgFraction, gradient: s.gradient,
     PlvSys: s.PlvSys, PaoSys: s.PaoSys, PaoDia: s.PaoDia,
     vAoPeak, vMitPeak, vMRPeak, vTRPeak, ejAo, ejMv, ejMr, ejTv, ejPv, ejTr, vMR, vTR,
+    // shunt jets (m/s, + = left-to-right): Bernoulli on the modelled LA-RA / LV-RV
+    // pressure difference, so the ASD signal is phasic and the VSD jet follows the
+    // interventricular gradient
+    vAsd: hd.vAsd || 0, vVsd: hd.vVsd || 0, vVsdPeak: s.vVsdPeak || 0, QpQs: s.QpQs || 1,
   };
 }
 
@@ -401,7 +405,9 @@ export function geometryAt(phase, path = {}) {
   // the LA enlarges with the chronic LA pressure (MR, MS, DCM).
   const vr = hd.sum.EDV / edvRef();
   const lvScale = Math.pow(vr, 0.4), lvLong = Math.pow(vr, 0.2);
-  const laScale = 1 + 0.045 * Math.max(0, (hd.sum.Pla0 || 8) - 8);
+  // (severe AS: the stiff, hypertrophied LV's diastolic dysfunction enlarges the
+  // LA too — LA AP ~4-4.5 cm — although its mean pressure is modelled near normal)
+  const laScale = (1 + 0.045 * Math.max(0, (hd.sum.Pla0 || 8) - 8)) * (path.aorticStenosis ? 1.2 : 1);
   let lvWallMul = 1.0;
   if (path.dilated) { lvWallMul = 0.82; }                    // thinned walls
   if (path.lvh || path.aorticStenosis) { lvWallMul = 1.55; } // concentric hypertrophy (IVSd ~1.4)
@@ -1172,11 +1178,15 @@ const AX_TR = (() => {
   return unit([0.35 * toRA[0] - 0.65 * AX_TRICUSPID_IN[0], 0.35 * toRA[1] - 0.65 * AX_TRICUSPID_IN[1], 0.35 * toRA[2] - 0.65 * AX_TRICUSPID_IN[2]]);
 })();
 const AX_VSD = unit([-1, 0.1, 0.15]);           // LV -> RV across the septum
-const AX_ASD = LM.IAS_N;                        // LA -> RA across the septum
+// LA -> RA across the septum, the stream bending toward the tricuspid valve as
+// it enters the RA (so the subcostal and ME views align with it)
+const AX_ASD = unit([LM.IAS_N[0] + (LM.T[0] - LM.IAS.asdC[0]) / Math.hypot(...LM.T.map((v, i) => v - LM.IAS.asdC[i])),
+  LM.IAS_N[1] + (LM.T[1] - LM.IAS.asdC[1]) / Math.hypot(...LM.T.map((v, i) => v - LM.IAS.asdC[i])),
+  LM.IAS_N[2] + (LM.T[2] - LM.IAS.asdC[2]) / Math.hypot(...LM.T.map((v, i) => v - LM.IAS.asdC[i]))]);
 // mid muscular septum, where the mid-papillary PSAX and the A4C planes cross, so the
 // defect is seen in both standard views
 const VSD_CORE = [-2.4, -3.6, LM.A4C_Z(-2.4, -3.6)];
-const ASD_CORE = LM.IAS.fossaC;      // fossa ovalis (secundum ASD)
+const ASD_CORE = LM.IAS.asdC;        // the secundum ASD in the fossa ovalis
 // Read-only flow axes and jet sites, for the spectral-Doppler gate placement
 // (echo.js) so the gates sit on the same streams the velocity field draws.
 export const FLOW_AXES = { mitralIn: AX_MITRAL_IN, tricuspidIn: AX_TRICUSPID_IN, lvot: AX_LVOT, rvot: AX_RVOT,
@@ -1318,8 +1328,8 @@ const MR_JET_PARAMS = { vc: 0.24, spread: 0.27, L: 2.2, pisa: 0.3, pisaR: 1.6, w
 const TR_JET_PARAMS = { vc: 0.24, spread: 0.27, L: 2.0, pisa: 0.28, pisaR: 1.5, wallAttach: 1.4, flow: FLOW.TR_JET };
 const JET_LEN = { mild: 1.6, moderate: 3.0, severe: 4.6 };
 
-// Radius (cm) of the modelled VSD channel. A ~1 cm defect with a ~4.5 m/s jet is a
-// RESTRICTIVE defect: the model has no L-R shunt volume (no Qp:Qs, LA/LV overload).
+// Radius (cm) of the modelled VSD channel. A ~1 cm defect with a ~4.5-5 m/s jet is
+// a RESTRICTIVE defect: the circulation carries a modest L-R shunt (Qp:Qs ~1.4).
 export const VSD_RADIUS = 0.5;
 
 // Shunt lesions' badge: size claims must follow the geometry and the circulation.
@@ -1525,7 +1535,8 @@ export function velocityAt(px, py, pz, G, path = {}) {
   }
   if (path.vsd) {
     // ventricular septal defect: LV -> RV across septum, systole, turbulent core
-    const jet = pulse(0.02, 0.44, phase);
+    const vJet = H.vVsd != null ? H.vVsd : 4.5 * pulse(0.02, 0.44, phase);
+    const jet = Math.abs(vJet) / 4.5;
     const peri = path.vsd === 'perimembranous';           // else the mid-muscular defect
     const ms = peri ? membSite(G) : null;
     const core = peri ? ms.c : VSD_CORE, ax = peri ? ms.rad : AX_VSD;
@@ -1533,8 +1544,10 @@ export function velocityAt(px, py, pz, G, path = {}) {
     const perp = offAxisDist(px, py, pz, core, ax);
     const along = _axis.along;
     const shape = gauss(perp, 0.55) * Math.exp(-clamp(Math.abs(along), 0, 3) / 2.2);
-    const speed = jet * 4.5 * shape;                      // restrictive VSD peak ~4.5 m/s
-    considerFlow(region, ax[0], ax[1], ax[2], speed, FLOW.VSD_JET, jet > 0.15);
+    // restrictive VSD: the jet speed IS the LV-RV gradient (Bernoulli), ~4.5-5 m/s
+    // in systole, a low-velocity to-and-fro signal in diastole
+    const speed = Math.abs(vJet) * shape, sg = vJet >= 0 ? 1 : -1;
+    considerFlow(region, ax[0] * sg, ax[1] * sg, ax[2] * sg, speed, FLOW.VSD_JET, Math.abs(vJet) > 2);
   }
   // --- pulmonary-vein flow -------------------------------------------------
   // Forward (vein -> LA) in systole (S wave, driven by atrial relaxation and
@@ -1591,11 +1604,11 @@ export function velocityAt(px, py, pz, G, path = {}) {
     const perp = offAxisDist(px, py, pz, ASD_CORE, AX_ASD);
     const along = _axis.along;
     const shape = gauss(perp, 0.7) * Math.exp(-clamp(Math.abs(along), 0, 3) / 2.5);
-    // phasic left-to-right flow: lowest in early systole, peaking in late
-    // systole (LA v wave) and again with atrial contraction
-    const gp = (c, w) => { let dd = phase - c; dd -= Math.round(dd); return Math.exp(-(dd / w) * (dd / w)); };
-    const env = 0.3 + 0.7 * Math.max(gp(0.40, 0.11), 0.75 * gp(0.62, 0.08), 0.9 * gp(0.92, 0.06));
-    considerFlow(region, AX_ASD[0], AX_ASD[1], AX_ASD[2], 1.0 * env * shape, FLOW.ASD_JET, false);
+    // phasic flow from the modelled LA-RA pressure difference (hemodynamics.js):
+    // ~1-1.3 m/s left-to-right through systole and early diastole and after the
+    // LA contracts, a dip as the RA contracts first, a brief reversal at the QRS
+    const v = H.vAsd || 0, sg = v >= 0 ? 1 : -1;
+    considerFlow(region, AX_ASD[0] * sg, AX_ASD[1] * sg, AX_ASD[2] * sg, Math.abs(v) * shape, FLOW.ASD_JET, false);
   }
 
   return _velHasBest ? _velResult : null; // may be null (no meaningful flow)
