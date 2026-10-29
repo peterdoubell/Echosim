@@ -187,7 +187,7 @@ check('LV', 'apical wall thickness', apexWall, [0.4, 0.8], 'cm', 'thinner than b
   const c0 = [0, y, 0], c = sub(c0, mul(a4.normal, dot(sub(c0, a4.pos), a4.normal)));
   let n = 0;
   for (let t = -4; t <= 4; t += 0.01) { const p = add(c, mul(lat, t)); if (classify(p[0], p[1], p[2], GES, {}).tissue === TISSUE.LV) n++; }
-  check('LV', 'A4C mid-cavity width (ES)', n * 0.01, [2.2, 4.0]);
+  check('LV', 'A4C mid-cavity width (ES)', n * 0.01, [2.6, 3.6]);
 }
 
 // LV volumes by voxel integration of the rendered LV blood pool below the valves
@@ -310,9 +310,11 @@ check('LA', 'LA volume (voxel, ES)', laV, [30, 70], 'mL', 'LAVI 16-34 mL/m2 x BS
 {
   const w = inPlane(sub(GED.A.valves.mitral.c, GED.A.valves.tricuspid.c), a4c.normal);  // toward the LV
   const onPlane = (p) => sub(p, mul(a4c.normal, dot(sub(p, a4c.pos), a4c.normal)));
+  // (the caliper spans the cavity across a moderator band or trabecula up to
+  // 0.5 cm thick, as a sonographer's RVD2 does: free-wall endocardium to septum)
   const rvAt = (yy) => {
     const c = onPlane([-3.5, yy, 0]);
-    return run(GED, sub(c, mul(w, 5)), w, isT(TISSUE.RV, TISSUE.VALVE), 9);
+    return run(GED, sub(c, mul(w, 5)), w, isT(TISSUE.RV, TISSUE.VALVE), 9, 0, 0.5);
   };
   const rvd1 = rvAt(GED.A.valves.tricuspid.c[1] - 1.0);
   const rvd2 = rvAt(-3.6);
@@ -993,10 +995,7 @@ const PLAX_N_X = () => { const c = cross(PLAX_N, [0, 1, 0]); return c; };
   // the plane follows the posterior annulus down, so it does not climb into the
   // posterior AV groove in systole (a coronary-sinus crescent reads as an
   // effusion); a small cut of the sinus near the crux is acceptable
-  // KNOWN-FAIL (marginal, from combining the review-9 fixes): 101 vs 100 samples after the RV/annulus mechanics change
-  KNOWN = true;
   check('PSAX-MV', 'coronary sinus in plane at ES (samples)', cs, [0, 100], '');
-  KNOWN = false;
 }
 // moderator band in the four-chamber plane; LAA cut by the A2C
 {
@@ -1177,12 +1176,9 @@ function erodeSurvivors(S, k, r) {
       }
     }
   }
-  // KNOWN-FAIL (marginal): the liver's upper (diaphragmatic) face under the heart
-  // still shows a nearly straight 3 cm stretch (residual 0.07 vs 0.1 cm) on the
-  // left of PSAX-MV at end-systole, where the dome sheet is locally flat
-  KNOWN = true;
+  // (the parasternal beams now stay above the flat central tendon: the liver they
+  // still reach is the curved dome edge at the sector margin)
   check('Liver', 'PSAX: straightest 3 cm of liver edge (max line-fit residual)', worst === 1e9 ? 1 : worst, [0.1, 99], 'cm', where);
-  KNOWN = false;
 }
 // one stomach, in the left upper quadrant: no extrahepatic wall band (gastric
 // wall or its fat) runs through the liver in the parasternal / subcostal views,
@@ -1535,6 +1531,130 @@ const laPart = (A, q) => {
   check('LA', 'A4C LA major, minimum / maximum (ED / LA max)', a4ED.major / a4M.major, [0.70, 0.85], '');
   check('LA', 'A4C LA minor, minimum / maximum (ED / LA max)', a4ED.minor / a4M.minor, [0.78, 0.92], '');
   check('LA', 'A4C LA height / width at ED', a4ED.major / a4ED.minor, [1.0, 1.6], '');
+}
+// ---- parasternal / apical planes (review 10) --------------------------------
+// The parasternal beams run on behind the heart into the posterior mediastinum
+// and lung, not into the liver and the gastric fundus (those belong to the
+// subcostal window); PSAX-MV shows the LV and the RV crescent, not the RA and
+// the IVC; the A5C opens the LVOT into the aortic root; the A4C end-systolic
+// cavity matches the A2C; the RV inflow has the RA in the far field.
+{
+  const PL = 'Parasternal / apical planes';
+  const T = TISSUE;
+  const abdomen = (S) => cellsWhere(S, (l, k) => {
+    if (l === T.LIVER) return true;
+    const q = ptK(S, k);
+    if (l === T.VEIN) return diaphragmBelow(q[0], q[1], q[2]) > 0;
+    return (l === T.LUNG || l === T.VWALL || l === T.FAT) && stomachDist(q[0], q[1], q[2]) < 0.5 && diaphragmBelow(q[0], q[1], q[2]) > -0.4;
+  });
+  const sectorCells = (S) => cellsWhere(S, () => true).length;
+  for (const [nm, lim] of [['PLAX', 2], ['PSAX_AV', 2], ['PSAX_MV', 2], ['RVIT', 2], ['PSAX', 6]]) {
+    const v = TTE_VIEWS[nm] || EXTRA_VIEWS[nm];
+    for (const [tag, G] of [['ED', GED], ['ES', GES]]) {
+      const S = planeSample(v, G, {}, 0.1);
+      // KNOWN-FAIL: the RV inflow's left edge still reaches ~4 % liver at ES below
+      // the RV diaphragmatic wall; every roll / swing that clears it brings the LV
+      // into the plane (the 'RA and RV both shown' row) or loses the CS ostium
+      KNOWN = nm === 'RVIT' && tag === 'ES';
+      check(PL, `${nm}: liver + stomach share of the sector (${tag})`, 100 * abdomen(S).length / sectorCells(S), [0, lim], '%');
+      KNOWN = false;
+    }
+  }
+  // PSAX-MV: no RA, RV crescent over the LV
+  for (const [tag, G] of [['ED', GED], ['ES', GES]]) {
+    const S = planeSample(EXTRA_VIEWS.PSAX_MV, G, {}, 0.1);
+    check(PL, `PSAX-MV: RA in the plane (${tag})`, areaOf(S, cellsWhere(S, (l) => l === T.RA)), [0, 0.05], 'cm2');
+    const Tc = G.A.valves.tricuspid.c, Mc = G.A.valves.mitral.c;
+    const tv = cellsWhere(S, (l, k) => { if (l !== T.VALVE) return false; const q = ptK(S, k); return Math.hypot(...sub(q, Tc)) < Math.hypot(...sub(q, Mc)); });
+    // KNOWN-FAIL at ED: the tips of the open tricuspid leaflets (which hang into
+    // the RV inflow at this level) still show at the left sector edge, ~0.2 cm2
+    KNOWN = tag === 'ED';
+    check(PL, `PSAX-MV: tricuspid leaflet in the plane (${tag})`, areaOf(S, tv), [0, 0.02], 'cm2');
+    KNOWN = false;
+    const lv = cellsWhere(S, (l) => l === T.LV), rv = cellsWhere(S, (l) => l === T.RV);
+    const c = lv.reduce((m, k) => { const q = xd(S, k); return [m[0] + q[0] / lv.length, m[1] + q[1] / lv.length]; }, [0, 0]);
+    const bins = new Set();
+    for (const k of rv) { const q = xd(S, k); if (Math.hypot(q[0] - c[0], q[1] - c[1]) < 5.5) bins.add(Math.floor((Math.atan2(q[0] - c[0], -(q[1] - c[1])) * 180 / Math.PI + 360) / 5)); }
+    check(PL, `PSAX-MV: RV crescent arc round the LV (${tag})`, bins.size * 5, [90, 200], 'deg');
+  }
+  // A5C: LVOT, cusps and root in the plane, along the beam
+  {
+    const v = EXTRA_VIEWS.A5C;
+    const S = planeSample(v, GES, {}, 0.08), p = S.p;
+    check(PL, 'A5C: aortic root axis out of the plane', Math.asin(Math.abs(dot(LM.U_AO, p.normal))) * 180 / Math.PI, [0, 15], 'deg');
+    const lvot = unit(sub(GES.A.valves.aortic.c, GES.A.lv.apex || [0, GES.A.lv.apexY, 0]));
+    check(PL, 'A5C: LVOT (apex -> aortic valve) angle to the central beam', Math.acos(Math.min(1, Math.abs(dot(lvot, p.dir)))) * 180 / Math.PI, [0, 25], 'deg');
+    const av = GES.A.valves.aortic.c, rel = sub(av, p.pos), d0 = dot(rel, p.dir), x0 = dot(rel, p.lat);
+    let ui = [dot(LM.U_AO, p.dir), dot(LM.U_AO, p.lat)]; const un = Math.hypot(ui[0], ui[1]); ui = [ui[0] / un, ui[1] / un];
+    let run = 0, best = 0;
+    for (let t = -0.5; t < 8; t += 0.05) {
+      const q = add(p.pos, add(mul(p.dir, d0 + ui[0] * t), mul(p.lat, x0 + ui[1] * t)));
+      const l = classify(q[0], q[1], q[2], GES, {}).tissue;
+      if (l === T.AORTA) { run += 0.05; best = Math.max(best, run); } else if (l !== T.VALVE) run = 0;
+    }
+    check(PL, 'A5C: aortic root + ascending aorta run along the root axis (ES)', best, [3, 9]);
+    const cusp = cellsWhere(S, (l, k) => { if (l !== T.VALVE) return false; const q = xd(S, k); return Math.hypot(q[1] - d0, q[0] - x0) < 1.4; });
+    check(PL, 'A5C: aortic cusps in the plane at the annulus (ES)', areaOf(S, cusp), [0.3, 3], 'cm2');
+    for (const [tag, G] of [['ED', GED], ['ES', GES]]) {
+      const S2 = planeSample(v, G, {}, 0.08);
+      // (sinus pockets the cusps cut off from the main lumen are root, not extra)
+      const inRoot = (c) => c.filter((k) => { const q = ptK(S2, k); return lumenDist(q[0], q[1], q[2], G.A, 'AOROOT') < 0; }).length > c.length / 2;
+      const comps = components(S2, (l) => l === T.AORTA).comps.sort((a, b) => b.length - a.length);
+      const extra = comps.slice(1).filter((c) => !inRoot(c)).map((c) => areaOf(S2, c)).filter((a) => a >= 0.3);
+      check(PL, `A5C: aortic sections beyond the root, count / largest (${tag})`, extra.length + (extra[0] || 0) / 10, [0, 1.3], '',
+        `${extra.map((a) => a.toFixed(1)).join(' / ') || 'none'} cm2 (descending aorta <= 3 cm2)`);
+    }
+  }
+  // A4C end-systole: open cavity, area change consistent with the A2C
+  {
+    const area = (v, G) => { const S = planeSample(v, G, {}, 0.08); const c = components(S, (l) => l === T.LV).comps; const tot = c.reduce((s, x) => s + x.length, 0); const big = c.reduce((m, x) => Math.max(m, x.length), 0); return [areaOf(S, { length: big }), tot ? big / tot : 0]; };
+    const [a4d] = area(TTE_VIEWS.A4C, GED), [a4s, conn] = area(TTE_VIEWS.A4C, GES), [a2d] = area(TTE_VIEWS.A2C, GED), [a2s] = area(TTE_VIEWS.A2C, GES);
+    const f4 = 100 * (1 - a4s / a4d), f2 = 100 * (1 - a2s / a2d);
+    check(PL, 'A4C: LV area change ED -> ES', f4, [40, 55], '%', `${a4d.toFixed(1)} -> ${a4s.toFixed(1)} cm2`);
+    check(PL, 'A4C minus A2C LV area change', Math.abs(f4 - f2), [0, 8], 'pts', `A2C ${f2.toFixed(1)} %`);
+    check(PL, 'A4C: ES LV blood pool in one piece (largest region share)', conn, [0.97, 1], '');
+  }
+  // RV inflow: RV in the near field, RA in the far field
+  for (const [tag, G] of [['ED', GED], ['ES', GES]]) {
+    const S = planeSample(EXTRA_VIEWS.RVIT, G, {}, 0.1);
+    const dep = (lab) => { const c = cellsWhere(S, (l) => l === lab); return c.reduce((m, k) => m + xd(S, k)[1], 0) / Math.max(1, c.length); };
+    check(PL, `RVIT: RA centroid deeper than the RV centroid (${tag})`, dep(T.RA) - dep(T.RV), [3, 9]);
+  }
+  // PLAX: a rounded LA behind the root (no posterior venous tail), the CS at the
+  // posterior AV groove, no great-vessel sections beyond the root
+  for (const [tag, G] of [['ED', GED], ['ES', GES]]) {
+    const S = planeSample(TTE_VIEWS.PLAX, G, {}, 0.08), p = S.p;
+    const la = components(S, (l) => l === T.LA).comps.reduce((m, c) => (c.length > m.length ? c : m), []);
+    const H = hull(la.map((k) => xd(S, k)));
+    let ha = 0; for (let i = 0; i < H.length; i++) { const a = H[i], b = H[(i + 1) % H.length]; ha += a[0] * b[1] - a[1] * b[0]; }
+    // (>= 0.9: at ES the posterior wall of the aortic root flattens the LA's
+    // anterior face where the LA rises behind it; a posterior venous tail running
+    // down under the LV wall lowers it)
+    check(PL, `PLAX: LA solidity, area / convex hull (${tag})`, areaOf(S, la) / Math.max(1e-6, Math.abs(ha) / 2), [0.9, 1], '');
+    const cs = cellsWhere(S, (l, k) => { const q = ptK(S, k); return lumenDist(q[0], q[1], q[2], G.A, 'CS') < 0; });
+    const csC = cs.reduce((m, k) => { const q = xd(S, k); return [m[0] + q[0] / cs.length, m[1] + q[1] / cs.length]; }, [0, 0]);
+    const mv = VALVE_DEFS.mitral, mc = G.A.valves.mitral.c;
+    let w = cross(mv.n, p.normal); w = unit(w);
+    const ring = [1, -1].map((sg) => add(mc, mul(w, sg * mv.r))).map((q) => [dot(sub(q, p.pos), p.lat), dot(sub(q, p.pos), p.dir)]);
+    const hinge = ring[0][1] > ring[1][1] ? ring[0] : ring[1];
+    // KNOWN-FAIL: the CS runs in the AV groove outside the ~1 cm posterior wall, so
+    // its centre sits ~1.1-1.3 cm from the ring point of the posterior annulus
+    KNOWN = true;
+    check(PL, `PLAX: CS centre to the posterior mitral hinge (${tag})`, cs.length ? Math.hypot(csC[0] - hinge[0], csC[1] - hinge[1]) : null, [0, 1.0]);
+    const ao = components(S, (l) => l === T.AORTA).comps.sort((a, b) => b.length - a.length);
+    const rootX = ao.length ? ao[0].reduce((m, k) => m + xd(S, k)[0], 0) / ao[0].length : 0;
+    let beyond = 0;
+    for (const c of components(S, (l) => l === T.AORTA || l === T.RA || l === T.VEIN).comps) {
+      if (c === ao[0] || areaOf(S, c) < 0.3) continue;
+      const x = c.reduce((m, k) => m + xd(S, k)[0], 0) / c.length;
+      if (x > rootX + 2) beyond += areaOf(S, c);
+    }
+    // KNOWN-FAIL: the SVC (right of the ascending aorta) and the right PA (behind
+    // it) are cut at the right sector edge; shifting the plane off one brings in
+    // the other
+    check(PL, `PLAX: great-vessel sections beyond the root (${tag})`, beyond, [0, 0.3], 'cm2');
+    KNOWN = false;
+  }
 }
 SECTION = 'TEE';
 {
@@ -1906,7 +2026,8 @@ SECTION = 'Pathology';
   // LV short-axis centroid, and planimeters to the grade's MVA (+/- 15 %)
   const ph0 = esOf('ms');
   for (const [tag, ph] of [['mid-diastole', (1 + ph0) / 2], ['late diastole', 0.9], ['ED', 0.99]]) {
-    const S = planeSample(EXTRA_VIEWS.PSAX_MV, geo(ph, 'ms'), PATHS.ms, 0.04, 10);
+    // (sampled to the view's own depth: the LV section reaches past 10 cm)
+    const S = planeSample(EXTRA_VIEWS.PSAX_MV, geo(ph, 'ms'), PATHS.ms, 0.04);
     const sec = components(S, (l) => l === TISSUE.LV || l === TISSUE.VALVE).comps.reduce((m, c) => (c.length > m.length ? c : m), []);
     const inSec = new Set(sec);
     const lvc = components(S, (l, k) => l === TISSUE.LV && inSec.has(k)).comps.sort((a, b) => b.length - a.length);
@@ -2077,7 +2198,20 @@ SECTION = 'Normal';
   }
   for (const nm of ['PSAX', 'A2C']) {
     const R = renderBmode(nm, ED, {});
-    check('B-mode', `${nm}: myocardium minus liver (mean grey, liver iso or darker)`, meanOf(byKind(R, T.MYO)) - meanOf(byKind(R, T.LIVER)), [0, 255], 'grey');
+    // (at matched depth: the myocardium within the liver's depth band, 10th-90th
+    // centile +-1 cm, so the comparison is of echogenicity, not of where the
+    // parasternal / apical beam happens to reach the liver; a view whose beams
+    // stay above the diaphragm, with under 0.5 cm2 of liver, has nothing to compare)
+    const lv = [], my = [];
+    for (let i = 0; i < R.SW * R.SH; i++) if (R.mask[i]) { if (R.kind[i] === T.LIVER) lv.push(i); else if (R.kind[i] === T.MYO) my.push(i); }
+    const lvCm2 = lv.length / R.pxPerCm ** 2;
+    if (lvCm2 < 0.5) assert('B-mode', `${nm}: myocardium minus liver (mean grey, liver iso or darker)`, true, `no liver in plane (${lvCm2.toFixed(2)} cm2)`);
+    else {
+      const ld = lv.map((i) => R.depth[i]).sort((a, b) => a - b), lo = ld[Math.floor(0.1 * ld.length)] - 1, hi = ld[Math.floor(0.9 * ld.length)] + 1;
+      const band = my.filter((i) => R.depth[i] >= lo && R.depth[i] <= hi).map((i) => R.grey[i]);
+      check('B-mode', `${nm}: myocardium minus liver (mean grey, liver iso or darker)`, meanOf(band.length > 200 ? band : byKind(R, T.MYO)) - meanOf(lv.map((i) => R.grey[i])), [0, 255], 'grey',
+        `${lvCm2.toFixed(1)} cm2 liver, myocardium at ${lo.toFixed(1)}-${hi.toFixed(1)} cm`);
+    }
     if (nm === 'PSAX') check('B-mode', 'PSAX: RV cavity minus LV cavity (mean grey, no near-field haze)', meanOf(byKind(R, T.RV)) - meanOf(byKind(R, T.LV)), [-255, 12], 'grey');
   }
   {

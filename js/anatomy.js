@@ -443,7 +443,10 @@ const GASTRIC = (() => {
   const n = unit([0.1, 0, 1]);
   return { n, p: mad([0, -3.6, 0], n, -4.6), t: 0.45 };
 })();
-const DIAPH_WRAP = 6.5;                              // how far the diaphragm rises to meet the sac (cm)
+// How far the diaphragm rises to meet the sac (cm): it lies flat under the heart's
+// diaphragmatic surface and does not climb its sides, so the liver stays below the
+// RV and RA instead of riding up beside them into the parasternal far field.
+const DIAPH_WRAP = 1.5;
 const MIDLINE = -2.0;                                  // p . L of the body mid-sagittal plane
 
 // Everything the rest of the app needs to place valves, flows, labels and views.
@@ -765,11 +768,11 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   // with the apex-anchored wall; the muscles CONTRACT in systole, so each tip
   // follows its commissural annulus down and the annulus-to-tip distance (the
   // chordal length) stays constant, and they thicken with the wall.
-  // Systolic thickening (with the wall, capped at 1.4x) is carried by the free
+  // Systolic thickening (with the wall, capped at 1.3x) is carried by the free
   // head; the embedded, trabeculated base barely fattens and grows into the wall
   // (its axis moves out by the added radius), so the muscles stand out more in
   // systolic short axis without pinching the mid cavity into an hourglass.
-  const papThick = Math.min(1.4, Math.max(1, lvWall / (LVP.wall * lvWallMul)));
+  const papThick = Math.min(1.3, Math.max(1, lvWall / (LVP.wall * lvWallMul)));
   const papBase = 1 + (papThick - 1) * 0.15;
   const out = (papBase - 1) * 0.62;                        // added base radius
   const papAt = (ang, rb, rt) => {
@@ -948,7 +951,7 @@ function raaSegs(ra) {
 const pvDir = (l, p, s) => unit(add(add(mul(BL, l), mul(BP, p)), mul(BS, s)));
 const PV_DEF = [
   { name: 'LSPV', u: pvDir(0.85, 0.55, 0.55), d: pvDir(0.85, 0.25, 0.7), r: 0.58, len: 2.2 },
-  { name: 'LIPV', u: pvDir(0.85, 0.6, -0.45), d: pvDir(0.9, 0.35, -0.45), r: 0.52, len: 2.1 },
+  { name: 'LIPV', u: pvDir(0.85, 0.6, -0.45), d: pvDir(0.9, 0.4, 0.15), r: 0.52, len: 2.1 },
   { name: 'RSPV', u: pvDir(-0.9, 0.6, 0.55), d: pvDir(-1, 0.1, 0.45), r: 0.6, len: 2.2 },
   { name: 'RIPV', u: pvDir(-0.85, 0.7, -0.45), d: pvDir(-0.9, 0.3, -0.45), r: 0.55, len: 2.1 },
 ];
@@ -1057,7 +1060,7 @@ function buildEustachian(ra) {
 // SVC or raised right-sided pressure.
 function buildCS(M, raFloor) {
   const pts = [];
-  const R = 3.05, y0 = M[1] + 0.15;
+  const R = 2.9, y0 = M[1] + 0.15;
   const angs = [-0.15, -0.75, -1.35, -1.95, -2.45];
   for (const t of angs) pts.push([M[0] + Math.cos(t) * R, y0 + 0.08 * t, M[2] + Math.sin(t) * (R - 0.2)]);
   pts.push(add(raFloor, [0.55, 0.25, -1.05]));             // ostium, low on the posterior septal RA
@@ -1792,10 +1795,22 @@ export function lumenDist(x, y, z, A, which) {
 // down by the heart; the domes rise on either side of it, the right (over the
 // liver) higher than the left.
 function domeRise(l) { return (l < 0 ? 0.02 : 0.012) * l * l; }
+// Behind the heart the diaphragm slopes down toward its crura (the posterior
+// costophrenic recesses run far lower than the central tendon), so the lower lobes
+// and the posterior mediastinum, not the liver and stomach, lie behind the LV
+// inferolateral wall where the parasternal beams run on. The sheet falls
+// DIAPH_POST[1] cm per cm of body-posterior distance beyond DIAPH_POST[0] (cm),
+// easing in over DIAPH_POST[2] cm.
+const DIAPH_POST = [0.0, 1.0, 1.5];
+function postFall(p) {
+  const u = p - DIAPH_POST[0], w = DIAPH_POST[2];
+  return DIAPH_POST[1] * (u <= 0 ? 0 : u < w ? u * u / (2 * w) : u - w / 2);
+}
 function belowDiaphragm(x, y, z) {
   const h = x * DIAPH_N[0] + y * DIAPH_N[1] + z * DIAPH_N[2] - diaphH();
   const l = x * BL[0] + y * BL[1] + z * BL[2] - MIDLINE;
-  return h + domeRise(l);                                       // a lateral point sits deeper under the dome
+  const p = x * BP[0] + y * BP[1] + z * BP[2];
+  return h + domeRise(l) - postFall(p);                         // a lateral point sits deeper under the dome
 }
 // Diaphragm lift. The diaphragm is one continuous sheet, so its local rise
 // under the heart is a HEIGHT FIELD over the diaphragm plane: for each column,
@@ -1804,6 +1819,7 @@ function belowDiaphragm(x, y, z) {
 // the heart and back down to its dome. Built once, on first use.
 let _lift = null;
 const LIFT = { n: 41, span: 12.0 };
+const LIFT_POST = [0.5, 3.0];                       // body-posterior span over which the lift fades (cm)
 function buildLift() {
   const A = anatomyParams(0, 0, {}, null, 0);
   const N = DIAPH_N, u1 = unit(cross(N, Math.abs(N[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0])), u2 = cross(N, u1);
@@ -1822,7 +1838,12 @@ function buildLift() {
         if (t < dome) continue;
         if (sacAt(p) < 0) { lift = t - dome + 0.1; break; }    // just meets the sac
       }
-      raw[i * n + j] = lift;
+      // The sheet meets the heart's diaphragmatic surface, not its back: posterior
+      // to the AV groove the diaphragm falls away to its crura and the lower lobes
+      // fill the costophrenic recesses, so the lift fades out over LIFT_POST, and
+      // the liver does not ride up behind the RA and the LV inferolateral wall
+      // (where the parasternal beams run on into the posterior mediastinum)
+      raw[i * n + j] = lift * (1 - smoothstep(LIFT_POST[0], LIFT_POST[1], dot(base, BP)));
     }
   }
   // bridge narrow clefts (the interatrial groove, the AV grooves): a column may not
@@ -1853,7 +1874,7 @@ function buildLift() {
   }
   for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
     let a = 0; for (let t = -R; t <= R; t++) { const ii = Math.min(n - 1, Math.max(0, i + t)); a += tmp[ii * n + j] * k[t + R]; }
-    sm[i * n + j] = Math.max(raw[i * n + j], a / ks * 1.6 > raw[i * n + j] ? Math.min(a / ks * 1.6, DIAPH_WRAP) : raw[i * n + j]);
+    sm[i * n + j] = Math.max(raw[i * n + j], a / ks > raw[i * n + j] ? Math.min(a / ks, DIAPH_WRAP) : raw[i * n + j]);
   }
   _lift = { u1, u2, c0, step, map: sm };
 }
@@ -1910,11 +1931,13 @@ function dLiver(x, y, z, h, hRaw) {
 // inferior h < h0 - hk*l - hc*l^2 (l > 0 for the quadratic terms); the stomach
 // (fundus and body under the left dome) as an ellipsoid the lobe wraps around
 const LIV_LOBE = {
-  p0: 5.0, pk: 0.6, pc: 0.06, h0: 7.0, hk: 0.5, hc: 0.05,
-  // lumen: fundus/upper body ~5 x 6 x 6.5 cm, entirely left of the midline (wall
-  // included); its upper-right surface carries the TG contact (GASTRIC.p, with
-  // the lumen normal there along GASTRIC.n). h: below the unlifted dome sheet
-  stomach: { c: [2.93, 1.56, 2.99], r: [2.6, 3.0, 3.2] },
+  p0: 2.0, pk: 0.6, pc: 0.06, h0: 7.0, hk: 0.5, hc: 0.05,
+  // lumen: fundus/upper body ~4 x 4 x 5 cm under the left dome, lateral to the
+  // left lobe and entirely left of the midline (wall included), not spread behind
+  // the LV; its upper surface carries the TG contact (GASTRIC.p, with the lumen
+  // normal there close to GASTRIC.n). h: below the unlifted dome sheet. The left
+  // lobe is a thin anterior wedge (back face p0) in front of it.
+  stomach: { c: [4.0, 0.3, 2.68], r: [2.0, 2.0, 2.6] },
 };
 function dHepaticVeins(x, y, z, A) {
   const ivc = A.ivc;
