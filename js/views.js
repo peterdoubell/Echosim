@@ -228,6 +228,23 @@ function subcostalProbe() {
 // apical windows sit over the apex: a remodelled (longer) LV moves its apex, and
 // the apical window with it, out toward the left axilla / caudally
 const APICAL_TRACK = (A) => [0, A.lv.apexShift || 0, 0];
+// Mid-papillary short axis (PSAX): the papillary heads descend with the annulus
+// in systole (the chordae stay taut), so the plane follows `k` of their mean
+// descent along its own normal and the muscles stay in plane through systole,
+// larger and closer together at ES, at the mid-ventricle the sonographer holds the
+// probe on. The probe also slides `lat` of the descent toward screen-right along
+// the chest wall, so the far field of the sector does not dip below the heart into
+// the liver as the plane moves apically. (Kept small: a larger slide puts the
+// window over the lung edge, a larger track shows the liver.)
+function papTrack(probe, k, lat = 0) {
+  let pr = null;
+  return (A) => {
+    if (!pr) pr = probe();
+    const pap = A.pap || [], drop = pap.length ? pap.reduce((s, p) => s + (p.drop || 0), 0) / pap.length : 0;
+    const n = pr.normal;
+    return vadd(vscale(n, k * drop * n[1]), vscale(pr.lat, -lat * drop));
+  };
+}
 // A4C: as the root descends in systole the sonographer's small posterior tilt
 // keeps the plane off it (as at end-diastole), so the root-clearance shell of the
 // atria is never brought into the upper septum as a false crux 'mass'
@@ -240,7 +257,7 @@ function a4cTrack(A) {
 }
 export const TTE_VIEWS = {
   PLAX: { probe: plaxProbe, depth: 16 },
-  PSAX: { probe: () => psaxProbe(...PSAX_MID), depth: 13 },   // mid-papillary
+  PSAX: { probe: () => psaxProbe(...PSAX_MID), depth: 13, track: papTrack(() => psaxProbe(...PSAX_MID), 0.3, 0.25) },   // mid-papillary
   PSAX_AV: { probe: psaxAvProbe, depth: 15, track: (A) => [0, 0.8 * (A.lv.A[1] - A0.lv.A[1]), 0] },   // follows the root's descent
   A4C: { probe: a4cProbe, depth: 17, track: a4cTrack },
   A2C: { probe: a2cProbe, depth: 17, track: APICAL_TRACK },

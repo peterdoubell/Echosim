@@ -15,7 +15,7 @@
 // blood-flow field, and couples everything to the lumped-parameter circulation.
 
 import { clamp, smoothstep, pulse, unit } from './mathutils.js';
-import { anatomyParams, rightHeartLoad, hepaticVeinSegs, atrialFill, bodyClassify, visceralDist, lumenDist, mitralLift, buildRwma, rwmaWeight, BODY, CFG, LM, BODY_AX } from './anatomy.js';
+import { anatomyParams, rightHeartLoad, hepaticVeinSegs, atrialFill, bodyClassify, visceralDist, lumenDist, mitralLift, tricuspidLift, buildRwma, rwmaWeight, BODY, CFG, LM, BODY_AX } from './anatomy.js';
 import { hemodynamics, hemoSummary, pvLoop, gradeOf, eaRatio, MS_AREA, laPhasic } from './hemodynamics.js';
 import { DCM_SEVERITIES, dcmSeverityOf } from './scenarios.js';
 
@@ -930,6 +930,7 @@ function avTipWorld(name, G, sgn, q) {
   ];
   // the mitral apparatus rides the angle-dependent annular excursion
   if (name === 'mitral') t[1] += mitralLift(t[0], t[1], t[2], G.A);
+  else if (name === 'tricuspid') t[1] += tricuspidLift(t[0], t[1], t[2], G.A);
   return t;
 }
 
@@ -953,7 +954,7 @@ function valveTissue(px, py, pz, G, path) {
     // leaflet axial (downstream) component `a` and the in-plane radial vector.
     const dx = px - vc[0], dz = pz - vc[2];
     // (the mitral hinges follow the angle-dependent annular excursion)
-    const dy = py - vc[1] - (name === 'mitral' ? mitralLift(px, py, pz, G.A) : 0);
+    const dy = py - vc[1] - (name === 'mitral' ? mitralLift(px, py, pz, G.A) : name === 'tricuspid' ? tricuspidLift(px, py, pz, G.A) : 0);
     if (dx * dx + dy * dy + dz * dz > 9) continue;       // cheap reject (>3 cm away)
     const f = lf.flow;
     const a = dx * f[0] + dy * f[1] + dz * f[2];          // axial: 0 at hinge, +downstream
