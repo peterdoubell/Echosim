@@ -1842,11 +1842,8 @@ for (const [vn, view, vessels] of [['SC_IVC', EXTRA_VIEWS.SC_IVC, ['ivc']], ['ME
         if ((body.get(id[k]) || 0) * S.step * S.step < 1.0) continue;
         const t = dot(sub(q, V.a), ax); lo = Math.min(lo, t); hi = Math.max(hi, t);
       }
-      // KNOWN-FAIL (marginal, from combining the review-9 fixes): MEBICAVAL IVC at ES 1.49 vs 1.5 cm
-      const kPrev = KNOWN; if (vn === 'MEBICAVAL' && v === 'ivc' && tag === 'ES') KNOWN = true;
       check('Cavae', `${vn}: ${v.toUpperCase()} length in plane, joined to the RA (${tag})`, hi > lo ? hi - Math.max(lo, 0) : 0, [1.5, 20], 'cm',
         `tube lumen in plane ${(inPl * S.step * S.step).toFixed(2)} cm2`);
-      KNOWN = kPrev;
     }
   }
 }
@@ -1893,23 +1890,74 @@ for (const [vn, view, vessels] of [['SC_IVC', EXTRA_VIEWS.SC_IVC, ['ivc']], ['ME
     }
     check('TEE', `MEBICAVAL: LA depth in the central 30 deg of the sector (${tag})`, laBest, [2.0, 8], 'cm', `from ${laTop.toFixed(1)} cm`);
     check('TEE', `MEBICAVAL: LA near-field edge (${tag})`, laTop, [0.5, 2.5]);
-    // KNOWN-FAIL at ED: the beam is aimed at the septum above the fossa (so the
-    // SVC stays in the sector) and at end-diastole, after atrial contraction, the
-    // LA free wall has fallen back toward the septum: the central beam passes
-    // above the small LA (3 cm of LA on it at ES)
-    KNOWN = tag === 'ED';
+    // (the transducer on the oesophageal centreline and the plane through both
+    // caval axes: the beam crosses the middle of the LA body)
     check('TEE', `MEBICAVAL: LA depth along the central beam (${tag})`, len(la), [2.0, 8]);
-    KNOWN = false;
     const sp = septum(G, {}), ias = sp.filter((k) => k > 0).length * 0.05;
     check('TEE', `MEBICAVAL: interatrial septum in plane, LA on one side and RA on the other (${tag})`, ias, [1.5, 12]);
-    // KNOWN-FAIL: ~1.8 cm. The LA's septal face is small and lies anterosuperior
-    // of the RA's (they overlap only about the fossa), and the aortic root above
-    // the fossa keeps the SVC ~1.8 cm behind it, so no plane through the
-    // oesophagus holds both cavae and a longer stretch of shared septum
-    KNOWN = true;
+    // the LA's septal face runs along the SVC -> IVC axis, so the septum crosses
+    // the image for 3+ cm between the cavae
     check('TEE', `MEBICAVAL: interatrial septum in plane >= 3 cm (${tag})`, ias, [3.0, 12]);
-    KNOWN = false;
     assert('TEE', `MEBICAVAL: normal septum intact in plane (${tag})`, !sp.includes(2));
+    // the RA body is one rounded chamber between the cavae: along each beam the
+    // deepest RA cell (the cavae included, the appendage and coronary sinus not)
+    // traces the far wall; a pouch is a bulge of that wall standing >= 0.8 cm
+    // deeper than the wall on both sides of it, within one continuous stretch of
+    // wall (the review-11 lobulated far-field pouches)
+    {
+      const inRAA = (q) => A.ra.aa.some((g) => { const ab = sub(g.b, g.a), t = Math.max(0, Math.min(1, dot(sub(q, g.a), ab) / dot(ab, ab))); return Math.hypot(...sub(q, add(g.a, mul(ab, t)))) < g.r1 + (g.r2 - g.r1) * t; });
+      const prof = [];
+      for (let th = -0.62; th <= 0.621; th += 0.02) {
+        const bd = add(mul(pb.dir, Math.cos(th)), mul(pb.lat, Math.sin(th)));
+        let far = null;
+        for (let r = 0.3; r < view.depth; r += 0.05) {
+          const q = add(pb.pos, mul(bd, r));
+          if (classify(q[0], q[1], q[2], G, {}).tissue !== TISSUE.RA) continue;
+          if (inRAA(q) || lumenDist(q[0], q[1], q[2], A, 'CS') < 0) continue;
+          far = r;
+        }
+        prof.push(far);
+      }
+      let pouches = 0, worst = 0;
+      for (let i = 1; i + 1 < prof.length; i++) {
+        if (prof[i] == null || prof[i] < prof[i - 1] || prof[i] < prof[i + 1]) continue;
+        let lo = prof[i], ro = prof[i], j = i - 1, k = i + 1;
+        for (; j >= 0 && prof[j] != null && prof[j] <= prof[i]; j--) lo = Math.min(lo, prof[j]);
+        for (; k < prof.length && prof[k] != null && prof[k] <= prof[i]; k++) ro = Math.min(ro, prof[k]);
+        // (a flank needs at least 3 beams of wall, and one that ends where the RA
+        // ends — not at the sector edge — belongs to a tube's mouth, not a pouch)
+        if (i - j <= 3 || k - i <= 3 || (j >= 0 && prof[j] == null) || (k < prof.length && prof[k] == null)) continue;
+        const prom = prof[i] - Math.max(lo, ro);
+        worst = Math.max(worst, prom);
+        if (prom >= 0.8) pouches++;
+      }
+      check('TEE', `MEBICAVAL: RA far-wall pouches (${tag})`, pouches, [0, 0], '', `largest bulge ${worst.toFixed(2)} cm`);
+    }
+    // the LA is a broad echo-free near field: on the rendered B-mode, the widest
+    // run of LA pixels darker than grey 40 along the 4 cm arc
+    {
+      const R = renderBmode('MEBICAVAL', ph, {});
+      let w = 0, best = 0;
+      for (let th = -R.half; th <= R.half; th += 0.05 / 4) {
+        const b = beamSample(R, th, 4);
+        if (b && b.grey < 40 && b.kind === TISSUE.LA) { w += 0.05; best = Math.max(best, w); } else w = 0;
+      }
+      check('TEE', `MEBICAVAL: anechoic LA width at 4 cm depth (${tag})`, best, [2.5, 5], 'cm');
+    }
+    // the crista terminalis: myocardial ridge cells in plane at the lateral side
+    // of the SVC orifice (within 1 cm of the orifice's edge, on the RA free-wall
+    // side of the septum), the crest between the SVC and the appendage
+    {
+      const capD = (q, g) => { const ab = sub(g.b, g.a), t = Math.max(0, Math.min(1, dot(sub(q, g.a), ab) / dot(ab, ab))); return Math.hypot(...sub(q, add(g.a, mul(ab, t)))) - g.r; };
+      let best = 9;
+      for (let d = 0.5; d < view.depth; d += 0.05) for (let x = -d * 0.77; x <= d * 0.77; x += 0.05) {
+        const q = add(add(pb.pos, mul(pb.dir, d)), mul(pb.lat, x));
+        if (Math.hypot(...sub(q, A.svc.a)) > A.svc.r + 1.2 || dot(sub(q, A.svc.a), LM.IAS_N) <= 0) continue;
+        if (!A.crista.some((g) => capD(q, g) < 0) || classify(q[0], q[1], q[2], G, {}).tissue !== TISSUE.MYO) continue;
+        best = Math.min(best, Math.hypot(...sub(q, A.svc.a)) - A.svc.r);
+      }
+      check('TEE', `MEBICAVAL: crista ridge cells beside the SVC orifice, lateral side (${tag})`, best, [0, 1], 'cm', 'distance from the orifice edge');
+    }
   }
   {
     const path = PATHS.asd, sp = septum(geo(0, 'asd'), path);

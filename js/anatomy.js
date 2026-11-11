@@ -317,6 +317,11 @@ const hermite = (p0, t0, p1, t1, t) => {
 // inclined forward and medially to the end of the arch, so the arch's limbs are
 // ~6 cm apart and the descending limb tapers away down and back from the arch.
 const DTA_TOP = add(add(DTA_P, mul(BS, 6.6)), add(mul(BP, -1.8), mul(BL, -1.2)));
+// (between them it bows DTA_MID_OFF cm posteriorly and to the left, so behind
+// the atria it runs posterolateral to the oesophagus — the TEE probe's path —
+// instead of across it)
+const DTA_MID_OFF = [-0.2, 1.7];                       // cm: posterior, left
+const DTA_MID = add(lerp3(DTA_P, DTA_TOP, 0.6), add(mul(BP, DTA_MID_OFF[0]), mul(BL, DTA_MID_OFF[1])));
 const DTA_BOT = mad(DTA_P, BS, -9.0);
 const DTA_R = 1.12;                                   // d 2.25
 // The arch: a round candy-cane curve (radius ~3 cm) tangent to the ascending
@@ -912,7 +917,8 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
     // line with each other (the ME bicaval axis); the IVC orifice lies ~3 cm
     // from the tricuspid annulus, across the cavotricuspid isthmus
     svc: cav.svc, ivc: cav.ivc, bcv: buildBCV(cav.svc),
-    ias: { p: IAS_P, n: IAS_N, tLimbus: IAS.tLimbus, tFossa: iasT, rFossa: IAS.rFossa, fc: IAS.fossaC, hc: path.asd ? IAS.asdC : null, hr: IAS.asdR, hrb: IAS.asdRb, hu: IAS.asdU, hb: IAS.asdB },
+    ias: { p: IAS_P, n: IAS_N, tLimbus: IAS.tLimbus, tFossa: iasT, rFossa: IAS.rFossa, fc: IAS.fossaC, hc: path.asd ? IAS.asdC : null, hr: IAS.asdR, hrb: IAS.asdRb, hu: IAS.asdU, hb: IAS.asdB,
+      lf: laSeptFrame(cav) },
     cs: buildCS(Mbase, add(RA_FLOOR0, [0, -tvDrop, 0])),
     // aortic root: three sinuses of Valsalva around the valve, sino-tubular
     // junction, ascending aorta, arch and descending thoracic aorta (one vessel).
@@ -1071,7 +1077,7 @@ function buildPV(la) {
 // included), so the ridge is attached to the wall at every phase and stands
 // CRISTA.proud into the cavity; never a free intracavitary bar.
 const CRISTA_U = [[0.15, 0.95, 0.1], [-0.55, 0.6, 0.15], [-0.85, 0.0, 0.1], [-0.6, -0.6, 0.05], [0.0, -0.95, -0.1]];
-const CRISTA = { r: 0.25, proud: 0.4, sub: 3, shell: 0.45 };   // capsule radius, ridge height above the wall (cm), points per span, deepest paint
+const CRISTA = { r: 0.25, proud: 0.4, sub: 3, shell: 0.45, svc: 5, svcUp: 0.2, rSvc: 0.35, from: 1 };   // capsule radius, ridge height above the wall (cm), points per span, deepest paint; points from the SVC rim, rim height above the orifice (cm), radius there (the thick upper crista)
 function raFramePoint(ra, u, f) {
   const d = add(add(mul(ra.e1, u[0] * ra.r1), mul(ra.a, u[1] * ra.rl)), mul(ra.e2, u[2] * ra.r2));
   return mad(ra.c, d, f);
@@ -1092,13 +1098,44 @@ function buildCrista(A) {
     }
     return mad(c, dir, lo - (CRISTA.proud - CRISTA.r));   // the capsule's inner face stands `proud` off the wall
   };
+  // it begins on the lateral side of the SVC orifice, at the crest of the SVC-RA
+  // junction between the SVC and the mouth of the appendage (thickest there,
+  // CRISTA.rSvc), and runs down the wall to the first waypoint: CRISTA.svc points
+  // seated on the wall outward from the SVC axis (extended into the RA), so the
+  // ridge rides the junction, not a chord across it
   const pts = [];
-  for (let i = 0; i < CRISTA_U.length - 1; i++) {
+  const sv = A.svc, sax = unit(sub(sv.b, sv.a));
+  const seatFrom = (q) => {
+    const o = mad(sv.a, sax, dot(sub(q, sv.a), sax)), dir = unit(sub(q, o));
+    let lo = 0, hi = 0.1;
+    for (; hi < 4.0; lo = hi, hi += 0.1) { const r = mad(o, dir, hi); if (dRAlumen(r[0], r[1], r[2], A) >= 0) break; }
+    for (let i = 0; i < 12; i++) { const m = 0.5 * (lo + hi), r = mad(o, dir, m); if (dRAlumen(r[0], r[1], r[2], A) < 0) lo = m; else hi = m; }
+    return mad(o, dir, lo - (CRISTA.proud - CRISTA.r));
+  };
+  // (the crest lies between the SVC and the mouth of the appendage lobe at its
+  // orifice: outward from the orifice along the bisector of the two axes)
+  const ra2 = ra.aa[1];
+  const bis = ra2 ? unit(add(sax, unit(sub(ra2.b, ra2.a)))) : unit(sub(IAS_N, mul(sax, dot(IAS_N, sax))));
+  const o0 = mad(sv.a, sax, CRISTA.svcUp);
+  let lo = 0, hi = 0.1;
+  for (; hi < 4.0; lo = hi, hi += 0.1) { const r = mad(o0, bis, hi); if (dRAlumen(r[0], r[1], r[2], A) >= 0) break; }
+  for (let i = 0; i < 12; i++) { const m = 0.5 * (lo + hi), r = mad(o0, bis, m); if (dRAlumen(r[0], r[1], r[2], A) < 0) lo = m; else hi = m; }
+  const rim = mad(o0, bis, lo - (CRISTA.proud - CRISTA.rSvc)), first = wall(CRISTA_U[CRISTA.from]);
+  pts.push(rim);
+  const seatC = (q) => {                    // (as wall(): on the ray from the RA centre through q)
+    const dir = unit(sub(q, c));
+    let lo = 0, hi = 0.1;
+    for (; hi < 4.0; lo = hi, hi += 0.1) { const r = mad(c, dir, hi); if (dRAlumen(r[0], r[1], r[2], A) >= 0) break; }
+    for (let i = 0; i < 12; i++) { const m = 0.5 * (lo + hi), r = mad(c, dir, m); if (dRAlumen(r[0], r[1], r[2], A) < 0) lo = m; else hi = m; }
+    return mad(c, dir, lo - (CRISTA.proud - CRISTA.r));
+  };
+  for (let k = 1; k < CRISTA.svc; k++) pts.push((k < CRISTA.svc / 2 ? seatFrom : seatC)(lerp3(rim, first, k / CRISTA.svc)));
+  for (let i = CRISTA.from; i < CRISTA_U.length - 1; i++) {
     for (let k = 0; k < CRISTA.sub; k++) pts.push(wall(lerp3(CRISTA_U[i], CRISTA_U[i + 1], k / CRISTA.sub)));
   }
   pts.push(wall(CRISTA_U[CRISTA_U.length - 1]));
   const segs = [];
-  for (let i = 0; i + 1 < pts.length; i++) segs.push({ a: pts[i], b: pts[i + 1], r: CRISTA.r });
+  for (let i = 0; i + 1 < pts.length; i++) segs.push({ a: pts[i], b: pts[i + 1], r: i < CRISTA.svc ? CRISTA.rSvc + (CRISTA.r - CRISTA.rSvc) * i / CRISTA.svc : CRISTA.r });
   return segs;
 }
 // Eustachian valve: the crescentic flap at the IVC-RA junction directed toward
@@ -1178,7 +1215,7 @@ function buildAorta(A, path) {
       return P.slice(1).map((b, i) => ({ a: P[i], b, r1: r(i), r2: r(i + 1) }));
     })(),
     arch: ARCH_SEGS,
-    dta: { a: DTA_P, b: DTA_BOT, r: DTA_R, top: DTA_TOP },
+    dta: { a: DTA_P, b: DTA_BOT, r: DTA_R, top: DTA_TOP, mid: DTA_MID },
     wall: 0.2,
   };
 }
@@ -1601,6 +1638,24 @@ function iasAt(x, y, z, A) {
 // (IVC) rim lies where the LA's septal face would otherwise end, so a shallow
 // lens of LA blood under the septum carries the LA across the whole fossa and
 // its rims (cut flat by the septal plane like the rest of the LA).
+// The LA's septal face along the caval axis: the LA lies against the septum
+// from the right upper pulmonary vein (beside the SVC) down to the posterior
+// septum above the coronary sinus, so in the ME bicaval view the septum runs
+// 3-4 cm across the image with LA blood along its whole length. A flat lens of LA
+// blood under the septum, centred LA_SEPT.up cm above the fossa along the
+// SVC -> IVC axis (taken within the septal plane), carries the LA's septal face
+// that far; the septal cut and the annulus clip still bound it.
+const LA_SEPT = { up: 0.8, ru: 2.0, rb: 0.7, rn: 0.6, dn: 0.3 };
+function laSeptFrame(cav) {
+  const ax = sub(cav.svc.a, cav.ivc.a);
+  const u = unit(sub(ax, mul(IAS_N, dot(ax, IAS_N))));          // toward the SVC, in the septal plane
+  return { u, b: cross(IAS_N, u), c: mad(mad(IAS.fossaC, u, LA_SEPT.up), IAS_N, -LA_SEPT.dn) };
+}
+function laSeptFace(x, y, z, s) {
+  const f = s.lf, dx = x - f.c[0], dy = y - f.c[1], dz = z - f.c[2];
+  return sdEllipsoid(dx * f.u[0] + dy * f.u[1] + dz * f.u[2], dx * f.b[0] + dy * f.b[1] + dz * f.b[2],
+    dx * s.n[0] + dy * s.n[1] + dz * s.n[2], 0, 0, 0, LA_SEPT.ru, LA_SEPT.rb, LA_SEPT.rn);
+}
 const ASD_FACE = { up: -0.3, bk: 0.4, dn: 0.5, ru: 1.2, rb: 1.0, rn: 0.55 };
 function asdFace(x, y, z, s) {
   const c = s.hc, dx = x - c[0], dy = y - c[1], dz = z - c[2];
@@ -1661,14 +1716,16 @@ function laInflow(x, y, z, A) {
 // tubes — what the ASE LA volume measures (biplane / 3D LAV excludes the LAA and
 // the pulmonary veins)
 function dLAlumen(x, y, z, A, body = false) {
-  const e = sdAtrium(x, y, z, A.la, 0);
+  const e0 = sdAtrium(x, y, z, A.la, 0);
+  const e = A.ias.lf && e0 > 0.5 ? Math.min(e0, laSeptFace(x, y, z, A.ias) + 0.3) : e0;   // (far test only)
   if (body) {
     if (e > 3.2) return e;
   } else if (e > 3.2) {                                                     // far away: only the vein tubes matter
     const v = Math.min(e, dPV(x, y, z, A));
     return v > 1.5 ? v : clearRPA(ssub(v, dAOarchDTA(x, y, z, A) - A.ao.wall - 0.15, 0.2), x, y, z, A);
   }
-  let d = e;
+  let d = e0;
+  if (A.ias.lf) d = Math.min(d, laSeptFace(x, y, z, A.ias));         // (septal face along the caval axis)
   if (A.ias.hc) d = smin(d, asdFace(x, y, z, A.ias), 0.3);           // (secundum ASD: LA side of its rims)
   if (!body) {
     d = smin(d, dAppendage(x, y, z, A.la.aa, 0.22) + laaPectinate(x, y, z, A.la.aa), 0.14);   // NARROW neck
@@ -1683,8 +1740,10 @@ function dLAlumen(x, y, z, A, body = false) {
   // the aortic root sits in front of the LA across the transverse sinus: the
   // aortic wall and the LA wall lie between the two blood pools
   d = ssub(d, dAOroot(x, y, z, A) - A.ao.wall - 0.22, 0.15);
-  // an enlarged LA abuts but never overruns the descending aorta behind it
-  d = ssub(d, dAOarchDTA(x, y, z, A) - A.ao.wall - 0.15, 0.2);
+  // an enlarged LA abuts but never overruns the descending aorta behind it (or
+  // the oesophagus, which lies in the aorta's former straight course behind the
+  // atria where the aorta bows to its left: the posterior mediastinal bed)
+  d = ssub(d, Math.min(dAOarchDTA(x, y, z, A), dPostBed(x, y, z, A)) - A.ao.wall - 0.15, 0.2);
   return clearRPA(d, x, y, z, A);
 }
 // the right pulmonary artery crosses the LA roof and the right pulmonary veins:
@@ -1807,10 +1866,7 @@ function dAOarchDTA(x, y, z, A) {
     const c = sdCapsule(x, y, z, s[0][0], s[0][1], s[0][2], s[1][0], s[1][1], s[1][2], s[2]);
     d = i < nArch ? Math.min(d, c) : smin(d, c, 0.3);
   }
-  const t = ao.dta;
-  const dt = Math.min(sdCapsule(x, y, z, t.a[0], t.a[1], t.a[2], t.b[0], t.b[1], t.b[2], t.r),
-    sdCapsule(x, y, z, t.top[0], t.top[1], t.top[2], t.a[0], t.a[1], t.a[2], t.r));
-  return smin(d, dt, 0.6);
+  return smin(d, dDTA(x, y, z, A), 0.6);
 }
 function dAOlumen(x, y, z, A) { return Math.min(dAOroot(x, y, z, A), dAOarchDTA(x, y, z, A)); }
 // the arch tube alone, without its head and neck branches
@@ -1921,10 +1977,18 @@ function dArchHeads(x, y, z, A) {
   }
   return d;
 }
-function dDTA(x, y, z, A) {
+// the posterior mediastinal bed behind the atria: the straight course from the
+// end of the arch to the aorta behind the LA, which the bowed descending aorta
+// (DTA_MID) leaves to the oesophagus
+function dPostBed(x, y, z, A) {
   const t = A.ao.dta;
+  return sdCapsule(x, y, z, t.top[0], t.top[1], t.top[2], t.a[0], t.a[1], t.a[2], t.r);
+}
+function dDTA(x, y, z, A) {
+  const t = A.ao.dta, m = t.mid || t.top;
   return Math.min(sdCapsule(x, y, z, t.a[0], t.a[1], t.a[2], t.b[0], t.b[1], t.b[2], t.r),
-    sdCapsule(x, y, z, t.top[0], t.top[1], t.top[2], t.a[0], t.a[1], t.a[2], t.r));
+    sdCapsule(x, y, z, t.top[0], t.top[1], t.top[2], m[0], m[1], m[2], t.r),
+    sdCapsule(x, y, z, m[0], m[1], m[2], t.a[0], t.a[1], t.a[2], t.r));
 }
 export function lumenDist(x, y, z, A, which) {
   switch (which) {
