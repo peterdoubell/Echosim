@@ -269,6 +269,19 @@ function hash01(a, b) {
   return (h >>> 0) / 4294967296;
 }
 
+// Whether colour Doppler is on when a view loads. Off where the lesion is
+// MORPHOLOGICAL and colour would paint over it: calcified, restricted aortic
+// cusps (AS) in the parasternal long axis, the short-axis valve views and the
+// TEE long axis; the domed, fish-mouth mitral valve (MS) in the parasternal and
+// TEE long axis and the mitral short axis. A coexisting regurgitant lesion keeps
+// colour on (its jet is then the finding). The learner can always switch it on.
+export function colourDefault(view, path = {}) {
+  if (hasMR(path) || path.tr || path.vsd || path.asd) return true;
+  if (path.aorticStenosis && (view === 'PLAX' || view === 'PSAX_AV' || view === 'MEAVSAX' || view === 'MELAX')) return false;
+  if (path.mitralStenosis && (view === 'PLAX' || view === 'PSAX_MV' || view === 'MELAX')) return false;
+  return true;
+}
+
 export class EchoView {
   constructor(canvas, spectralCanvas) {
     this.canvas = canvas;
@@ -1324,7 +1337,7 @@ export class EchoView {
     // already-composited part of the same beam. Modelled for the descending-aorta
     // views, where the lung meets the aorta face-on; the lung at the edges of the
     // other TEE sectors and the transthoracic pleura are not mirrored here.
-    const mirAmp = (this.nearFieldCm || 0) < 0.5 && this.viewName === 'DESCAO' ? 0.3 : 0;
+    const mirAmp = (this.nearFieldCm || 0) < 0.5 && this.viewName === 'DESCAO' ? 0.38 : 0;
     // the reflecting plane: tangent to the pleura on the beam that meets it most
     // squarely (well inside the line), as [x, y, nx, ny] in buffer px
     let mirP = null;
@@ -1391,26 +1404,41 @@ export class EchoView {
             const gr = 0.6 + 0.8 * (lGrain[ab0] * (1 - fr) + lGrain[ab1] * fr);
             const sig = 0.06 + 0.004 * depth;
             let al = 0, pl = 0;
-            for (let m = 1, amp = pleuraAmp; m <= 4; m++, amp *= 0.45) {
+            // A-lines: reverberations between the pleura and the transducer face, at
+            // integer multiples of the pleural depth (concentric with the transducer),
+            // each round trip ~6 dB down (amplitude x 0.5). The m-th reverberation
+            // has met the pleura m times, so it needs a pleura facing the beam (spec^m):
+            // a grazing pleura gives a line but no A-lines.
+            for (let m = 1, amp = pleuraAmp, sp = spec; m <= 4; m++, amp *= 0.5, sp *= spec) {
               const q = (depth - m * dl) / (sig * (1 + 0.3 * (m - 1))), g = amp * Math.exp(-q * q);
-              if (m === 1) pl = g * spec * tp * gr; else al += g * spec * tp;
+              if (m === 1) pl = g * spec * tp * gr; else al += g * sp * tp;
             }
-            // reverberation haze beyond the air (~ -40 dB, below tissue), streaked
-            // along the beams by the same coarse lateral grain as the pleural line
-            // (reverberation, not tissue: only lightly speckled)
-            let haze = 0.01 * (0.35 + 1.3 * (lGrain[ab0] * (1 - fr) + lGrain[ab1] * fr)) * Math.exp(-(depth - dl) / 4) * (0.7 + 0.3 * spk[idx]);
+            // 'dirty' acoustic shadow beyond the air: low-level reverberation clutter
+            // (~ -40 dB, below tissue) that carries the system's speckle like any echo
+            // (fully developed: the PSF-convolved speckle field, mean-normalised) — no
+            // smooth CG gradient and no per-beam streaks. Most of it is multiple
+            // reflection off the pleura, so it follows the pleural incidence (a pleura
+            // the beam grazes sends its echo away and leaves a darker, noisier shadow)
+            // and fades slowly with distance beyond the line.
+            const sN = spk[idx] * 1.128;
+            let haze = 0.007 * (0.35 + 0.65 * spec) * (0.45 + 0.55 * Math.exp(-(depth - dl) / 3)) * sN;
             // mirror image of the tissue in front of the pleura (TEE): the beam
             // reflects off the pleura, so the echo at depth d comes from the point
             // the reflected beam reaches, i.e. the image point mirrored across the
             // reflecting plane (the pleura's tangent plane where it faces the probe
             // squarely; see mirP below). The copy replaces most of the reverberation
             // haze where it falls, so its lumen reads dark too.
+            // The replica took the longer path (attenuation) and was defocused by the
+            // curved reflector, so it is weaker (~ -10 dB) and laterally blurred (a
+            // ~2.5 mm FWHM smear across the receiving beam), its lumen carries clutter
+            // (the haze is only partly displaced), and it re-speckles at the mirror point.
             let mir = 0;
             if (mirP && depth >= dl) {
               const ddx = i - mirP[0], ddy = j - mirP[1];
               const dist = ddx * mirP[2] + ddy * mirP[3];
               if (dist > 0) {
-                const mx = Math.round(i - 2 * dist * mirP[2]), my = Math.round(j - 2 * dist * mirP[3]);
+                const fx = i - 2 * dist * mirP[2], fy = j - 2 * dist * mirP[3];
+                const mx = Math.round(fx), my = Math.round(fy);
                 if (mx >= 0 && mx < SW && my >= 0 && my < j) {
                   const q = my * SW + mx;
                   if (mask[q]) {
@@ -1421,14 +1449,27 @@ export class EchoView {
                     const aF = clamp((Math.hypot(mdx, mdy) / pxPerCm - 0.3) / 0.5, 0, 1);
                     const mv = tp * (0.4 + 0.6 * ci) * Math.min(1, (depth - dl) / 0.15) * eF * eF * aF *
                       Math.min(1, dist / (0.4 * pxPerCm));
-                    mir = mirAmp * mv * lin[q] * (0.6 + 0.8 * spk[idx]);
-                    haze *= 1 - 0.75 * mv;
+                    // receiving beam's lateral direction at this pixel, reflected into
+                    // the source half-space; Gaussian taps (sigma 1.2 mm) along it
+                    const pdx = i - cx, pdy = j - apexY, pr = Math.hypot(pdx, pdy) || 1;
+                    let lx = pdy / pr, ly = -pdx / pr;
+                    const ln = lx * mirP[2] + ly * mirP[3]; lx -= 2 * ln * mirP[2]; ly -= 2 * ln * mirP[3];
+                    const stepPx = 0.04 * pxPerCm;
+                    let sw = 0, sv = 0;
+                    for (let t = -6; t <= 6; t++) {
+                      const tx = Math.round(fx + t * stepPx * lx), ty = Math.round(fy + t * stepPx * ly);
+                      if (tx < 0 || tx >= SW || ty < 0 || ty >= j) continue;
+                      const qq = ty * SW + tx; if (!mask[qq]) continue;
+                      const wt = Math.exp(-(t * 0.4 / 1.2) * (t * 0.4 / 1.2) / 2); sw += wt; sv += wt * lin[qq];
+                    }
+                    mir = mirAmp * mv * (sw > 0 ? sv / sw : lin[q]) * sN;
+                    haze *= 1 - 0.45 * mv;
                   }
                 }
               }
             }
             const wa = w * (0.3 + 0.7 * tp);                              // a partial air hit at the ends
-            b = b * (1 - wa) + wa * (0.02 * b + (pl * (0.55 + 0.9 * spk[idx]) + al * (0.5 + 0.8 * spk[idx]) + haze) * gain + mir);
+            b = b * (1 - wa) + wa * (0.02 * b + (pl * (0.55 + 0.9 * spk[idx]) + al * sN + haze) * gain + mir);
           }
         }
         // subtle near-field reverberation: faint repeating echoes close to the

@@ -2701,6 +2701,201 @@ SECTION = 'TEE';
   }
   check('B-mode', 'DESCAO: mirror image of the aorta beyond the pleura (NCC)', ncc, [0.3, 1], '', `${a.length} px pairs`);
 }
+// Lung and mirror artefacts (headless render, linear echo amplitude recovered
+// from the display grey over the 55 dB dynamic range): the air beyond the
+// pleura is a 'dirty' shadow carrying the system's speckle (local coefficient of
+// variation of 13 x 13 px patches, off the A-lines), A-lines repeat the pleural
+// depth, and the mirror image behind the descending aorta is weaker (8-12 dB)
+// and laterally blurred relative to the true vessel.
+{
+  const T = TISSUE;
+  const lin = (g) => Math.pow(10, (g / 255 - 1) * 55 / 20);
+  const medOf = (v) => { const b = [...v].sort((x, y) => x - y); return b.length ? b[b.length >> 1] : null; };
+  for (const nm of ['A4C', 'PSAX', 'DESCAO']) {
+    const R = renderBmode(nm, ED, {}), W = R.SW, r = 6, cv = [];
+    const air = (q) => {
+      if (!R.mask[q]) return false;
+      const dl = R.lungD[Math.min(R.NA - 1, Math.round(R.abin[q]))];
+      if (dl > 1e8 || R.depth[q] < dl + 0.3) return false;
+      for (let m = 2; m <= 4; m++) if (Math.abs(R.depth[q] - m * dl) < 0.35) return false;
+      return true;
+    };
+    for (let j = r; j < R.SH - r; j += 5) for (let i = r; i < W - r; i += 5) {
+      let ok = true, s = 0, s2 = 0, n = 0;
+      for (let dj = -r; dj <= r && ok; dj++) for (let di = -r; di <= r; di++) {
+        const q = (j + dj) * W + i + di; if (!air(q)) { ok = false; break; }
+        const v = lin(R.grey[q]); s += v; s2 += v * v; n++;
+      }
+      if (!ok) continue;
+      const m = s / n; cv.push(Math.sqrt(Math.max(0, s2 / n - m * m)) / m);
+    }
+    check('Artefact', `${nm}: lung region speckle CoV (median of 13 px patches beyond the pleura)`, medOf(cv), [0.4, 0.9], '', `${cv.length} patches`);
+  }
+  const R = renderBmode('DESCAO', ED, {}), W = R.SW, M = R.mirP;
+  {
+    // A-lines: on beams meeting the pleura squarely, the brightest echo at 1.6-2.4 x
+    // the pleural depth; spacing = (that depth - pleural depth) / pleural depth
+    const dTh = 2 * R.half / R.NA, rat = [];
+    for (let a = 1; a < R.NA - 1; a++) {
+      const dl = R.lungD[a]; if (dl > 1e8 || R.lungD[a - 1] > 1e8 || R.lungD[a + 1] > 1e8) continue;
+      if (Math.abs((R.lungD[a + 1] - R.lungD[a - 1]) / (2 * dTh * dl)) > 0.1) continue;
+      const th = -R.half + (a + 0.5) * dTh; let best = -1, bd = 0;
+      for (let d = 1.6 * dl; d <= 2.4 * dl; d += 0.01) {
+        let s = 0, n = 0;
+        for (let k = -2; k <= 2; k++) { const q = beamSample(R, th, d + k * 0.01); if (q && R.mask[q.idx]) { s += q.grey; n++; } }
+        if (n && s / n > best) { best = s / n; bd = d; }
+      }
+      rat.push((bd - dl) / dl);
+    }
+    check('Artefact', 'DESCAO: A-line spacing / pleural depth', medOf(rat), [0.95, 1.05], '', `${rat.length} beams at normal incidence`);
+  }
+  {
+    // mirror vs true wall: the vessel-wall pixels 0.3-3 cm in front of the mirror
+    // plane against their mirror points (mean linear amplitude), and the 20-80 %
+    // edge width of the lumen-to-wall rise on lateral profiles through the lumen
+    // centre and through its mirror image
+    let st = 0, sm = 0, n = 0; const cx = [], cy = [];
+    if (M) for (let j = 0; j < R.SH; j++) for (let i = 0; i < W; i++) {
+      const q = j * W + i; if (!R.mask[q]) continue;
+      const dist = (i - M[0]) * M[2] + (j - M[1]) * M[3];
+      if (dist > -0.3 * R.pxPerCm || dist < -3 * R.pxPerCm) continue;
+      if (R.kind[q] === T.AORTA) { cx.push(i); cy.push(j); }
+      if (R.kind[q] !== T.VWALL) continue;
+      const mx = Math.round(i - 2 * dist * M[2]), my = Math.round(j - 2 * dist * M[3]);
+      if (mx < 0 || mx >= W || my < 0 || my >= R.SH) continue;
+      const p = my * W + mx; if (!R.mask[p] || R.depth[p] < R.lungD[Math.round(R.abin[p])] + 0.2) continue;
+      if (Math.abs(Math.atan2(mx - R.cx, my - R.apexY)) > R.half - 0.2) continue;
+      st += lin(R.grey[q]); sm += lin(R.grey[p]); n++;
+    }
+    check('Artefact', 'DESCAO: mirror wall brightness / true wall (linear amplitude)', n > 200 ? sm / st : null, [0.3, 0.6], '', `${n} wall px`);
+    let ratio = null, note = '';
+    if (M && cx.length > 100) {
+      const C = [cx.reduce((a, b) => a + b, 0) / cx.length, cy.reduce((a, b) => a + b, 0) / cy.length];
+      const dC = (C[0] - M[0]) * M[2] + (C[1] - M[1]) * M[3];
+      const Cm = [C[0] - 2 * dC * M[2], C[1] - 2 * dC * M[3]];
+      // radial profiles from the lumen centre over +-26 deg about the lateral
+      // direction (both sides), averaged, then the 20-80 % rise to the wall peak
+      const bil = (x, y) => { const i = Math.floor(x), j = Math.floor(y), fx = x - i, fy = y - j, g = (a, b) => R.grey[b * W + a]; return g(i, j) * (1 - fx) * (1 - fy) + g(i + 1, j) * fx * (1 - fy) + g(i, j + 1) * (1 - fx) * fy + g(i + 1, j + 1) * fx * fy; };
+      const edge = (Pc) => {
+        const ux = Pc[1] - R.apexY, uy = -(Pc[0] - R.cx), un = Math.hypot(ux, uy), ex = ux / un, ey = uy / un;
+        const N = Math.round(2.2 * R.pxPerCm), prof = new Float32Array(N); let np = 0;
+        for (const sg of [-1, 1]) for (let da = -0.45; da <= 0.451; da += 0.05) {
+          const c = Math.cos(da), s = Math.sin(da), dx = sg * (ex * c - ey * s), dy = sg * (ey * c + ex * s);
+          for (let t = 0; t < N; t++) prof[t] += bil(Pc[0] + t * dx, Pc[1] + t * dy);
+          np++;
+        }
+        for (let t = 0; t < N; t++) prof[t] /= np;
+        let pk = 0, pi = 0; for (let t = 0; t < N; t++) if (prof[t] > pk) { pk = prof[t]; pi = t; }
+        const base = medOf(Array.from(prof.slice(0, Math.round(0.4 * R.pxPerCm))));
+        const lo = base + 0.2 * (pk - base), hi = base + 0.8 * (pk - base);
+        let t2 = pi; while (t2 > 0 && prof[t2] > hi) t2--;
+        let t1 = t2; while (t1 > 0 && prof[t1] > lo) t1--;
+        return (t2 - t1) / R.pxPerCm * 10;
+      };
+      const et = edge(C), em = edge(Cm);
+      ratio = em / et; note = `true ${et.toFixed(2)} mm, mirror ${em.toFixed(2)} mm`;
+    }
+    check('Artefact', 'DESCAO: mirror edge width / true edge width (lateral 20-80 % rise)', ratio, [1.5, 3], '', note);
+  }
+}
+// B-mode lesion visibility: colour Doppler is off when a view loads where it
+// would paint over a morphological lesion (AS cusps, MS leaflets) and on
+// elsewhere; the closed TEE aortic cusps are thin lines; colour never leaves the
+// blood pool (MS PLAX, colour on).
+{
+  const { colourDefault } = await import('../js/echo.js');
+  const AS = { aorticStenosis: true, lvh: true }, MS = { mitralStenosis: true };
+  assert('Colour', 'colour off by default: AS in PSAX-AV / PLAX / ME AV SAX, MS in PSAX-MV / PLAX',
+    !colourDefault('PSAX_AV', AS) && !colourDefault('PLAX', AS) && !colourDefault('MEAVSAX', AS) && !colourDefault('PSAX_MV', MS) && !colourDefault('PLAX', MS));
+  assert('Colour', 'colour on by default: normal views, AS apical, MS A4C, MR PLAX',
+    colourDefault('PLAX', {}) && colourDefault('A4C', {}) && colourDefault('A5C', AS) && colourDefault('A4C', MS) && colourDefault('PLAX', { mr: true }));
+  {
+    const D = renderDoppler('PLAX', 0.62, { ...MS, grade: 'severe' });
+    const BLOOD = new Set([TISSUE.LV, TISSUE.RV, TISSUE.LA, TISSUE.RA, TISSUE.AORTA, TISSUE.VEIN]);
+    let n = 0, out = 0;
+    for (let i = 0; i < D.SW * D.SH; i++) if (D.alpha[i] > 0.05) { n++; if (!BLOOD.has(D.kind[i])) out++; }
+    check('Colour', 'MS PLAX: colour pixels outside the blood pool', n ? 100 * out / n : null, [0, 2], '%', `${n} colour px`);
+  }
+  {
+    // closed cusps on ME AV SAX (5.5 MHz): the Y of the coaptation lines. The
+    // largest valve component within 2.2 cm of the root lumen, its junction (the
+    // geometric median), three arms from the angular histogram, and on each arm
+    // the -6 dB echo width (display grey within 6 dB of the profile peak) of
+    // profiles across it at 35-75 % of its length (median per arm, median of arms)
+    const R = renderBmode('MEAVSAX', ED, {}), W = R.SW, T = TISSUE;
+    const medOf = (v) => { const b = [...v].sort((x, y) => x - y); return b.length ? b[b.length >> 1] : null; };
+    let sx = 0, sy = 0, n = 0;
+    for (let q = 0; q < W * R.SH; q++) if (R.mask[q] && R.kind[q] === T.AORTA) { sx += q % W; sy += (q / W) | 0; n++; }
+    const C = [sx / n, sy / n], rmax = 2.2 * R.pxPerCm;
+    const set = new Set();
+    for (let q = 0; q < W * R.SH; q++) if (R.mask[q] && R.kind[q] === T.VALVE && Math.hypot(q % W - C[0], ((q / W) | 0) - C[1]) < rmax) set.add(q);
+    const seen = new Set(); let comp = [];
+    for (const q0 of set) {
+      if (seen.has(q0)) continue; const cc = [q0], stk = [q0]; seen.add(q0);
+      while (stk.length) { const q = stk.pop(); for (const d of [1, -1, W, -W, W + 1, W - 1, -W + 1, -W - 1]) { const z = q + d; if (set.has(z) && !seen.has(z)) { seen.add(z); cc.push(z); stk.push(z); } } }
+      if (cc.length > comp.length) comp = cc;
+    }
+    const vp = comp.map((q) => [q % W, (q / W) | 0]);
+    let res = null;
+    if (vp.length > 100) {
+      const V = [vp.reduce((a, p) => a + p[0], 0) / vp.length, vp.reduce((a, p) => a + p[1], 0) / vp.length];
+      for (let it = 0; it < 60; it++) {
+        let nx = 0, ny = 0, sw = 0;
+        for (const [x, y] of vp) { const w = 1 / Math.max(0.5, Math.hypot(x - V[0], y - V[1])); nx += w * x; ny += w * y; sw += w; }
+        V[0] = nx / sw; V[1] = ny / sw;
+      }
+      const H = new Float32Array(72);
+      for (const [x, y] of vp) if (Math.hypot(x - V[0], y - V[1]) > 0.2 * R.pxPerCm) H[Math.floor(((Math.atan2(y - V[1], x - V[0]) + Math.PI) / (2 * Math.PI)) * 72) % 72]++;
+      const pk = []; for (let k = 0; k < 72; k++) pk.push([H[(k + 71) % 72] + H[k] + H[(k + 1) % 72], k]);
+      pk.sort((a, b) => b[0] - a[0]);
+      const arms = [];
+      for (const [, k] of pk) { if (arms.every((a) => Math.min(Math.abs(a - k), 72 - Math.abs(a - k)) > 12)) arms.push(k); if (arms.length === 3) break; }
+      const bil = (x, y) => { const i = Math.floor(x), j = Math.floor(y), fx = x - i, fy = y - j, g = (a, b) => R.grey[b * W + a]; return g(i, j) * (1 - fx) * (1 - fy) + g(i + 1, j) * fx * (1 - fy) + g(i, j + 1) * (1 - fx) * fy + g(i + 1, j + 1) * fx * fy; };
+      const per = [];
+      for (const k of arms) {
+        const ang = (k + 0.5) / 72 * 2 * Math.PI - Math.PI, ux = Math.cos(ang), uy = Math.sin(ang), px = -uy, py = ux;
+        let Lm = 0; for (const [x, y] of vp) { const dx = x - V[0], dy = y - V[1], r = Math.hypot(dx, dy); if (r > 0 && (dx * ux + dy * uy) / r > 0.96) Lm = Math.max(Lm, r); }
+        const w = [];
+        for (let f = 0.35; f <= 0.751; f += 0.05) {
+          const ox = V[0] + ux * f * Lm, oy = V[1] + uy * f * Lm, prof = [];
+          for (let t = -0.4 * R.pxPerCm; t <= 0.4 * R.pxPerCm; t += 0.1) { let s = 0; for (const a of [-1, 0, 1]) s += bil(ox + t * px + a * ux, oy + t * py + a * uy); prof.push([t, s / 3]); }
+          let mx = 0; for (const [, g] of prof) mx = Math.max(mx, g);
+          const above = prof.filter(([, g]) => g >= mx - 6 * 255 / 55).map(([t]) => t);
+          w.push((Math.max(...above) - Math.min(...above)) / R.pxPerCm * 10);
+        }
+        per.push(medOf(w));
+      }
+      res = per;
+    }
+    check('B-mode', 'MEAVSAX: closed-cusp thickness (-6 dB echo width, median of the three coaptation lines)', res ? medOf(res) : null, [0.5, 1.5], 'mm',
+      res ? `arms ${res.map((v) => v.toFixed(2)).join(' / ')} mm` : 'no cusp Y found');
+  }
+}
+// 3D panel: the thoracic context (lungs, diaphragm, liver, oesophagus, stomach,
+// pericardium, chest wall) meshes, the LAA and pulmonary-vein labels, and every
+// camera preset (patient-superior up) shows the SVC to the patient's right of
+// the ascending aorta.
+{
+  const { buildContext, structureLabels, cameraDir, CAMERA_UP, CAMERA_PRESETS } = await import('../js/thorax3d.js');
+  const { buildMesh } = await import('../js/marching.js');
+  const A = GED.A;
+  const M = buildContext(A, buildMesh, { min: [-7.4, -9.4, -4.6], max: [5.2, 6.0, 6.6] });
+  const tri = Object.fromEntries(Object.entries(M).map(([k, m]) => [k, m ? m.indices.length / 3 : 0]));
+  assert('3D', 'thoracic context meshes present (lungs, diaphragm, liver, oesophagus, stomach, pericardium, chest wall)',
+    ['lungs', 'diaphragm', 'liver', 'oesophagus', 'stomach', 'pericardium', 'chestWall'].every((k) => tri[k] > 200), JSON.stringify(tri));
+  const Lb = structureLabels(A).heart.map(([t]) => t);
+  assert('3D', 'labels for the LAA and the four pulmonary veins', ['LAA', 'LSPV', 'LIPV', 'RSPV', 'RIPV'].every((t) => Lb.includes(t)), Lb.join(' '));
+  const sub = (a, b) => a.map((v, i) => v - b[i]), dt = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const svc = A.svc.a.map((v, i) => 0.5 * (v + A.svc.b[i])), ao = A.valves.aortic.c.map((v, i) => v + LM.U_AO[i] * 3.0);
+  let worst = 1e9, where = '';
+  for (const k of Object.keys(CAMERA_PRESETS)) {
+    const d = cameraDir(k), f = d.map((v) => -v), rr = cross(f, CAMERA_UP), rl = Math.hypot(...rr), r = rr.map((v) => v / rl);
+    const v = dt(sub(svc, ao), r) * Math.sign(dt(BODY_AX.R, r));
+    if (v < worst) { worst = v; where = k; }
+  }
+  check('3D', 'SVC screen-x minus ascending-aorta screen-x toward the patient right (worst preset)', worst, [0.3, 5], 'cm', where);
+}
 SECTION = 'Pathology';
 {
   // effusion: echo-free (as dark as blood), sharply bounded by bright layers

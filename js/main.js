@@ -10,7 +10,7 @@ import { buildReport, reportText, fillTemplate, TEMPLATES, TEMPLATE_FOR, DEFAULT
 import { initFeedback } from './feedback.js';
 import { initPathway } from './pathway-ui.js';
 import { Heart3D } from './heart3d.js';
-import { EchoView } from './echo.js';
+import { EchoView, colourDefault } from './echo.js';
 import { MeasureTool } from './measure.js';
 import { vadd, vsub, vscale, vdot, vcross, norm, vrot } from './mathutils.js';
 import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, makeProbe, teeManipulate, teeOmni } from './views.js';
@@ -173,6 +173,7 @@ let vcgHead = 0, vcgFilled = 0;
 let ecgLead = 'II';                 // lead shown in the top-bar rhythm strip
 const playback = new PlaybackClock(heart, pushVcg, ECG_FS, ECG_SECONDS);
 window.echosim.playback = playback;
+window.echosim.heart3d = heart3d;   // (3D panel state for the capture tools: bake / context readiness)
 
 function pushVcg(v) {
   vcgBuf[vcgHead * 3] = v[0]; vcgBuf[vcgHead * 3 + 1] = v[1]; vcgBuf[vcgHead * 3 + 2] = v[2];
@@ -681,8 +682,19 @@ function setView(name) {
     b.classList.toggle('active', on);
     b.setAttribute('aria-pressed', on ? 'true' : 'false');
   });
+  applyColourDefault(name);
   updateProbeInfo(tee);
   updatePlaneFlag();
+}
+// Colour Doppler on or off as the view loads (colourDefault: off where it would
+// hide a morphological lesion, e.g. AS cusps or MS leaflets). In a hidden-diagnosis
+// case colour stays on, so its state never gives the answer away.
+function applyColourDefault(name) {
+  const hidden = challenge.active || pathwayCase.active;
+  const on = hidden ? true : colourDefault(name, state.path || {});
+  echo.colorOn = on;
+  const c = document.getElementById('colorOn');
+  if (c) c.checked = on;
 }
 
 // Scanner-style probe banner. Real machines annotate the active imaging mode on
@@ -960,6 +972,8 @@ document.getElementById('labelsOn').addEventListener('change', (e) => (echo.show
 document.getElementById('flowOn').addEventListener('change', (e) => (heart3d.showFlow = e.target.checked));
 document.getElementById('transp').addEventListener('change', (e) => (heart3d.transparent = e.target.checked));
 document.getElementById('fibersOn').addEventListener('change', (e) => heart3d.showFibers(e.target.checked));
+document.getElementById('thoraxOn').addEventListener('change', (e) => (heart3d.showContext = e.target.checked));
+document.getElementById('labels3dOn').addEventListener('change', (e) => (heart3d.showLabels = e.target.checked));
 
 document.getElementById('resetPlane').addEventListener('click', () => { setView(state.viewName); });
 
@@ -989,7 +1003,8 @@ function resetAll() {
   setRange('pers', 0, 'persOut', '0', '0');
   const toggles = [['elevOn', (v) => (echo.elevation = v)],
     ['colorOn', (v) => (echo.colorOn = v)], ['labelsOn', (v) => (echo.showLabels = v)],
-    ['flowOn', (v) => (heart3d.showFlow = v)], ['transp', (v) => (heart3d.transparent = v)]];
+    ['flowOn', (v) => (heart3d.showFlow = v)], ['transp', (v) => (heart3d.transparent = v)],
+    ['thoraxOn', (v) => (heart3d.showContext = v)], ['labels3dOn', (v) => (heart3d.showLabels = v)]];
   toggles.forEach(([id, fn]) => { const c = document.getElementById(id); if (c) { c.checked = true; fn(true); } });
   // plane offsets (az/tilt/slide) reset via setView, which also clears the flag
   setView(state.viewName);
@@ -1348,6 +1363,7 @@ function simLoad({ path: key = 'normal', grade = 'severe', view, rwma, dcmSeveri
   setGradeButtons(grade);
   if (hidden) {
     pathwayCase.active = true;
+    applyColourDefault(state.viewName);
     lockForCase(true);
     setViewTagHidden(hideView);
     if (hideView) document.querySelectorAll('[data-view]').forEach((b) => { b.classList.remove('active'); b.setAttribute('aria-pressed', 'false'); });
