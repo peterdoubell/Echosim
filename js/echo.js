@@ -1533,7 +1533,7 @@ export class EchoView {
   // transducer, clamped into the sector. Records the beam-to-flow angle, which
   // is what every Doppler reading depends on (v_measured = v cos(theta)).
   _resolveGate(G, path, probe) {
-    const key = this.dopplerSite || dopplerDefault(this.viewName, path);
+    const key = this.dopplerSite || dopplerDefault(this.viewName, path) || (ALL_VIEWS[this.viewName] || {}).doppler || null;   // (a view's own standard site)
     const site = key ? DOPPLER_SITES[key] : null;
     if (!site) { this._dGate = null; return null; }
     const ref = typeof site.ref === 'function' ? site.ref(path) : site.ref;
