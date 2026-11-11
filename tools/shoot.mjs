@@ -22,7 +22,7 @@ const server = http.createServer((req, res) => {
     res.end(d);
   });
 });
-const PORT = 8091;
+const PORT = +(process.env.PORT || 8091);
 await new Promise((r) => server.listen(PORT, r));
 
 const browser = await chromium.launch({
