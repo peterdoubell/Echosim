@@ -10,11 +10,7 @@ import { buildReport, reportText, fillTemplate, TEMPLATES, TEMPLATE_FOR, DEFAULT
 import { initFeedback } from './feedback.js';
 import { initPathway } from './pathway-ui.js';
 import { Heart3D } from './heart3d.js';
-<<<<<<< HEAD
-import { EchoView, colourDefault } from './echo.js';
-=======
-import { EchoView, dopplerColor } from './echo.js';
->>>>>>> wi11/doppler
+import { EchoView, colourDefault, dopplerColor } from './echo.js';
 import { MeasureTool } from './measure.js';
 import { vadd, vsub, vscale, vdot, vcross, norm, vrot } from './mathutils.js';
 import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, makeProbe, teeManipulate, teeOmni } from './views.js';
