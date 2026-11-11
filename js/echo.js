@@ -2171,7 +2171,7 @@ export class EchoView {
       ctx.fillStyle = 'rgba(170,215,245,0.75)';
       ctx.textAlign = 'center';
       ctx.font = '9px monospace';
-      for (let b = 0; b < nb; b++) ctx.fillText(specBeats(path)[b].resp === 'insp' ? 'insp' : 'exp', (b + 0.5) / nb * W, 20);
+      for (let b = 0; b < nb; b++) ctx.fillText(specBeats(path)[b].resp === 'insp' ? 'insp' : 'exp', (b + 0.5) / nb * W, plotH - 4);
       ctx.font = '10px monospace';
     }
     ctx.textAlign = 'left';
