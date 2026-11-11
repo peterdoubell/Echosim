@@ -185,6 +185,12 @@ export function measureModel(path = {}) {
     const r = run(GED, c, perpAx, isT(TISSUE.PERICARDIUM), 8, 0, 0, path);
     m.effusion = r ? len(r) : null;
   }
+  // tamponade: the right-heart collapse and respiratory inflow variation of the
+  // solved circulation (inspiratory vs expiratory steady states)
+  if (path.tamponade) {
+    const s = hemoSummary(path);
+    m.tamponade = { raInv: s.raInvFrac, rvColl: s.rvCollapseFrac, mvResp: s.mvEResp, tvResp: s.tvEResp };
+  }
   m.shunt = shuntLabel(path);
   // pulmonary-to-systemic flow ratio of a shunt (RVOT vs LVOT stroke volume)
   m.qpqs = m.shunt ? hemoSummary(path).QpQs : null;
@@ -301,7 +307,9 @@ export function buildReport(path, patient = DEFAULT_PATIENT, learner = {}) {
   if (m.shunt && path.vsd) F.push({ section: 'Ventricular septum', text: `${cap(m.shunt.label)} with left-to-right flow${m.qpqs ? ` (Qp:Qs ${f1(m.qpqs)})` : ''}.` });
   const aoOk = [g.sovh, g.stjh, g.asch].every((x) => x.level === 'normal');
   F.push({ section: 'Aorta', text: aoOk ? `Normal aortic root and proximal ascending aorta (sinus ${f0(m.sov)} mm, STJ ${f0(m.stj)} mm, ascending ${f0(m.asc)} mm).` : `Aortic dimensions: sinus ${f0(m.sov)} mm, STJ ${f0(m.stj)} mm, ascending ${f0(m.asc)} mm — check against height-indexed limits.` });
-  F.push({ section: 'Pericardium', text: eff ? `${cap(eff.word)} pericardial effusion (${f1(m.effusion)} cm posteriorly in PLAX).` : 'No pericardial effusion.' });
+  const tp = m.tamponade;
+  const tpText = tp ? ` Features of tamponade: RA free-wall inversion for ${f0(tp.raInv * 100)}% of the cycle, RV early-diastolic collapse, plethoric IVC; respiratory variation of mitral E ${f0(tp.mvResp)}% and tricuspid E ${f0(tp.tvResp)}%.` : '';
+  F.push({ section: 'Pericardium', text: eff ? `${cap(eff.word)} pericardial effusion (${f1(m.effusion)} cm posteriorly in PLAX).${tpText}` : 'No pericardial effusion.' });
   F.push({ section: 'IVC', text: `IVC ${f0(m.ivc)} mm${m.ivcCollapse != null ? ` with ${f0(m.ivcCollapse)}% inspiratory collapse` : ''}; estimated RA pressure ${m.rap} mmHg.` });
 
   // ---- conclusion: abnormal findings first, most important first ----
@@ -324,7 +332,8 @@ export function buildReport(path, patient = DEFAULT_PATIENT, learner = {}) {
     if (g.tapse.level !== 'normal' || g.rvfac.level !== 'normal') rvBits.push(`impaired RV systolic function (TAPSE ${f0(m.tapse)} mm, FAC ${f0(m.rvfac)}%)`);
     C.push(`${cap(rvBits.join(' with '))}.`);
   }
-  if (eff) C.push(`${cap(eff.word)} pericardial effusion (${f1(m.effusion)} cm).`);
+  if (eff && tp) C.unshift(`${cap(eff.word)} pericardial effusion (${f1(m.effusion)} cm) with echocardiographic features of tamponade (RA inversion, RV diastolic collapse, plethoric IVC, mitral E variation ${f0(tp.mvResp)}%, tricuspid E ${f0(tp.tvResp)}%). Tamponade is a clinical diagnosis.`);
+  else if (eff) C.push(`${cap(eff.word)} pericardial effusion (${f1(m.effusion)} cm).`);
   if (!C.length) C.push('Structurally normal heart. Normal biventricular size and systolic function. No significant valve disease.');
 
   // learner measurements, compared with the model's own values
@@ -448,7 +457,7 @@ Conclusion:
 2. [RV dilatation and systolic function].` },
 };
 // the template that matches each pathology key in the UI
-export const TEMPLATE_FOR = { normal: 'normal', as: 'as', mr: 'mr', ms: 'ms', dcm: 'dcm', rwma: 'rwma', effusion: 'effusion', vsd: 'vsd', asd: 'asd', tr: 'tr', phtn: 'phtn' };
+export const TEMPLATE_FOR = { normal: 'normal', as: 'as', mr: 'mr', ms: 'ms', dcm: 'dcm', rwma: 'rwma', effusion: 'effusion', tamponade: 'effusion', vsd: 'vsd', asd: 'asd', tr: 'tr', phtn: 'phtn' };
 
 export function fillTemplate(key, rep) {
   const t = TEMPLATES[key] || TEMPLATES.blank, m = rep.m, B = rep.patient.bsa;

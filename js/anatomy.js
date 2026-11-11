@@ -22,6 +22,7 @@
 
 import { smin, smax, ssub, sdSphere, sdEllipsoid, sdCapsule, sdRoundCone, sdCylinder, sdFrustum } from './sdf.js';
 import { smoothstep } from './mathutils.js';
+import { hemoSummary } from './hemodynamics.js';
 
 // ---- BSE/ASE normal reference ranges -------------------------------------
 // Adult echocardiographic normal ranges (ASE/EACVI 2015 chamber quantification,
@@ -627,6 +628,14 @@ export function rapEstimate(ivc) {
   const d = 2 * ivc.r, small = d <= 2.1, collapses = (ivc.collapse != null ? ivc.collapse : 0.55) > 0.5;
   return small && collapses ? 3 : !small && !collapses ? 15 : 8;
 }
+// IVC radius (cm) and sniff collapse (fraction) for a mean RA pressure (mmHg), the
+// inverse of rapEstimate: <= ~5 mmHg a 1.8 cm IVC halving on sniff (RAP 3); 7-9
+// a dilated (> 2.1 cm) IVC that still collapses (RAP 8); >= ~10 a plethoric
+// 2.5 cm IVC collapsing < 50 % (RAP 15).
+export function ivcOfRap(rap) {
+  const t = (x, a, b) => Math.max(0, Math.min(1, (x - a) / (b - a)));
+  return { r: 0.9 + 0.35 * t(rap, 4.6, 9), collapse: 0.55 - 0.35 * t(rap, 9.4, 11) };
+}
 // Right-heart loading per pathology (shared by the anatomy and the coarse proxies
 // in cardiac-model). rvC scales RV contractility — TAPSE, free-wall (FAC) and
 // outflow shortening: a pressure-overloaded RV in pulmonary hypertension is
@@ -861,9 +870,11 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
     let sa = seat(mad(rr.c, BS, hS + CAVA.svcUp), CAVA.svcSd, CAVA.svcV);
     let away = sub(rr.c, T0); away = unit(sub(away, mul(BS, dot(away, BS))));  // from the TV, level
     // d 1.8 cm; plethoric (~2.5 cm) with raised RA pressure (pulmonary hypertension,
-    // severe TR), when its wider wall keeps it a little further off the septum
-    // (severe MS with secondary PH: a dilated IVC that still collapses, RAP 8)
-    const ivcR = (path.rvpo || path.tr) ? 1.25 : RH.msPH ? 1.15 : 0.9;
+    // severe TR, biventricular failure, tamponade), when its wider wall keeps it a
+    // little further off the septum. Calibre and sniff collapse follow the mean RA
+    // pressure of the solved circulation (ivcOfRap).
+    const ivcS = ivcOfRap(hemoSummary(path).RAP);
+    const ivcR = ivcS.r;
     const ia = seat(mad(mad(mad(rr.c, BS, -(hS + 0.4)), away, 1.0), BP, 1.0), Math.max(CAVA.ivcSd, ivcR + 0.05), CAVA.ivcV);
     // the SVC abuts the aorta without indenting it: slide the orifice back along
     // the septum until its first 3 cm clear the aortic wall
@@ -888,7 +899,7 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
       // sniff: the IVC halves in calibre with normal RA pressure; plethoric with
       // raised RA pressure it barely collapses (< 50 %)
       ivc: { a: add(ia, tether), b: mad(add(ia, tether), unit(mad(BODY_AX.I, SEPT_V, CAVA.ivcTilt)), 11.0), r: ivcR,
-        collapse: (path.rvpo || path.tr) ? 0.2 : 0.55 },
+        collapse: ivcS.collapse },
     };
   })();
   // the band's free-wall end moves in with the RV free wall (short-axis shortening)

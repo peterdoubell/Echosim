@@ -287,14 +287,14 @@ const ET_EJECT = 0.33, T_FILL = 0.37; // systolic ejection / diastolic filling t
 const K_AO = 1.56;                    // peak/mean profile factor (peak ≈ k·mean)
 
 // Tricuspid regurgitation: present with path.tr, and as the functional TR of the
-// secondary (post-capillary) pulmonary hypertension of severe MS. Peak (m/s)
-// encodes the RV-RA systolic gradient: ~4.3 in pulmonary hypertension (PASP ~80),
-// ~3.4 in severe MS (PASP ~55 with RAP 8); isolated severe TR at a normal PA
-// pressure runs LOWER (~2.5), its gradient blunted by the large RA v-wave.
+// secondary (post-capillary) pulmonary hypertension of severe MS. The peak (m/s)
+// is the Bernoulli velocity of the peak systolic RV-RA pressure difference of
+// the solved right heart (hemodynamics.js): ~4.3 in pulmonary hypertension (high
+// PVR), ~3.4 in severe MS (PA pressure riding on the LA pressure), and LOWER in
+// isolated severe TR (~2.5), its gradient blunted by the large RA v-wave.
 export function trPeak(path = {}) {
   const RH = rightHeartLoad(path);
-  if (path.tr) return path.rvpo ? 4.3 : 3.0 - 0.5 * RH.trVol;
-  return RH.msPH ? 3.4 : 0;
+  return path.tr || RH.msPH ? hemoSummary(path).trVmax : 0;
 }
 // TR jet envelope (0..1) on the right heart's clock: holosystolic (TV closure at
 // the QRS to TV opening ~0.50). With pressure overload it is the rounded,
@@ -343,7 +343,10 @@ function hemoFrame(hd, path, rvHd, phaseRV) {
   const ejMr = hd.Qmr > 0.5 && vMRPeak > 0 ? clamp(Math.sqrt(Math.max(0, hd.Plv - hd.Pla) / 4) / vMRPeak, 0, 1) : 0;
   // right-heart envelopes (tricuspid inflow, RV outflow) on the right heart's clock
   const r = rvHd || hd;
-  const ejTv = s.QmvMax > 0 ? clamp(r.Qmv / s.QmvMax, 0, 1) : 0;
+  // (tamponade, one respiratory phase: the tricuspid inflow scales with that
+  // phase's solved tricuspid E against the apnoeic one — up in inspiration)
+  const tvResp = path.tamponade && path.resp ? clamp(s.QtvE / Math.max(1, hemoSummary({ ...path, resp: undefined }).QtvE), 0.3, 1.8) : 1;
+  const ejTv = s.QmvMax > 0 ? clamp(r.Qmv / s.QmvMax, 0, 1) * tvResp : 0;
   const ejPv = s.QaoMax > 0 ? clamp(r.Qao / s.QaoMax, 0, 1) : 0;
   // INSTANTANEOUS regurgitant jet speeds (m/s). MR: Bernoulli on the LV-LA
   // pressure drop while the circulation carries regurgitant flow, so the CW
@@ -365,6 +368,9 @@ function hemoFrame(hd, path, rvHd, phaseRV) {
     // pressure difference, so the ASD signal is phasic and the VSD jet follows the
     // interventricular gradient
     vAsd: hd.vAsd || 0, vVsd: hd.vVsd || 0, vVsdPeak: s.vVsdPeak || 0, QpQs: s.QpQs || 1,
+    // solved right heart: instantaneous RV / RA / PA and pericardial pressures,
+    // and the case's RV systolic and mean RA pressure
+    Prv: hd.Prv, Pra: hd.Pra, Ppa: hd.Ppa, Ppc: hd.Ppc || 0, RVSP: s.RVSP, RAP: s.RAP,
   };
 }
 
@@ -408,7 +414,8 @@ export function geometryAt(phase, path = {}) {
   const lvScale = Math.pow(vr, 0.4), lvLong = Math.pow(vr, 0.2);
   // (severe AS: the stiff, hypertrophied LV's diastolic dysfunction enlarges the
   // LA too — LA AP ~4-4.5 cm — although its mean pressure is modelled near normal)
-  const laScale = (1 + 0.045 * Math.max(0, (hd.sum.Pla0 || 8) - 8)) * (path.aorticStenosis ? 1.2 : 1);
+  // (the chronic DISTENDING pressure: in tamponade the pericardial pressure is subtracted)
+  const laScale = (1 + 0.045 * Math.max(0, (hd.sum.Pla0 || 8) - (hd.sum.Ppc || 0) - 8)) * (path.aorticStenosis ? 1.2 : 1);
   let lvWallMul = 1.0;
   if (path.dilated) { lvWallMul = DCM_SEVERITIES[dcmSeverityOf(path)].wallMul; }
   if (path.lvh || path.aorticStenosis) { lvWallMul = 1.55; } // concentric hypertrophy (IVSd ~1.4)
@@ -661,6 +668,68 @@ function effusionGap(px, py, pz, A) {
   return 0.3 + 1.5 * smoothstep(-3.5, 2.5, dep);
 }
 
+// Tamponade: the pericardial pressure exceeds the transmural (distending) pressure
+// of the thin-walled right heart when its chambers are least full — the RA free
+// wall inverts from late diastole into systole (RA transmural < 0) and the RV free
+// wall is pushed in in early diastole (RV transmural < ~1 mmHg). Each free wall is
+// indented by a depth that follows that phase's solved pressures, over a Gaussian
+// patch centred on the free wall (away from the septum and the AV groove).
+const RA_INV_K = 0.8, RA_INV_MAX = 1.0;      // cm per mmHg below zero transmural, cap
+const RV_COL_K = 1.2, RV_COL_MAX = 0.55;     // cm per mmHg below the buckling pressure
+const RV_BUCKLE_P = 1.0;                     // mmHg (hemodynamics.js RV_BUCKLE)
+const WALL_IN = 0.3;                         // drawn atrial / RV free-wall thickness inside the lumen surface (cm)
+const _tampCache = new WeakMap();
+function tamponadeDent(G) {
+  let t = _tampCache.get(G);
+  if (t) return t;
+  const A = G.A, H = G.hemo || {};
+  const raT = (H.Pra || 0) - (H.Ppc || 0), rvT = (H.Prv || 0) - (H.Ppc || 0);
+  const dRa = clamp(-raT * RA_INV_K, 0, RA_INV_MAX), dRv = clamp((RV_BUCKLE_P - rvT) * RV_COL_K, 0, RV_COL_MAX);
+  // free-wall points: march out of the lumen from the chamber centre
+  // (into the lumen first, then out through the free wall)
+  const wallOf = (c, u, which) => {
+    let q = c, inside = false;
+    for (let k = 0; k < 240; k++) {
+      q = [q[0] + u[0] * 0.05, q[1] + u[1] * 0.05, q[2] + u[2] * 0.05];
+      const d = lumenDist(q[0], q[1], q[2], A, which);
+      if (d < 0) inside = true; else if (inside) break;
+    }
+    return q;
+  };
+  const uRa = LM.IAS_N;
+  let uRv = [A.rv.c[0] - A.lv.c[0], 0, A.rv.c[2] - A.lv.c[2]];
+  const L = Math.hypot(uRv[0], uRv[2]) || 1; uRv = [uRv[0] / L, 0, uRv[2] / L];
+  t = { dRa, dRv, uRa, uRv, wRa: dRa > 0 ? wallOf(A.ra.c, uRa, 'RA') : null, wRv: dRv > 0 ? wallOf([A.lv.c[0], A.rv.c[1], A.lv.c[2]], uRv, 'RV') : null };
+  _tampCache.set(G, t);
+  return t;
+}
+// the free-wall indentation of a tamponade geometry (cm): { ra, rv, wRa, wRv, uRa, uRv }
+export function tamponadeCollapse(G) {
+  const t = tamponadeDent(G);
+  return { ra: t.dRa, rv: t.dRv, wRa: t.wRa, wRv: t.wRv, uRa: t.uRa, uRv: t.uRv };
+}
+// classify override inside a dented free wall: null (no change), or a tissue
+function tamponadeWall(px, py, pz, G, code) {
+  const t = tamponadeDent(G), A = G.A;
+  for (const [w, d, which, lum, sig] of [[t.wRa, t.dRa, 'RA', BODY.RA, 1.8], [t.wRv, t.dRv, 'RV', BODY.RV, 1.6]]) {
+    if (!w) continue;
+    const dx = px - w[0], dy = py - w[1], dz = pz - w[2], r2 = dx * dx + dy * dy + dz * dz;
+    if (r2 > 9 * sig * sig) continue;
+    const dent = d * Math.exp(-r2 / (sig * sig));
+    if (dent < 0.05) continue;
+    if (code !== lum && code !== BODY.MYO && code !== BODY.PAP && code !== BODY.OUT && code !== BODY.PERI && code !== BODY.FAT) continue;
+    const ld = lumenDist(px, py, pz, A, which);
+    if (ld > 0.45) continue;
+    // (the drawn blood-pool edge sits ~WALL_IN inside the lumen surface, the
+    // thin wall between it and the surface: both move in by the dent)
+    const sh = ld + dent;                          // the lumen surface pushed in
+    if (sh < -WALL_IN) { if (code === lum) return null; continue; }
+    if (sh < -WALL_IN + 0.22) return TISSUE.MYO;                      // the inverted wall
+    if (ld < 0.25) return TISSUE.PERICARDIUM;                         // fluid fills the dent
+  }
+  return null;
+}
+
 export function classify(px, py, pz, G, path = {}) {
   const A = G.A;
 
@@ -705,6 +774,11 @@ export function classify(px, py, pz, G, path = {}) {
 
   // --- body: blood pools / myocardium / great-vessel walls from the SDF ---
   const body = bodyClassify(px, py, pz, A, periOff);
+  if (path.tamponade) {
+    const tw = tamponadeWall(px, py, pz, G, body.code);
+    if (tw === TISSUE.MYO) return cls(TISSUE.MYO, 0.55);
+    if (tw === TISSUE.PERICARDIUM) return cls(TISSUE.PERICARDIUM, 0.02);
+  }
   // membranous septum: a thin fibrous segment of the septum just below the right/
   // non-coronary commissure (the perimembranous VSD site; a hole there when the
   // defect is perimembranous)

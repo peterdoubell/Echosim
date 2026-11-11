@@ -476,7 +476,9 @@ check('LA', 'LA volume (voxel, ES)', laV, [30, 70], 'mL', 'LAVI 16-34 mL/m2 x BS
     const t9 = down(op[v], 0.9), t1 = down(op[v], 0.1);
     const flowOff = down(q[v].map((x) => (x > 1 ? 1 : 0)), 0.5)[0];
     const t1c = t1[0];
-    const t9c = t9.filter((t) => t <= t1c).pop();
+    // (the last 0.9 crossing before closure; it may fall before the cycle wraps)
+    let t9c = t9.filter((t) => t <= t1c).pop();
+    if (t9c == null && t9.length) t9c = t9[t9.length - 1] - N;
     check('Valves', `${v} closure time (opening 0.9 -> 0.1)`, t9c != null ? t1c - t9c : null, [20, 40], 'ms');
     check('Valves', `${v} shut by the end of forward flow (closure minus flow end)`, t1c - flowOff, [-5, 2], 'ms');
     // ...and opens with the start of forward flow (10 % open)
@@ -2171,16 +2173,19 @@ SECTION = 'Pathology';
 
 {
   // F28: the RA pressure behind the PASP estimate is read off the modelled IVC and
-  // agrees with it — a plethoric (> 2.1 cm, non-collapsing) IVC in TR / PH gives
-  // 15 mmHg, a normal IVC 3 mmHg
+  // agrees with it — a plethoric (> 2.1 cm, non-collapsing) IVC gives 15 mmHg, a
+  // normal IVC 3 mmHg. Review 11 (MOT-7): the IVC follows the SOLVED mean RA
+  // pressure of the right-heart circulation, so its band must hold that RAP:
+  // <= ~6.5 mmHg -> 3, ~6.5-9.5 -> 8, higher -> 15 (TR / PH / severe DCM plethoric,
+  // severe MS a dilated IVC that still collapses)
   for (const key of Object.keys(PATHS)) {
     const iv = geo(0, key).A.ivc, d = 2 * iv.r, rap = rapEstimate(iv);
     const want = d > 2.1 && iv.collapse < 0.5 ? 15 : d <= 2.1 && iv.collapse > 0.5 ? 3 : 8;
-    const plethoric = !!(PATHS[key].tr || PATHS[key].rvpo);
-    // severe MS: secondary pulmonary hypertension dilates the IVC (still collapsing): RAP 8
-    const expect = plethoric ? 15 : PATHS[key].mitralStenosis ? 8 : 3;
-    assert('RAP', `${key}: RAP ${rap} mmHg matches the IVC (${d.toFixed(1)} cm, ${Math.round(iv.collapse * 100)} % sniff collapse)`,
-      rap === want && rap === expect);
+    const R = hemoSummary(PATHS[key]).RAP;
+    const expect = R >= 9.5 ? 15 : R >= 6.5 ? 8 : 3;
+    const plethoric = !!(PATHS[key].tr || PATHS[key].rvpo || PATHS[key].dilated);
+    assert('RAP', `${key}: RAP ${rap} mmHg matches the IVC (${d.toFixed(1)} cm, ${Math.round(iv.collapse * 100)} % sniff collapse) and the solved RAP ${R.toFixed(1)} mmHg`,
+      rap === want && rap === expect && (!plethoric || rap === 15) && (!PATHS[key].mitralStenosis || rap === 8));
   }
   // F29: compensated severe AS is not hypotensive — the LV carries the gradient
   const sAs = hemoSummary(PATHS.as);
@@ -2640,7 +2645,8 @@ SECTION = 'Pathology';
   // VSD: the jet follows the LV-RV gradient, with a modest shunt
   const sV = hemoSummary(PATHS.vsd);
   check(g, 'restrictive VSD: peak jet velocity (Bernoulli on LV - RV systolic)', sV.vVsdPeak, [4.0, 5.5], 'm/s', `LV ${sV.PlvSys.toFixed(0)} mmHg`);
-  check(g, 'restrictive VSD: jet peak vs sqrt((LVsys - RVsys 26) / 4)', sV.vVsdPeak / Math.sqrt((sV.PlvSys - 26) / 4), [0.9, 1.1], '');
+  // (review 11: the RV systolic pressure is the solved right heart's, not a fixed 26)
+  check(g, 'restrictive VSD: jet peak vs sqrt((LVsys - RVSP) / 4)', sV.vVsdPeak - Math.sqrt((sV.PlvSys - sV.RVSP) / 4), [-0.15, 0.15], 'm/s', `RVSP ${sV.RVSP.toFixed(0)} mmHg`);
   check(g, 'restrictive VSD: Qp:Qs', sV.QpQs, [1.1, 1.6], '');
   assert(g, 'restrictive VSD: systolic jet, low-velocity in diastole', Math.abs(hemodynamics(0.2, PATHS.vsd).vVsd) > 4 && Math.abs(hemodynamics(0.75, PATHS.vsd).vVsd) < 1.5);
   check(g, 'normal heart: no shunt (Qp:Qs)', hemoSummary({}).QpQs, [1, 1.0001], '');
@@ -2685,6 +2691,74 @@ SECTION = 'Pathology';
     const mj = fs.readFileSync(new URL('../js/main.js', import.meta.url), 'utf8');
     const line = mj.split('\n').find((l) => /^\s*effusion:\s*\{\s*look:/.test(l)) || '';
     assert(g2, 'effusion checklist no longer promises a swinging heart (no tamponade variant)', line && !/swinging/i.test(line));
+  }
+
+  // ---- review 11: diastolic physiology, the solved right heart, tamponade ----
+  {
+    const gD = 'Diastology', sN = hemoSummary({}), sA = hemoSummary(PATHS.as);
+    const msD = (v) => (v == null ? null : v * 1000);
+    // MOT-6: a normal LA has v >= a (the a > v pattern is the RA's)
+    check(gD, 'normal LA: v-wave minus a-wave', sN.PlaVWave - sN.PlaAWave, [0, 6], 'mmHg', `a ${sN.PlaAWave.toFixed(1)}, v ${sN.PlaVWave.toFixed(1)}, mean ${sN.PlaMean.toFixed(1)}`);
+    check(gD, 'normal: E/A', eaRatio({}), [1.0, 1.8], '');
+    check(gD, 'normal: EDV', sN.EDV, [110, 125], 'mL'); check(gD, 'normal: SV', sN.SV, [65, 78], 'mL'); check(gD, 'normal: EF', sN.EF, [55, 65], '%');
+    // MOT-5 / PAT-6: severe AS with concentric LVH relaxes slowly (grade I)
+    check(gD, 'severe AS: E/A (impaired relaxation)', eaRatio(PATHS.as), [0.5, 0.85], '');
+    check(gD, 'severe AS: E deceleration time', msD(sA.eDT), [200, 300], 'ms');
+    check(gD, 'severe AS: IVRT', msD(sA.ivrt), [100, 140], 'ms', `normal ${msD(sN.ivrt).toFixed(0)} ms`);
+    check(gD, 'severe AS: LAVmax', sA.LAVmax, [85, 110], 'mL', `normal ${sN.LAVmax.toFixed(0)} mL`);
+    check(gD, 'severe AS: booster share of LA emptying', sA.laBoosterShare, [35, 55], '%', `normal ${sN.laBoosterShare.toFixed(0)} %`);
+
+    // MOT-3 / MOT-7: RV, PA and RA pressures from the circulation
+    const gR = 'Right-heart circulation', sP = hemoSummary(PATHS.phtn), sD = hemoSummary(PATHS.dcm);
+    check(gR, 'normal: RV systolic pressure', sN.RVSP, [20, 30], 'mmHg');
+    check(gR, 'normal: mean RA pressure', sN.RAP, [2, 7], 'mmHg');
+    check(gR, 'normal: Qp (RV forward volume) / LV forward volume', sN.QpQsRV, [0.97, 1.03], '');
+    check(gR, 'PH: RV systolic pressure', sP.RVSP, [60, 90], 'mmHg', `transpulmonary gradient ${(sP.mPAP - sP.PlaMean).toFixed(0)} mmHg`);
+    const vTrPh = geo(0, 'phtn').hemo.vTRPeak;
+    check(gR, 'PH: TR peak vs sqrt((RVSP - RAP) / 4)', vTrPh - Math.sqrt((sP.RVSP - sP.RAP) / 4), [-0.1, 0.1], 'm/s', `TR ${vTrPh.toFixed(2)} m/s, RAP ${sP.RAP.toFixed(1)}`);
+    check(gR, 'PH: TR peak velocity', vTrPh, [4.2, 4.4], 'm/s');
+    check(gR, 'severe DCM: mean RA pressure (biventricular failure)', sD.RAP, [10, 16], 'mmHg');
+    const ivD = geo(0, 'dcm').A.ivc;
+    check(gR, 'severe DCM: IVC diameter', 2 * ivD.r, [2.1, 2.6], 'cm');
+    check(gR, 'severe DCM: IVC sniff collapse', ivD.collapse * 100, [0, 50], '%');
+    const sTr = hemoSummary(PATHS.tr);
+    check(gR, 'severe TR: TR peak (blunted by the RA v-wave)', geo(0, 'tr').hemo.vTRPeak, [2.3, 2.7], 'm/s', `RAP ${sTr.RAP.toFixed(1)}, RA v ${sTr.RAPvWave.toFixed(0)} mmHg`);
+    check(gR, 'severe TR: regurgitant volume', sTr.trRegurgVol, [45, 90], 'mL');
+    check(gR, 'secundum ASD: Qp:Qs from the RV outflow', hemoSummary(PATHS.asd).QpQsRV, [1.5, 3], '');
+
+    // PAT-2: tamponade variant of the effusion case
+    const gT = 'Tamponade', TP = { effusion: true, tamponade: true }, sT = hemoSummary(TP);
+    check(gT, 'mitral E respiratory variation', sT.mvEResp, [25, 50], '%');
+    check(gT, 'tricuspid E respiratory variation', sT.tvEResp, [40, 80], '%');
+    check(gT, 'RA inversion / cycle', sT.raInvFrac, [0.33, 0.6], '');
+    check(gT, 'SV', sT.SV, [35, 55], 'mL', `RAP ${sT.RAP.toFixed(1)}, pericardial ${sT.Ppc.toFixed(0)} mmHg`);
+    const ivT = geometryAt(0, TP).A.ivc;
+    check(gT, 'IVC diameter (plethoric)', 2 * ivT.r, [2.1, 2.8], 'cm');
+    check(gT, 'IVC sniff collapse', ivT.collapse * 100, [0, 50], '%');
+    // the free walls move in: the modelled indentation (RV in early diastole, RA
+    // from late diastole into early systole), and the geometry honours it — a
+    // point well inside the original free wall is no longer blood
+    const { tamponadeCollapse } = await import('../js/cardiac-model.js');
+    let rvMax = 0, rvPh = 0, raN = 0; const NP = 40;
+    for (let i = 0; i < NP; i++) { const c = tamponadeCollapse(geometryAt(i / NP, TP)); if (c.rv > rvMax) { rvMax = c.rv; rvPh = i / NP; } if (c.ra > 0.15) raN++; }
+    check(gT, 'RV free wall early-diastolic inward motion', rvMax, [0.3, 1], 'cm', `deepest at phase ${rvPh.toFixed(3)}`);
+    assert(gT, 'RV collapse falls in early diastole', rvPh > 0.45 && rvPh < 0.7, `${rvPh}`);
+    check(gT, 'RA free wall visibly inverted (> 1.5 mm) / cycle', raN / NP, [0.3, 0.6], '');
+    // how far the blood-pool edge moves in along the free-wall axis: scanning in
+    // from the free wall, the first lumen sample with the tamponade minus without
+    const probe = (ph, which) => {
+      const G = geometryAt(ph, TP), c = tamponadeCollapse(G), w = which === 'RA' ? c.wRa : c.wRv, u = which === 'RA' ? c.uRa : c.uRv, d = which === 'RA' ? c.ra : c.rv;
+      if (!w) return null;
+      const lum = which === 'RA' ? TISSUE.RA : TISSUE.RV;
+      const first = (P) => { for (let t = 0; t <= 3; t += 0.02) { const q = [w[0] - u[0] * t, w[1] - u[1] * t, w[2] - u[2] * t]; if (classify(q[0], q[1], q[2], G, P).tissue === lum) return t; } return 3; };
+      return { depth: first(TP) - first({ effusion: true }), d };
+    };
+    const pr = probe(rvPh, 'RV'), pa = probe(0.02, 'RA');
+    check(gT, 'RV free-wall dent drawn: RV blood displaced along the free-wall axis', pr ? pr.depth : 0, [0.2, 1.2], 'cm', pr ? `modelled ${pr.d.toFixed(2)} cm` : 'no dent');
+    check(gT, 'RA free-wall inversion drawn at the QRS: RA blood displaced', pa ? pa.depth : 0, [0.2, 1.2], 'cm', pa ? `modelled ${pa.d.toFixed(2)} cm` : 'no dent');
+    // the plain effusion is haemodynamically the normal heart
+    const sE = hemoSummary({ effusion: true });
+    assert(gT, 'plain effusion preset matches the normal circulation', ['EDV', 'SV', 'PaoSys', 'RAP', 'RVSP', 'eaFlow'].every((k) => Math.abs(sE[k] - sN[k]) < 1e-9));
   }
 
   // 3D panel: the great vessels, coronaries and CS as separate, legend-coloured meshes

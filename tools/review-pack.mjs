@@ -33,7 +33,7 @@ fs.mkdirSync(OUT, { recursive: true });
 
 const PATHS = {
   normal: {}, dcm: { dilated: true }, as: { aorticStenosis: true, lvh: true }, mr: { mr: true },
-  ms: { mitralStenosis: true }, phtn: { rvpo: true, tr: true }, effusion: { effusion: true },
+  ms: { mitralStenosis: true }, phtn: { rvpo: true, tr: true }, effusion: { effusion: true }, tamponade: { effusion: true, tamponade: true },
   asd: { asd: true }, vsd: { vsd: true }, rwma: { rwma: 'septal' }, tr: { tr: true },
 };
 const TTE_ALL = 'PLAX,PSAX,PSAX_AV,PSAX_MV,A4C,A5C,A2C,A3C,SUBCOSTAL,RVIT,SC_IVC,SSN';

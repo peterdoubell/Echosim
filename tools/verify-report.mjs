@@ -29,6 +29,7 @@ const CASES = {
   dcm: [{ dilated: true }, /severely impaired lv systolic function/i],
   rwma: [{ rwma: 'septal' }, /regional wall motion abnormality/i],
   effusion: [{ effusion: true }, /pericardial effusion/i],
+  tamponade: [{ effusion: true, tamponade: true }, /features of tamponade/i],
   vsd: [{ vsd: true }, /vsd/i],
   asd: [{ asd: true }, /secundum asd/i],
   tr: [{ tr: true, grade: 'severe' }, /tricuspid regurgitation/i],

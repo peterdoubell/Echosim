@@ -1942,9 +1942,19 @@ export class EchoView {
     }
     ctx.strokeStyle = 'rgba(140,190,230,0.6)';
     ctx.beginPath(); ctx.moveTo(0, zeroY); ctx.lineTo(W, zeroY); ctx.stroke();
-    const cxp = (G.phase % 1) * W;
+    const nb = S.nb || 1;
     ctx.strokeStyle = 'rgba(255,90,77,0.8)';
-    ctx.beginPath(); ctx.moveTo(cxp, 0); ctx.lineTo(cxp, H); ctx.stroke();
+    for (let b = 0; b < nb; b++) {
+      const cxp = ((G.phase % 1) + b) / nb * W;
+      ctx.beginPath(); ctx.moveTo(cxp, 0); ctx.lineTo(cxp, H); ctx.stroke();
+    }
+    if (nb > 1) {                                   // respiratory phase of each beat
+      ctx.fillStyle = 'rgba(170,215,245,0.75)';
+      ctx.textAlign = 'center';
+      ctx.font = '9px monospace';
+      for (let b = 0; b < nb; b++) ctx.fillText(specBeats(path)[b].resp === 'insp' ? 'insp' : 'exp', (b + 0.5) / nb * W, plotH - 4);
+      ctx.font = '10px monospace';
+    }
     ctx.textAlign = 'left';
     ctx.fillStyle = 'rgba(170,215,245,0.9)';
     ctx.fillText(`${mode}  ${gate.name}  θ ${Math.round(gate.angleDeg)}°  m/s`, 4, 10);
@@ -1970,11 +1980,11 @@ export class EchoView {
       ctx.font = '600 10px monospace';
       ctx.fillText('peak ' + peak.toFixed(1) + ' m/s', W - 34, py - 3 < 9 ? py + 11 : py - 3);
     }
-    this._drawEcg(ctx, W, H, plotH, G);
+    this._drawEcg(ctx, W, H, plotH, G, nb);
     this.spectralData = {
       mode, site: gate.key, label: gate.label, angleDeg: gate.angleDeg, cols, vs: S.vs.slice(0, cols),
       nyq: mode === 'PW' ? nyqPW : null, scale, baseline: fTop, wrapped, aliased,
-      peak, peakSign: sign, posMax: S.posMax, negMax: S.negMax,
+      peak, peakSign: sign, posMax: S.posMax, negMax: S.negMax, beats: nb,
     };
   }
 
@@ -1989,12 +1999,16 @@ export class EchoView {
     const v = new Float32Array(cap), w = new Float32Array(cap), t = new Uint8Array(cap);
     const start = new Int32Array(cols + 1), vs = new Float32Array(cols);
     let n = 0, posMax = 0, negMax = 0;
+    // tamponade: several beats across a breath (expiration, inspiration,
+    // expiration), each read from that respiratory phase's solved circulation
+    const beats = specBeats(path), nb = beats.length;
     for (let c = 0; c < cols; c++) {
       start[c] = n;
-      const Gp = geometryAt(c / cols, path);
+      const u = c * nb / cols, bi = Math.min(nb - 1, Math.floor(u));
+      const Gp = geometryAt(nb > 1 ? u - bi : c / cols, beats[bi]);
       let best = 0;
       for (const dd of offs) {
-        const vel = velocityAt(P[0] + dir[0] * dd, P[1] + dir[1] * dd, P[2] + dir[2] * dd, Gp, path);
+        const vel = velocityAt(P[0] + dir[0] * dd, P[1] + dir[1] * dd, P[2] + dir[2] * dd, Gp, beats[bi]);
         if (!vel) continue;
         const vt = -(vel.vx * dir[0] + vel.vy * dir[1] + vel.vz * dir[2]);
         if (Math.abs(vt) < 0.02) continue;
@@ -2007,20 +2021,20 @@ export class EchoView {
       if (-best > negMax) negMax = -best;
     }
     start[cols] = n;
-    return { key, path, v, w, t, start, vs, posMax, negMax };
+    return { key, path, v, w, t, start, vs, posMax, negMax, nb };
   }
 
   // ECG strip and time scale under the spectrum (0.1 s ticks, 0.5 s major).
-  _drawEcg(ctx, W, H, plotH, G) {
+  _drawEcg(ctx, W, H, plotH, G, nb = 1) {
     ctx.fillStyle = '#04060a';
     ctx.fillRect(0, plotH, W, H - plotH);
     const mid = plotH + (H - plotH) * 0.62, amp = (H - plotH) * 0.5;
     ctx.strokeStyle = 'rgba(90,230,120,0.85)';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    for (let x = 0; x <= W; x += 1) { const y = mid - ecgAt(x / W) * amp; if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
+    for (let x = 0; x <= W; x += 1) { const y = mid - ecgAt((x / W * nb) % 1) * amp; if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
     ctx.stroke();
-    const rr = this.rrSec || 0.833;
+    const rr = (this.rrSec || 0.833) * nb;
     ctx.strokeStyle = 'rgba(150,200,240,0.55)';
     for (let k = 0, ts = 0; ts <= rr + 1e-6; k++, ts = k * 0.1) {
       const x = ts / rr * W, major = k % 5 === 0;
@@ -2031,6 +2045,22 @@ export class EchoView {
     ctx.textAlign = 'left';
     ctx.fillText('ECG  0.1 s/tick', 4, H - 2);
   }
+}
+
+// Beats shown across the spectral display: one cycle, or for tamponade three
+// beats over a breath (expiration, inspiration, expiration) so the reciprocal
+// respiratory swing of mitral and tricuspid inflow shows. The path objects are
+// built once per case so the per-case caches stay warm.
+const _beatCache = new WeakMap();
+function specBeats(path) {
+  if (!path || !path.tamponade) return [path];
+  let b = _beatCache.get(path);
+  if (!b) {
+    const ex = { ...path, resp: 'exp' }, ins = { ...path, resp: 'insp' };
+    b = [ex, ins, ex];
+    _beatCache.set(path, b);
+  }
+  return b;
 }
 
 // Map a line-of-sight velocity (m/s) to an RGB colour using BART convention.

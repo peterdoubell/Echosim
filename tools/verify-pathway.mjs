@@ -61,7 +61,7 @@ for (const m of MODULES) {
 }
 check('question bank is well formed', problems.length === 0, problems.slice(0, 4).join(' | '));
 check(`bank size: ${total} questions, ${cases} case questions`, total >= 90 && cases >= 12);
-check('pathology list read from index.html', PATHS.length === 11, PATHS.join(','));
+check('pathology list read from index.html', PATHS.length === 12, PATHS.join(','));
 check('every pathology appears in a case question', PATHS.every((p) => MODULES.some((m) => m.questions.some((q) => q.case && q.case.path === p))), PATHS.filter((p) => !MODULES.some((m) => m.questions.some((q) => q.case && q.case.path === p))).join(','));
 
 // shuffling keeps the right answer
@@ -109,6 +109,11 @@ check('MR case quotes the model regurgitant fraction', near(quoted(findQ('mitral
 const ph = rep({ rvpo: true, tr: true });
 check('PH case quotes the model TR Vmax and PASP', near(quoted(findQ('rightheart', 'phtn')), /TR Vmax ([\d.]+) m\/s/, ph.trVmax, 0.05) && near(quoted(findQ('rightheart', 'phtn')), /PASP ~(\d+)/, ph.pasp, 1));
 check('Effusion case quotes the model depth', near(quoted(findQ('pericongenital', 'effusion')), /measures ([\d.]+) cm/, rep({ effusion: true }).effusion, 0.05));
+{
+  const { hemoSummary } = await import('../js/hemodynamics.js');
+  const tq = quoted(findQ('pericongenital', 'tamponade')), st = hemoSummary({ effusion: true, tamponade: true });
+  check('Tamponade case quotes the model mitral / tricuspid E variation', near(tq, /mitral E falls by ~(\d+)%/, st.mvEResp, 1) && near(tq, /tricuspid E rises ~(\d+)%/, st.tvEResp, 1));
+}
 const as = rep({ aorticStenosis: true, lvh: true });
 const asQ = MODULE_BY_ID.aortic.questions.find((q) => /^Peak velocity/.test(q.q)).q;
 check('AS grading question matches the model', near(asQ, /Peak velocity ([\d.]+) m\/s/, as.avVmax, 0.05)
