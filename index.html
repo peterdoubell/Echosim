@@ -125,6 +125,12 @@
           <button data-view="MEBICAVAL" aria-pressed="false" title="Mid-oesophageal bicaval (SVC, IVC, interatrial septum)">ME bicaval</button>
           <button data-view="MERVIO" aria-pressed="false" title="Mid-oesophageal RV inflow-outflow">ME RV in-out</button>
           <button data-view="DESCAO" aria-pressed="false" title="Descending thoracic aorta short axis">Desc Ao</button>
+          <button data-view="MEAVLAX" aria-pressed="false" title="Mid-oesophageal aortic-valve long axis (LVOT, cusps, root)">ME AV LAX</button>
+          <button data-view="MECOMM" aria-pressed="false" title="Mid-oesophageal mitral commissural">ME comm</button>
+          <button data-view="TG2C" aria-pressed="false" title="Transgastric two-chamber">TG 2-Ch</button>
+          <button data-view="TGLAX" aria-pressed="false" title="Transgastric long axis (LVOT and aortic valve)">TG LAX</button>
+          <button data-view="DTG5C" aria-pressed="false" title="Deep transgastric five-chamber (aortic-valve CW aligned with the LVOT)">Deep TG 5C</button>
+          <button data-view="DESCAOLAX" aria-pressed="false" title="Descending thoracic aorta long axis">Desc Ao LAX</button>
         </div>
       </div>
 
@@ -268,6 +274,22 @@
           <div title="Contrast-to-noise ratio, tissue vs lumen"><span>CNR</span><b id="qCnr">—</b><small class="ref">tissue vs lumen</small></div>
           <div title="Speckle signal-to-noise ratio of the myocardial texture (fully-developed Rayleigh speckle ≈ 1.91)"><span>Speckle SNR</span><b id="qSnr">—</b><small class="ref">Rayleigh ≈ 1.9</small></div>
         </div>
+      </div>
+
+      <div class="ctl-group hidden" id="teeProbeCtl">
+        <h3>TEE probe</h3>
+        <label title="Omniplane angle: turns the imaging plane about the beam (0° transverse, 90° longitudinal, 180° mirror of 0°)">Omniplane <output id="omniOut" for="omni" aria-live="polite">0°</output>
+          <input type="range" id="omni" min="0" max="180" value="0" aria-label="Omniplane angle (degrees)" aria-valuetext="0°" />
+        </label>
+        <label title="Advance (+) or withdraw (−) the probe along the oesophagus (cm)">Advance / withdraw <output id="advOut" for="adv" aria-live="polite">0</output> cm
+          <input type="range" id="adv" min="-40" max="40" value="0" aria-label="Advance or withdraw the probe (mm)" aria-valuetext="0 cm" />
+        </label>
+        <label title="Turn the probe shaft: + to the patient's right (clockwise), − to the left">Turn <output id="rotOut" for="rot" aria-live="polite">0°</output>
+          <input type="range" id="rot" min="-60" max="60" value="0" aria-label="Turn the probe (degrees)" aria-valuetext="0°" />
+        </label>
+        <label title="Flex the tip: + anteflexion (beam swings caudally), − retroflexion">Flex <output id="flexOut" for="flex" aria-live="polite">0°</output>
+          <input type="range" id="flex" min="-30" max="30" value="0" aria-label="Flex the probe tip (degrees)" aria-valuetext="0°" />
+        </label>
       </div>
 
       <div class="ctl-group">

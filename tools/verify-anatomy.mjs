@@ -23,7 +23,7 @@ import { geometryAt, classify, TISSUE, hemoSummary, hemodynamics, membSite, MEMB
 import { measureModel } from '../js/report.js';
 import { LM, REF, lumenDist, mitralLift, BODY_AX, diaphragmBelow, rwmaBlend, stomachDist, rapEstimate } from '../js/anatomy.js';
 import { MS_AREA } from '../js/hemodynamics.js';
-import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, ALL_VIEWS as ALL_V } from '../js/views.js';
+import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, ALL_VIEWS as ALL_V, teePathDist, teeManipulate, teeOmni } from '../js/views.js';
 import { renderBmode, beamSample, speckleAxis, renderDoppler } from './bmode.mjs';
 import { velocityAt, VALVE_DEFS } from '../js/cardiac-model.js';
 
@@ -1959,6 +1959,26 @@ for (const [vn, view, vessels] of [['SC_IVC', EXTRA_VIEWS.SC_IVC, ['ivc']], ['ME
       check('TEE', `MEBICAVAL: crista ridge cells beside the SVC orifice, lateral side (${tag})`, best, [0, 1], 'cm', 'distance from the orifice edge');
     }
   }
+  // one TEE probe on one path: every TEE view is a probe position on the
+  // oesophageal / gastric centreline (teePathDist), and the set covers the
+  // core of the ASE/SCA examination
+  {
+    check('TEE', 'TEE: view count', Object.keys(TEE_VIEWS).length, [15, 28], '');
+    // KNOWN-FAIL: three of the original mid-oesophageal presets put the transducer
+    // face off the centreline (ME 4C and ME 2C backed off along the beam to keep the
+    // oesophageal wall in front of the LA; the ME AV SAX plane meets the
+    // oesophagus 2.4 cm above the probe, which is projected onto it instead)
+    for (const [vn, v] of Object.entries(TEE_VIEWS)) {
+      KNOWN = ['ME4C', 'ME2C', 'MEAVSAX'].includes(vn);
+      check('TEE', `TEE path: ${vn} probe within 0.5 cm of the oesophageal / gastric centreline`, teePathDist(v.probe().pos), [0, 0.5], 'cm');
+      KNOWN = false;
+    }
+    // the omniplane control turns the plane about the beam and nothing else: the
+    // ME AV SAX preset turned to its own angle + 90 deg holds the root axis
+    const sax = TEE_VIEWS.MEAVSAX.probe(), lax = teeManipulate(sax, { omni: teeOmni(sax) + 90 });
+    check('TEE', 'omniplane +90 from ME AV SAX: root axis angle to the plane', Math.asin(Math.min(1, Math.abs(dot(LM.U_AO, lax.normal)))) * 180 / Math.PI, [0, 25], 'deg');
+    check('TEE', 'omniplane: transducer and beam unchanged (cm + rad)', Math.hypot(...sub(lax.pos, sax.pos)) + Math.hypot(...sub(lax.dir, sax.dir)), [0, 1e-6], '');
+  }
   {
     const path = PATHS.asd, sp = septum(geo(0, 'asd'), path);
     const gap = sp.filter((k) => k === 2).length * 0.05;
@@ -2541,6 +2561,14 @@ SECTION = 'Pathology';
   assert(g, 'severe AS A5C: CW through the aortic valve', as5.mode === 'CW' && as5.site === 'avCw', `${as5.mode} ${as5.site}`);
   check(g, 'severe AS A5C: CW peak', as5.peak, [4, 5.5], 'm/s', `beam-flow angle ${as5.angleDeg.toFixed(0)} deg`);
   check(g, 'severe AS: PLAX CW reading / A5C reading (v cos theta)', asL.peak / as5.peak, [0, 0.6], '', `PLAX ${asL.peak.toFixed(2)} m/s at ${asL.angleDeg.toFixed(0)} deg`);
+  // TEE: the deep transgastric five-chamber view lines the CW beam up with the
+  // LVOT, so it reads the modelled aortic-valve peak (the TEE AV gradient)
+  {
+    const dtg = spec('as', 'DTG5C'), vm = measureModel(P.as).avVmax;
+    assert(g, 'severe AS deep TG 5C: CW through the aortic valve', dtg.mode === 'CW' && dtg.site === 'avCw', `${dtg.mode} ${dtg.site}`);
+    check(g, 'TEE: deep TG 5C AV CW angle', dtg.angleDeg, [0, 20], 'deg');
+    check(g, 'severe AS deep TG 5C: CW peak minus the modelled AV peak', dtg.peak - vm, [-0.3, 0.3], 'm/s', `${dtg.peak.toFixed(2)} vs ${vm.toFixed(2)} m/s`);
+  }
   // mitral closure (phase 0) to opening (first forward mitral flow after systole)
   let MVO = 0.5; for (let ph = 0.3; ph < 0.8; ph += 0.002) if (hemodynamics(ph, P.mr).Qmv > 0) { MVO = ph; break; }
   const hol = (sp, thr) => { let n = 0, k = 0; for (let c = 0; c < sp.cols; c++) { const ph = c / sp.cols; if (ph < MVO) { n++; if (-sp.vs[c] > thr) k++; } } return n ? k / n : 0; };

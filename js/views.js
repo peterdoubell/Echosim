@@ -696,4 +696,122 @@ export const TEE_VIEWS = {
   MELAA: { probe: melaaProbe, depth: MELAA_DEPTH, track: melaaTrack },
 };
 
+// ---- one TEE probe: omniplane angle, advance / withdraw, rotation, flexion ----
+// Every TEE view above is a preset of one probe on one path (teePathPoint, then
+// the stomach). The probe can then be manipulated as on a real TEE: the
+// omniplane angle turns the imaging plane about the beam (0 deg transverse with
+// the patient's left on the screen-right, 90 deg longitudinal with cranial on
+// the screen-right, 180 deg the mirror of 0), advance (+) / withdraw (-) slides
+// the probe along the oesophagus, rotation turns the shaft (+ to the patient's
+// right, clockwise) and flexion tilts the tip (+ anteflexion: the beam swings
+// caudally, - retroflexion).
+function teeFrame(dir) {
+  const up = norm(vsub(_S, vscale(dir, vdot(_S, dir))));
+  let lft = vcross(dir, up);
+  if (vdot(lft, BODY_AX.L) < 0) lft = vscale(lft, -1);
+  return { up, lft };
+}
+// omniplane angle (deg) of a probe's imaging plane
+export function teeOmni(p) {
+  const { up, lft } = teeFrame(p.dir);
+  return Math.atan2(vdot(p.lat, up), vdot(p.lat, lft)) * 180 / Math.PI;
+}
+const ROT_SIGN = vdot(vrot(BODY_AX.A, _S, 0.1), BODY_AX.R) > vdot(BODY_AX.A, BODY_AX.R) ? 1 : -1;
+export function teeManipulate(p, { omni = null, advance = 0, rotate = 0, flex = 0 } = {}) {
+  const om = omni == null ? teeOmni(p) : omni;
+  let pos = p.pos.slice(), dir = p.dir.slice();
+  let target = (p.target || vadd(p.pos, vscale(p.dir, 5))).slice();
+  if (!rotate && !flex && !advance && omni == null) return { ...p, pos, dir, lat: p.lat.slice(), normal: p.normal.slice(), target };
+  if (rotate) {
+    const a = ROT_SIGN * rotate * Math.PI / 180;
+    dir = vrot(dir, _S, a); target = vadd(pos, vrot(vsub(target, pos), _S, a));
+  }
+  if (flex) {
+    const k = norm(vcross(dir, _S));
+    const a = flex * Math.PI / 180, d1 = vrot(dir, k, a);
+    const sg = vdot(d1, _S) < vdot(dir, _S) ? 1 : -1;               // anteflexion: caudally
+    dir = vrot(dir, k, sg * a); target = vadd(pos, vrot(vsub(target, pos), k, sg * a));
+  }
+  if (advance) { pos = vsub(pos, vscale(_S, advance)); target = vsub(target, vscale(_S, advance)); }
+  const { up, lft } = teeFrame(dir), t = om * Math.PI / 180;
+  const lat = norm(vadd(vscale(lft, Math.cos(t)), vscale(up, Math.sin(t))));
+  return { pos, dir, lat, normal: vcross(dir, lat), target };
+}
+// a TEE view as an omniplane preset of another view's probe position and beam
+const omniOf = (probe, omni) => { let c = null; return () => { if (!c) c = teeManipulate(probe(), { omni }); return { ...c, pos: c.pos.slice(), target: c.target.slice() }; }; };
+
+// ME aortic-valve long axis (~120-140 deg): the beam on the aortic valve, the
+// plane holding the root axis — LVOT, the cusps, sinuses and the proximal
+// ascending aorta running to the screen-right.
+function meAvLaxProbe() {
+  const tgt = vadd(A, vscale(LM.U_AO, 0.5)), pos = teePathPoint(MEAVLAX_UP);
+  const dir = norm(vsub(tgt, pos));
+  return teeClear(probeFrom(tgt, dir, vsub(LM.U_AO, vscale(dir, vdot(LM.U_AO, dir))), Math.hypot(...vsub(tgt, pos))));
+}
+const MEAVLAX_UP = 1.0;                              // cm withdrawn: the beam meets the root side-on
+// ME mitral commissural (~50-70 deg): from the ME four-chamber position the
+// plane turned onto the line through both commissures — P3 on the left, A2 in
+// the middle, P1 on the right, both papillary muscles below.
+const MECOMM_LINE = (() => {
+  const ap = vsub(A, M); ap[1] = 0;                  // aorto-mitral (antero-posterior) direction, level
+  let c = norm(vcross([0, 1, 0], ap));
+  if (c[0] < 0) c = vscale(c, -1);                   // anterolateral commissure (patient's left) to the screen-right
+  return c;
+})();
+const MECOMM_UP = 0.4;                               // cm: where the oesophagus meets the four-chamber plane
+function meCommProbe() {
+  const pos = teePathPoint(MECOMM_UP), tgt = vadd(M, vscale(vsub(APEX, M), 0.25));
+  const dir = norm(vsub(tgt, pos));
+  return teeClear(probeFrom(tgt, dir, vsub(MECOMM_LINE, vscale(dir, vdot(MECOMM_LINE, dir))), Math.hypot(...vsub(tgt, pos))));
+}
+// Transgastric views from the TG SAX position: 90 deg (two-chamber: the
+// inferior wall in the near field, the anterior wall beyond, the apex on the
+// left and the mitral valve and LA on the right) and ~120 deg (long axis: the
+// plane turned onto the LVOT, the aortic valve and root on the right).
+function tg2cProbe() {
+  const p = tgsaxProbe(), c = vadd(p.pos, vscale(p.dir, 4));
+  const dir = norm(vsub(vadd([0, LM.LV.apexY * 0.4, 0], [0, 0, 0]), p.pos));
+  return probeFrom(c, dir, vsub([0, 1, 0], vscale(dir, dir[1])), Math.hypot(...vsub(c, p.pos)));
+}
+function tgLaxProbe() {
+  const p = tgsaxProbe(), n = norm(vcross(vsub(A, p.pos), vsub(vadd(M, vscale(vsub(APEX, M), 0.5)), p.pos)));
+  const tgt = vscale(vadd(A, vadd(M, vscale(vsub(APEX, M), 0.5))), 0.5), dir = norm(vsub(tgt, p.pos));
+  let right = vcross(n, dir);
+  if (vdot(right, vsub(A, APEX)) < 0) right = vscale(right, -1);    // the aortic valve on the screen-right
+  return probeFrom(tgt, dir, right, Math.hypot(...vsub(tgt, p.pos)));
+}
+// Deep transgastric five-chamber (0 deg): the probe advanced from the fundus
+// into the gastric body beneath the apex and anteflexed, so the beam runs up the
+// LV long axis through the LVOT to the aortic valve — aligned with ejection,
+// the TEE window for the aortic-valve gradient (CW). The probe rests DTG_BACK cm
+// beyond the apex on the LVOT axis.
+const DTG_BACK = 2.2;
+function dtg5cProbe() {
+  const ax = norm(vsub(A, APEX)), pos = vsub(APEX, vscale(ax, DTG_BACK));
+  const dir = norm(vsub(A, pos));
+  return probeFrom(A, dir, vsub(vsub(M, T), vscale(dir, vdot(vsub(M, T), dir))), Math.hypot(...vsub(A, pos)));
+}
+export const TEE_EXTRA = {
+  MEAVLAX: { probe: meAvLaxProbe, depth: 10, track: (A) => [0, 0.8 * (A.lv.A[1] - A0.lv.A[1]), 0] },
+  MECOMM: { probe: meCommProbe, depth: 12 },
+  TG2C: { probe: tg2cProbe, depth: 13 },
+  TGLAX: { probe: tgLaxProbe, depth: 15 },
+  DTG5C: { probe: dtg5cProbe, depth: 16, doppler: 'avCw' },
+  DESCAOLAX: { probe: omniOf(descAoSaxProbe, 90), depth: 8 },
+};
+Object.assign(TEE_VIEWS, TEE_EXTRA);
+// the oesophageal / gastric path every TEE probe position lies on: the
+// oesophagus from the gastro-oesophageal junction up past the arch, then the
+// stomach from the junction to the fundal contact (TG views) and on to the
+// deep transgastric position beneath the apex
+export function teePathDist(q) {
+  let best = 1e9;
+  for (let s = TEE_GEJ; s <= 12; s += 0.1) best = Math.min(best, Math.hypot(...vsub(q, teePathPoint(s))));
+  const g = [teePathPoint(TEE_GEJ), tgsaxProbe().pos, dtg5cProbe().pos];
+  for (let i = 0; i + 1 < g.length; i++) {
+    const ab = vsub(g[i + 1], g[i]), t = Math.max(0, Math.min(1, vdot(vsub(q, g[i]), ab) / vdot(ab, ab)));
+    best = Math.min(best, Math.hypot(...vsub(q, vadd(g[i], vscale(ab, t)))));
+  }
+  return best;
+}
 export const ALL_VIEWS = { ...TTE_VIEWS, ...EXTRA_VIEWS, ...TEE_VIEWS };
