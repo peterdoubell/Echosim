@@ -1673,16 +1673,13 @@ const laPart = (A, q) => {
     return (l === T.LUNG || l === T.VWALL || l === T.FAT) && stomachDist(q[0], q[1], q[2]) < 0.5 && diaphragmBelow(q[0], q[1], q[2]) > -0.4;
   });
   const sectorCells = (S) => cellsWhere(S, () => true).length;
-  for (const [nm, lim] of [['PLAX', 2], ['PSAX_AV', 2], ['PSAX_MV', 2], ['RVIT', 2], ['PSAX', 6]]) {
+  // (review 11: the left lobe's posterior face no longer reaches the midline
+  // behind the RV, so the mid-papillary PSAX is held to the same 2 % as the rest)
+  for (const [nm, lim] of [['PLAX', 2], ['PSAX_AV', 2], ['PSAX_MV', 2], ['RVIT', 2], ['PSAX', 2]]) {
     const v = TTE_VIEWS[nm] || EXTRA_VIEWS[nm];
     for (const [tag, G] of [['ED', GED], ['ES', GES]]) {
       const S = planeSample(v, G, {}, 0.1);
-      // KNOWN-FAIL: the RV inflow's left edge still reaches ~4 % liver at ES below
-      // the RV diaphragmatic wall; every roll / swing that clears it brings the LV
-      // into the plane (the 'RA and RV both shown' row) or loses the CS ostium
-      KNOWN = nm === 'RVIT' && tag === 'ES';
       check(PL, `${nm}: liver + stomach share of the sector (${tag})`, 100 * abdomen(S).length / sectorCells(S), [0, lim], '%');
-      KNOWN = false;
     }
   }
   // PSAX-MV: no RA, RV crescent over the LV
@@ -1774,11 +1771,79 @@ const laPart = (A, q) => {
       const x = c.reduce((m, k) => m + xd(S, k)[0], 0) / c.length;
       if (x > rootX + 2) beyond += areaOf(S, c);
     }
-    // KNOWN-FAIL: the SVC (right of the ascending aorta) and the right PA (behind
-    // it) are cut at the right sector edge; shifting the plane off one brings in
-    // the other
-    check(PL, `PLAX: great-vessel sections beyond the root (${tag})`, beyond, [0, 0.3], 'cm2');
     KNOWN = false;
+    // (review 11: the beam tipped ~7 deg toward the base keeps the SVC beyond the
+    // right edge, and the RPA rises to the hilum above the plane)
+    check(PL, `PLAX: great-vessel sections beyond the root (${tag})`, beyond, [0, 0.3], 'cm2');
+    // the one round section behind the LA in the far field is the descending aorta
+    const dta = components(S, (l) => l === T.AORTA).comps.filter((c) => areaOf(S, c) >= 0.3 &&
+      c.filter((k) => { const q = ptK(S, k); return lumenDist(q[0], q[1], q[2], G.A, 'DESC') < 0; }).length > c.length / 2);
+    check(PL, `PLAX: descending-aorta sections behind the LA (${tag})`, dta.length, [1, 1], '');
+  }
+  // ---- review 11: apical far fields, PSAX-AV branches, subcostal RV and IVC ----
+  for (const [tag, G] of [['ED', GED], ['ES', GES]]) {
+    // A3C: the LV, LA and LVOT / root; at most the descending aorta in section
+    // behind the LA (not the SVC or the RPA), and little or no RV
+    const S = planeSample(EXTRA_VIEWS.A3C, G, {}, 0.1);
+    const avD = dot(sub(G.A.valves.aortic.c, S.p.pos), S.p.dir);
+    const inLum = (c, w) => c.filter((k) => { const q = ptK(S, k); return lumenDist(q[0], q[1], q[2], G.A, w) < 0; }).length > c.length / 2;
+    const extra = components(S, (l) => l === T.AORTA || l === T.RA || l === T.VEIN).comps.filter((c) => areaOf(S, c) >= 0.3 &&
+      c.reduce((m, k) => m + xd(S, k)[1], 0) / c.length > avD && !inLum(c, 'AOROOT') && !inLum(c, 'CS'));
+    check(PL, `A3C: great-vessel sections below the aortic-valve level (${tag})`, extra.length, [0, 1], '', 'descending aorta allowed');
+    check(PL, `A3C: RV share of the sector (${tag})`, 100 * cellsWhere(S, (l) => l === T.RV).length / sectorCells(S), [0, 5], '%');
+    // A2C: the LV and LA; beyond the LA roof no long run of great artery (at the
+    // 17 cm depth of bcf5794 the PA trunk, the RPA along the beam and the arch
+    // gave ~11.5 cm2; the PA bifurcation still shows in section beside the roof)
+    const S2 = planeSample(TTE_VIEWS.A2C, G, {}, 0.1);
+    const gv = cellsWhere(S2, (l, k) => l === T.AORTA && xd(S2, k)[1] > 9);
+    check(PL, `A2C: great-artery lumen beyond the mitral annulus (${tag})`, areaOf(S2, gv), [0, 8], 'cm2');
+  }
+  {
+    // PSAX-AV: the PA trunk dividing ('trousers'): both branch origins in plane
+    // over >= 1.5 cm, and one rounded LA body behind the root
+    const S = planeSample(TTE_VIEWS.PSAX_AV, GED, {}, 0.05), A = GED.A;
+    const seg = (q, a, b) => segDist(q, a, b);
+    const lens = [A.pa.branch[0], A.pa.branch[2]].map(([a, b, r]) => {
+      const c = cellsWhere(S, (l, k) => l === T.AORTA && seg(ptK(S, k), a, b) < r && lumenDist(...ptK(S, k), A, 'PA') < 0 &&
+        A.pa.branch.every(([a2, b2], i) => seg(ptK(S, k), a, b) <= seg(ptK(S, k), a2, b2)) && seg(ptK(S, k), A.pa.main.a, A.pa.main.b) > A.pa.main.r2);
+      if (!c.length) return 0;
+      const pts = c.map((k) => xd(S, k)); let L = 0;
+      for (const p1 of pts) for (const p2 of pts) L = Math.max(L, Math.hypot(p1[0] - p2[0], p1[1] - p2[1]));
+      return L;
+    });
+    check('PSAX-AV', 'PA branches in plane >= 1.5 cm (RPA, LPA origins)', lens.filter((L) => L >= 1.5).length, [2, 2], '', `RPA ${lens[0].toFixed(1)} cm, LPA ${lens[1].toFixed(1)} cm`);
+    const la = components(S, (l) => l === T.LA).comps.filter((c) => areaOf(S, c) >= 0.3);
+    check('PSAX-AV', 'LA components behind the root', la.length, [1, 1], '');
+    const big = la.reduce((m, c) => (c.length > m.length ? c : m), []), xs = big.map((k) => xd(S, k)[0]);
+    check('PSAX-AV', 'LA width behind the aortic valve', xs.length ? Math.max(...xs) - Math.min(...xs) : 0, [3, 5]);
+  }
+  {
+    // subcostal four-chamber: a full RV chamber under the liver, still clear at ES,
+    // its free wall on the liver (capsule -> RV myocardium gap along the beams)
+    const ar = [GED, GES].map((G) => { const S = planeSample(TTE_VIEWS.SUBCOSTAL, G, {}, 0.1); return areaOf(S, cellsWhere(S, (l) => l === T.RV)); });
+    check('Subcostal', 'RV area in plane (ED)', ar[0], [6, 14], 'cm2');
+    check('Subcostal', 'RV area ES / ED', ar[1] / ar[0], [0.45, 0.7], '');
+    const S = planeSample(TTE_VIEWS.SUBCOSTAL, GED, {}, 0.05);
+    let n = 0, ok = 0;
+    for (let i = 0; i < S.nx; i++) {
+      let lastLiv = -1, wall = -1;
+      for (let j = 0; j < S.nd; j++) {
+        const l = S.lab[j * S.nx + i]; if (l < 0) continue;
+        if (l === T.LIVER) lastLiv = j;
+        if (l === T.RV) { for (let jj = j; jj >= 0; jj--) if (S.lab[jj * S.nx + i] !== T.MYO && S.lab[jj * S.nx + i] !== T.RV) { wall = jj; break; } break; }
+        if (l === T.LV || l === T.RA || l === T.LA) break;
+      }
+      if (wall < 0 || lastLiv < 0) continue;
+      n++;
+      if ((wall - lastLiv) * S.step <= 0.6) ok++;                // capsule + pericardial line ~0.3 cm, then <= 0.3 cm
+    }
+    check('Subcostal', 'RV free wall within 0.3 cm of the liver capsule (share of beams through the RV)', n ? 100 * ok / n : 0, [60, 100], '%', `${n} beams`);
+  }
+  {
+    // subcostal IVC: the cavo-atrial junction (IVC orifice) inside the sector
+    const p = EXTRA_VIEWS.SC_IVC.probe(), j = GED.A.ivc.a, w = sub(j, p.pos);
+    const x = dot(w, p.lat), d = dot(w, p.dir), r = Math.hypot(x, d), ang = Math.atan2(Math.abs(x), d);
+    check('Subcostal IVC', 'cavo-atrial junction distance from the sector edge', Math.min(r * Math.sin(0.66 - ang), EXTRA_VIEWS.SC_IVC.depth - r), [1.5, 6]);
   }
 }
 SECTION = 'TEE';

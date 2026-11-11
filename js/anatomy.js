@@ -174,10 +174,13 @@ const PA_BIF = mad(PV0, U_PA, 4.4);
 // suprasternal plane cuts it, the LA a few mm beneath), then runs level to the
 // right hilum over the right upper pulmonary vein (two segments)
 const U_RPA = unit(add(add(mul(BODY_AX.R, 0.85), mul(BP, 0.45)), mul(BS, -0.5)));
-const U_RPA2 = unit(add(add(mul(BODY_AX.R, 0.85), mul(BP, 0.45)), mul(BS, 0.1)));
+// (the hilar segment turns more directly rightward and ends at the hilum 3.2 cm
+// from its origin: running on further back, it crossed the PLAX / APLAX plane
+// and was cut as a second great-vessel circle beyond the ascending aorta)
+const U_RPA2 = unit(add(add(mul(BODY_AX.R, 0.85), mul(BP, 0.3)), mul(BS, 0.1)));
 const RPA_O = mad(PA_BIF, BS, -0.8);
 const RPA_M = mad(RPA_O, U_RPA, 1.0);
-const RPA_E = mad(RPA_M, U_RPA2, 4.4 - 1.0);
+const RPA_E = mad(RPA_M, U_RPA2, 2.2);
 const U_LPA = unit(add(add(mul(BL, 0.6), mul(BP, 0.7)), mul(BS, 0.25)));
 // (the infundibulum is separated from the LVOT / aortic root by the muscular
 // outlet septum, so on PLAX its centre lies ~3.4 cm in front of the aortic-root
@@ -2217,9 +2220,16 @@ function dLiver(x, y, z, h, hRaw) {
   const p = x * BP[0] + y * BP[1] + z * BP[2];                   // + posterior
   // A smooth organ: its dome is the diaphragm; the rest is bounded by a large
   // ellipsoid centred right of the midline — ~20 cm across (the left lobe
-  // tapering as it crosses under the heart), ~16 cm AP, ~14 cm tall.
-  const ell = sdEllipsoid(l, p, h, -1.0, -1.0, 6.0, 11.5, 8.0, 7.0);
-  // The left lobe is a thin anterior wedge. Left of the midline its visceral
+  // tapering as it crosses under the heart), ~16 cm AP, ~14 cm tall below the
+  // dome. (Its anterior-superior shoulder reaches up to the diaphragm under the
+  // RV and the apex, so on the subcostal four-chamber view the RV free wall lies
+  // on the liver from the tricuspid hinge to the RV apex, with no echo-free band
+  // between the capsule and the pericardium.)
+  const ell = sdEllipsoid(l, p, h, -1.0, -1.0, 6.0, 11.5, 10.0, 10.0);
+  // The left lobe is a thin anterior wedge (its posterior face ~1.5 cm in front
+  // of the heart's diaphragmatic surface at the midline, so the parasternal
+  // short-axis and RV inflow far fields, which run on below the RV inferior wall,
+  // reach the posterior mediastinum and not a wedge of liver). Left of the midline its visceral
   // face is hollowed by the stomach (the gastric impression) and its lower edge
   // rises toward the dome, so it tapers to a rounded tip under the apex instead
   // of filling the space behind the heart (seen edge-on from the parasternal
@@ -2227,15 +2237,18 @@ function dLiver(x, y, z, h, hRaw) {
   // plane cuts them in a straight line.
   const Q = LIV_LOBE, lp = l > 0 ? l : 0;
   const stom = dStomach(l, p, hRaw) - GASTRIC.t - 0.25;            // outside the wall and a gap
-  const back = (p + Q.pk * l + Q.pc * lp * lp - Q.p0) / Math.hypot(1, Q.pk + 2 * Q.pc * lp);
+  const pk = l < 0 ? Q.pkR : Q.pk;
+  const back = (p + pk * l + Q.pc * lp * lp - Q.p0) / Math.hypot(1, pk + 2 * Q.pc * lp);
   const low = (h + Q.hk * l + Q.hc * lp * lp - Q.h0) / Math.hypot(1, Q.hk + 2 * Q.hc * lp);
   return smax(smax(smax(smax(0.1 - h, ell, 1.5), back, 1.2), low, 1.2), -stom, 0.8);
 }
 // left-lobe faces (body l / p / below, cm): posterior p < p0 - pk*l - pc*l^2 and
-// inferior h < h0 - hk*l - hc*l^2 (l > 0 for the quadratic terms); the stomach
+// inferior h < h0 - hk*l - hc*l^2 (l > 0 for the quadratic terms; right of the
+// midline the posterior face falls back at pkR per cm, so the caudate lobe still
+// wraps the IVC and the hepatic-vein confluence); the stomach
 // (fundus and body under the left dome) as an ellipsoid the lobe wraps around
 const LIV_LOBE = {
-  p0: 2.0, pk: 0.6, pc: 0.06, h0: 7.0, hk: 0.5, hc: 0.05,
+  p0: -1.5, pk: 0.6, pkR: 3.0, pc: 0.06, h0: 9.5, hk: 0.5, hc: 0.05,
   // lumen: fundus/upper body ~4 x 4 x 5 cm under the left dome, lateral to the
   // left lobe and entirely left of the midline (wall included), not spread behind
   // the LV; its upper surface carries the TG contact (GASTRIC.p, with the lumen
