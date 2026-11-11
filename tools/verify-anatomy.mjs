@@ -2489,10 +2489,12 @@ SECTION = 'Pathology';
   const n5 = spec('normal', 'A5C');
   assert(g, 'normal A5C: PW in the LVOT', n5.mode === 'PW' && n5.site === 'lvot', `${n5.mode} ${n5.site}`);
   check(g, 'normal A5C: LVOT peak (away from the probe)', n5.negMax, [0.8, 1.3], 'm/s', `toward ${n5.posMax.toFixed(2)}`);
-  const as5 = spec('as', 'A5C'), asL = spec('as', 'PLAX');
+  const as5 = spec('as', 'A5C'), asL = spec('as', 'PLAX', { site: 'avCw' });
   assert(g, 'severe AS A5C: CW through the aortic valve', as5.mode === 'CW' && as5.site === 'avCw', `${as5.mode} ${as5.site}`);
   check(g, 'severe AS A5C: CW peak', as5.peak, [4, 5.5], 'm/s', `beam-flow angle ${as5.angleDeg.toFixed(0)} deg`);
-  check(g, 'severe AS: PLAX CW reading / A5C reading (v cos theta)', asL.peak / as5.peak, [0, 0.6], '', `PLAX ${asL.peak.toFixed(2)} m/s at ${asL.angleDeg.toFixed(0)} deg`);
+  // an operator-placed CW through the valve from PLAX: v cos(theta), and flagged
+  check(g, 'severe AS: PLAX CW reading (operator site) / A5C reading (v cos theta)', asL.peak / as5.peak, [0, 0.6], '', `PLAX ${asL.peak.toFixed(2)} m/s at ${asL.angleDeg.toFixed(0)} deg`);
+  assert(g, 'severe AS: an operator CW site in PLAX at > 20 deg carries the "velocity underestimated" flag', asL.steep === true && asL.aligned === false, `steep ${asL.steep}`);
   // mitral closure (phase 0) to opening (first forward mitral flow after systole)
   let MVO = 0.5; for (let ph = 0.3; ph < 0.8; ph += 0.002) if (hemodynamics(ph, P.mr).Qmv > 0) { MVO = ph; break; }
   const hol = (sp, thr) => { let n = 0, k = 0; for (let c = 0; c < sp.cols; c++) { const ph = c / sp.cols; if (ph < MVO) { n++; if (-sp.vs[c] > thr) k++; } } return n ? k / n : 0; };
@@ -2501,9 +2503,11 @@ SECTION = 'Pathology';
   // the prolapse jet is eccentric (~37 deg to the apical beam): judged on the
   // angle-corrected velocity, v / cos(theta) > 2 m/s
   const cMR = Math.cos(mr4.angleDeg * Math.PI / 180);
-  check(g, 'severe MR A4C: fraction of MVC-MVO with angle-corrected |v| > 2 m/s (holosystolic)', hol(mr4, 2 * cMR), [0.9, 1], '', `MVO ${MVO.toFixed(3)}; peak ${mr4.negMax.toFixed(2)} m/s at ${mr4.angleDeg.toFixed(0)} deg`);
+  // (the default CW is now aligned with the jet, so the trace carries the model's
+  // own LV-LA upstroke and isovolumic-relaxation fall: judged above 1.5 m/s, as DCM)
+  check(g, 'severe MR A4C: fraction of MVC-MVO with angle-corrected |v| > 1.5 m/s (holosystolic)', hol(mr4, 1.5 * cMR), [0.9, 1], '', `MVO ${MVO.toFixed(3)}; peak ${mr4.negMax.toFixed(2)} m/s at ${mr4.angleDeg.toFixed(0)} deg`);
   let MVOd = 0.5; for (let ph = 0.3; ph < 0.8; ph += 0.002) if (hemodynamics(ph, P.dcm).Qmv > 0) { MVOd = ph; break; }
-  const dc4 = spec('dcm', 'A4C');
+  const dc4 = spec('dcm', 'A4C', { site: 'mvCw' });
   // DCM: low LV systolic pressure (~100 mmHg) against a raised LAP (~20) gives a
   // 70-80 mmHg LV-LA gradient, about 4.2-4.5 m/s, read through a small beam angle
   check(g, 'DCM A4C: functional MR CW peak', dc4.negMax, [3.8, 5.2], 'm/s');
@@ -2588,6 +2592,176 @@ SECTION = 'Pathology';
   }
 }
 
+// ---- Doppler site policy, spectral display, colour map, ASD column (review 11)
+{
+  SECTION = 'Doppler';
+  const { dopplerDefault, defaultSiteGeometry, DOPPLER_MAX_ANGLE } = await import('../js/echo.js');
+  const g = 'Spectral site policy (aligned standard sites only)';
+  for (const V of Object.keys(ALL_V)) {
+    let worst = 0; const sites = [];
+    for (const [key, p] of Object.entries(PATHS)) {
+      const k = dopplerDefault(V, p);
+      if (!k) continue;
+      const a = defaultSiteGeometry(V, k, p).angleDeg;
+      if (a > worst) worst = a;
+      if (!sites.includes(k)) sites.push(k);
+    }
+    if (sites.length) check(g, `${V}: default-site beam angle (worst over pathologies)`, worst, [0, DOPPLER_MAX_ANGLE], 'deg', sites.join(' '));
+    else assert(g, `${V}: no default spectral site`, true);
+  }
+  assert(g, 'PLAX: no default spectral trace for any pathology', Object.values(PATHS).every((p) => dopplerDefault('PLAX', p) === null));
+  assert(g, 'PSAX mitral level and subcostal 4C (normal): no default spectral trace', dopplerDefault('PSAX_MV', {}) === null && dopplerDefault('SUBCOSTAL', {}) === null);
+  assert(g, 'severe AS: CW through the valve only from apical windows (not PLAX / PSAX-AV)', dopplerDefault('PLAX', PATHS.as) === null && dopplerDefault('PSAX_AV', PATHS.as) !== 'avCw' && dopplerDefault('A5C', PATHS.as) === 'avCw' && dopplerDefault('A3C', PATHS.as) === 'avCw');
+  const vAo = geometryAt(0.2, PATHS.as).hemo.vAoPeak, sV = hemoSummary(PATHS.vsd);
+  for (const V of ['A5C', 'A3C']) { const sp = renderDoppler(V, 0.2, PATHS.as, { color: false }).spec; check(g, `severe AS ${V}: default CW peak`, sp.peak, [4.2, 4.7], 'm/s', `model ${vAo.toFixed(2)} m/s, ${sp.angleDeg.toFixed(0)} deg`); }
+  for (const V of ['PSAX', 'A4C']) { const sp = renderDoppler(V, 0.2, PATHS.vsd, { color: false }).spec; check(g, `VSD ${V}: default CW peak (cursor aligned with the jet)`, sp.peak, [4.4, 5.1], 'm/s', `model ${sV.vVsdPeak.toFixed(2)} m/s, ${sp.angleDeg.toFixed(0)} deg (view ${sp.rawAngleDeg.toFixed(0)})`); }
+  {
+    const sp = renderDoppler('SC_IVC', 0.2, {}, { color: false }).spec;
+    assert(g, 'SC IVC: default is hepatic-vein PW', sp.site === 'hvPw' && sp.mode === 'PW', `${sp.mode} ${sp.site}`);
+    // toward the RA is away from the subcostal transducer: S and D below the baseline, AR above
+    const fwd = sp.peakSign;
+    let S = 0, AR = 0;
+    for (let c = 0; c < sp.cols; c++) { const ph = c / sp.cols, v = sp.vs[c] * fwd; if (ph < 0.42) S = Math.max(S, v); if (ph > 0.84) AR = Math.max(AR, -v); }
+    check(g, 'SC IVC hepatic vein: S-wave peak', S, [0.3, 0.6], 'm/s');
+    check(g, 'SC IVC hepatic vein: atrial reversal (AR) present', AR, [0.05, 0.4], 'm/s');
+  }
+  {
+    const sp = renderDoppler('SSN', 0.2, {}, { color: false }).spec;
+    assert(g, 'SSN: default is descending-aorta PW', sp.site === 'descAoPw' && sp.mode === 'PW', `${sp.mode} ${sp.site}`);
+    let sys = 0, rev = 0; for (let c = 0; c < sp.cols; c++) { const ph = c / sp.cols, v = -sp.vs[c]; if (ph < 0.4) sys = Math.max(sys, v); else rev = Math.max(rev, -v); }
+    check(g, 'SSN descending aorta: systolic peak (away from the notch)', sys, [0.8, 1.4], 'm/s');
+    check(g, 'SSN descending aorta: small early-diastolic reversal', rev, [0.03, 0.3], 'm/s');
+  }
+
+  const gs = 'Spectral display (envelope, scale, baseline)';
+  const cases = [['AS A5C', 'A5C', PATHS.as, {}], ['MR A4C', 'A4C', PATHS.mr, {}], ['VSD PSAX', 'PSAX', PATHS.vsd, {}], ['DCM A2C', 'A2C', PATHS.dcm, {}], ['TR A4C', 'A4C', PATHS.tr, {}], ['PH TR A4C', 'A4C', PATHS.phtn, {}]];
+  for (const [nm, V, p, o] of cases) {
+    const sp = renderDoppler(V, 0.25, p, { ...o, color: false }).spec;
+    const lim = sp.envSign < 0 ? -sp.vBot : sp.vTop;
+    check(gs, `${nm}: plotted envelope max / scale on its side (no clipping)`, sp.envMax / lim, [0.6, 0.95], '', `${sp.envMax.toFixed(2)} of ${lim.toFixed(2)} m/s`);
+    check(gs, `${nm}: |readout peak - plotted envelope max|`, Math.abs(sp.peak - sp.envMax), [0, 0.1], 'm/s', `peak ${sp.peak.toFixed(2)}`);
+  }
+  {
+    // MR with its inflow on one CW trace: both directions get room
+    const sp = renderDoppler('A2C', 0.25, PATHS.dcm, { color: false }).spec;
+    check(gs, 'DCM A2C CW (MR + inflow): share of the plot above the baseline (inflow)', sp.baseline, [0.25, 0.5], '', `inflow ${sp.envPos.reduce((m, v) => Math.max(m, v), 0).toFixed(2)} m/s, MR ${sp.envNeg.reduce((m, v) => Math.max(m, v), 0).toFixed(2)} m/s`);
+  }
+  {
+    const sp = renderDoppler('PSAX', 0.25, PATHS.vsd, { color: false }).spec;
+    let dia = 0, pk = 0, c90 = -1;
+    for (let c = 0; c < sp.cols; c++) { const ph = c / sp.cols; if (ph > 0.55 && ph < 0.97) dia = Math.max(dia, sp.envPos[c], sp.envNeg[c]); if (ph < 0.4) pk = Math.max(pk, sp.envPos[c]); }
+    // rise from the late-diastolic level to the systolic peak: walk back from the
+    // 90 % point (across the cycle start if need be) to the 10 % point
+    const d0 = sp.envPos[Math.floor(sp.cols * 0.95)], at = (f) => d0 + f * (pk - d0), E = (c) => sp.envPos[(c + sp.cols) % sp.cols];
+    for (let c = 0; c < sp.cols * 0.4; c++) if (c90 < 0 && sp.envPos[c] >= at(0.9)) c90 = c;
+    let c10 = c90; while (c10 > c90 - sp.cols * 0.3 && E(c10 - 1) >= at(0.1)) c10--;
+    check(gs, 'VSD CW: diastolic shunt velocity', dia, [0, 1.0], 'm/s');
+    // the onset edge: its 10-90 % time at the envelope's steepest upstroke (a
+    // step would read as the ~8 ms analysis window; the slower climb from the
+    // shoulder to the mid-systolic peak is the LV-RV pressure curve, noted)
+    const msPer = sp.rrSec * 1000 / sp.cols;
+    let sl = 0; for (let c = -Math.floor(sp.cols * 0.1); c < sp.cols * 0.3; c++) sl = Math.max(sl, E(c + 1) - E(c));
+    check(gs, 'VSD CW: onset 10-90 % rise time (at the steepest upstroke)', sl > 0 ? 0.8 * (pk - d0) / sl * msPer : null, [20, 60], 'ms', `10-90 % of the systolic peak ${((c90 - c10) * msPer).toFixed(0)} ms`);
+  }
+  for (const [nm, V, p] of [['severe AS A5C', 'A5C', PATHS.as], ['severe MR A4C', 'A4C', PATHS.mr]]) {
+    const sp = renderDoppler(V, 0.25, p, { color: false }).spec, e = sp.envNeg, n = sp.cols, E = (c) => e[(c + n) % n];
+    let pk = 0, sl = 0; for (let c = 0; c < n * 0.45; c++) pk = Math.max(pk, e[c]);
+    const d0 = e[Math.floor(n * 0.95)];
+    for (let c = -Math.floor(n * 0.1); c < n * 0.3; c++) sl = Math.max(sl, E(c + 1) - E(c));
+    check(gs, `${nm} CW: onset 10-90 % rise time (at the steepest upstroke)`, sl > 0 ? 0.8 * (pk - d0) / sl * sp.rrSec * 1000 / n : null, [20, 60], 'ms');
+  }
+  {
+    const sp = renderDoppler('A4C', 0.25, PATHS.dcm, { color: false }).spec;
+    assert(gs, 'DCM A4C: default is PW at the mitral tips (restrictive filling readable)', sp.site === 'mvTips' && sp.mode === 'PW', `${sp.mode} ${sp.site}`);
+    let E = 0, A = 0; for (let c = 0; c < sp.cols; c++) { const ph = c / sp.cols, v = sp.vs[c]; if (ph >= 0.36 && ph < 0.72) E = Math.max(E, v); else if (ph >= 0.8) A = Math.max(A, v); }
+    check(gs, 'DCM A4C: displayed E/A minus the circulation E/A', A > 0 ? E / A - eaRatio(PATHS.dcm) : null, [-0.2, 0.2], '', `E ${E.toFixed(2)}, A ${A.toFixed(2)} m/s; model ${eaRatio(PATHS.dcm).toFixed(2)}`);
+  }
+
+  const gc = 'Colour map (direction hue kept under variance, plume-shaped jets)';
+  const world = (R, i, j) => {
+    const x = (i - R.cx) / R.pxPerCm, y = (j - R.apexY) / R.pxPerCm, pr = R.probe;
+    return [pr.pos[0] + pr.dir[0] * y + pr.lat[0] * x, pr.pos[1] + pr.dir[1] * y + pr.lat[1] * x, pr.pos[2] + pr.dir[2] * y + pr.lat[2] * x];
+  };
+  const isBlood = (k) => k === TISSUE.LV || k === TISSUE.RV || k === TISSUE.LA || k === TISSUE.RA || k === TISSUE.AORTA;
+  for (const [nm, p, fl] of [['MR', PATHS.mr, FLOW.MR_JET], ['TR', PATHS.tr, FLOW.TR_JET]]) {
+    const R = renderDoppler('A4C', 0.25, p, {}), G = R.G;
+    let n = 0, ok = 0, out = 0, tot = 0;
+    for (let j = 0; j < R.SH; j++) for (let i = 0; i < R.SW; i++) {
+      const k = j * R.SW + i; if (R.alpha[k] < 0.5) continue;
+      const q = world(R, i, j), v = velocityAt(q[0], q[1], q[2], G, p);
+      if (!v || v.flow !== fl) continue;
+      tot++; if (!isBlood(R.kind[k])) out++;
+      const d = sub(q, R.probe.pos), l = Math.hypot(...d), los = (v.vx * d[0] + v.vy * d[1] + v.vz * d[2]) / l;
+      if (Math.abs(los) < 0.1) continue;
+      n++;
+      const r = R.rgb[k * 3], b = R.rgb[k * 3 + 2];
+      if ((los > 0) === (b > r)) ok++;
+    }
+    check(gc, `${nm} A4C: jet pixels whose hue matches the flow direction`, n ? 100 * ok / n : null, [70, 100], '%', `${n} px`);
+    check(gc, `${nm} A4C: jet pixels outside the blood pool`, tot ? 100 * out / tot : null, [0, 2], '%');
+  }
+  {
+    // plume, not wedge: width (velocity-field cross-section in the plane) at 1 and 3 cm
+    // (central jets: functional MR in DCM and TR, measured in 3-D across the jet
+    // axis, as the plane may cut the jet obliquely; the prolapse jet's distal part
+    // is a wall-hugging sheet, judged by the Coanda row above)
+    const { FLOW_AXES } = await import('../js/cardiac-model.js');
+    for (const [nm, p, fl, valve, ax] of [['DCM functional MR', PATHS.dcm, FLOW.MR_JET, 'mitral', FLOW_AXES.mr], ['TR', PATHS.tr, FLOW.TR_JET, 'tricuspid', FLOW_AXES.tr]]) {
+      const G = geometryAt(0.25, p), O = G.A.valves[valve].c;
+      const e1 = unit(cross(ax, [0, 1, 0])), e2 = cross(ax, e1);
+      const shell = (d) => { let m = 0; const h = 0.05; for (let a = -3; a <= 3; a += h) for (let b = -3; b <= 3; b += h) {
+        const q = add(add(add(O, mul(ax, d)), mul(e1, a)), mul(e2, b)); const v = velocityAt(q[0], q[1], q[2], G, p); if (v && v.flow === fl && v.speed > 0.3) m++; }
+        return 2 * Math.sqrt(m * h * h / Math.PI); };
+      const w1 = shell(1), w3 = shell(3);
+      check(gc, `${nm} A4C: jet width at 1 cm / at 3 cm downstream`, w3 > 0 ? w1 / w3 : null, [0.25, 0.7], '', `${w1.toFixed(2)} / ${w3.toFixed(2)} cm`);
+    }
+  }
+  {
+    const fs = await import('fs');
+    const mj = fs.readFileSync(new URL('../js/main.js', import.meta.url), 'utf8');
+    const { dopplerColor } = await import('../js/echo.js');
+    const t0 = dopplerColor(-2, 0.62, 0, 0), t1 = dopplerColor(-2, 0.62, 0.9, 0), a1 = dopplerColor(2, 0.62, 0.9, 0);
+    assert(gc, 'variance adds green but keeps the direction hue (toward: red > blue; away: blue > red)', t1[1] > t0[1] + 100 && t1[0] > t1[2] && a1[2] > a1[0], `toward ${t1.map((x) => x.toFixed(0))}, away ${a1.map((x) => x.toFixed(0))}`);
+    assert(gc, 'colour bar is painted as the 2-D velocity x variance map', /paintColorMap/.test(mj) && /dopplerColor\(los, 1, x \/ \(W - 1\)/.test(mj));
+  }
+
+  // secundum ASD colour: a laminar column through the defect into the RA
+  const ga = 'ASD colour (a column through the defect, streaming toward the TV)';
+  const asd = PATHS.asd, iasS = (q) => dot(sub(q, LM.IAS_P), LM.IAS_N);
+  for (const V of ['MEBICAVAL', 'SUBCOSTAL']) {
+    const R = renderDoppler(V, 0.5, asd, { cboxSize: 0.6 }), G = R.G;
+    // "toward the TV" on the image: the defect-to-valve direction projected into the plane
+    const T = G.A.valves.tricuspid.c, C = LM.IAS.asdC, nP = R.probe.normal, t3 = sub(T, C), uT = unit(sub(t3, mul(nP, dot(t3, nP))));
+    let n = 0, ra = 0, sept = 0, all = 0, vmax = 0, cx = 0, cy = 0, sx = 0, sy = 0, sxy = 0, cw = [0, 0, 0];
+    const pts = [];
+    for (let j = 0; j < R.SH; j++) for (let i = 0; i < R.SW; i++) {
+      const k = j * R.SW + i; if (R.alpha[k] < 0.5) continue;
+      const q = world(R, i, j), v = velocityAt(q[0], q[1], q[2], G, asd);
+      if (!v || v.flow !== FLOW.ASD_JET) continue;
+      n++; if (iasS(q) > 0) ra++;
+      vmax = Math.max(vmax, v.speed);
+      pts.push([i / R.pxPerCm, j / R.pxPerCm]); cw = add(cw, q);
+    }
+    for (let j = 0; j < R.SH; j++) for (let i = 0; i < R.SW; i++) { const k = j * R.SW + i; if (R.alpha[k] < 0.5) continue; all++; if (!isBlood(R.kind[k])) sept++; }
+    for (const [x, y] of pts) { cx += x; cy += y; } cx /= pts.length || 1; cy /= pts.length || 1;
+    for (const [x, y] of pts) { sx += (x - cx) ** 2; sy += (y - cy) ** 2; sxy += (x - cx) * (y - cy); }
+    const tr = sx + sy, det = sx * sy - sxy * sxy, l1 = tr / 2 + Math.sqrt(Math.max(0, tr * tr / 4 - det)), l2 = tr / 2 - Math.sqrt(Math.max(0, tr * tr / 4 - det));
+    const cen = mul(cw, 1 / (n || 1));
+    check(ga, `${V}: shunt colour cells on the RA side / all shunt colour`, n ? ra / n : null, [0.75, 1], '', `${n} px`);
+    check(ga, `${V}: colour cells over septal (non-blood) tissue`, all ? 100 * sept / all : null, [0, 1], '%');
+    check(ga, `${V}: shunt colour region elongation (major / minor axis)`, l2 > 0 ? Math.sqrt(l1 / l2) : null, [2, 6], '');
+    // KNOWN-FAIL in ME bicaval: the tricuspid valve lies ~3.4 cm out of that plane,
+    // so the column leaves the slice as it bends toward the valve; the in-plane
+    // shift into the RA (across the septum) is checked below for both views
+    KNOWN = V === 'MEBICAVAL';
+    check(ga, `${V}: shunt colour centroid shift from the defect toward the TV`, dot(sub(cen, C), uT), [1, 4], 'cm');
+    KNOWN = false;
+    const uN = unit(sub(LM.IAS_N, mul(R.probe.normal, dot(LM.IAS_N, R.probe.normal))));
+    check(ga, `${V}: shunt colour centroid shift from the defect into the RA (in-plane)`, dot(sub(cen, C), uN), [0.8, 4], 'cm');
+    check(ga, `${V}: peak shunt velocity`, vmax, [0.6, 1.3], 'm/s');
+  }
+}
+
 // ---- shunts, secondary signs of disease, 3D vessels (review 10) --------------
 {
   SECTION = 'Pathology';
@@ -2596,7 +2770,10 @@ SECTION = 'Pathology';
   // shunt and the right-heart volume load it brings
   const asd = PATHS.asd, sA = hemoSummary(asd);
   check(g, 'secundum ASD: Qp:Qs', sA.QpQs, [1.5, 3], '', `shunt ${sA.shuntVol.toFixed(0)} mL/beat`);
-  for (const vn of ['SUBCOSTAL', 'MEBICAVAL']) {
+  // (the shunt crosses the subcostal and ME bicaval beams at 30-40 deg: no standard
+  // trace there; ME AV short axis meets it end-on)
+  for (const vn of ['SUBCOSTAL', 'MEBICAVAL']) assert(g, `secundum ASD ${vn}: no default spectral site (shunt crosses the beam > 20 deg)`, renderDoppler(vn, 0.3, asd, { color: false }).spec.site === null);
+  for (const vn of ['MEAVSAX']) {
     const sp = renderDoppler(vn, 0.3, asd, {}).spec;
     let mx = 0, mn = 99;
     for (let c = 0; c < sp.cols; c++) { const v = Math.abs(sp.vs[c]); mx = Math.max(mx, v); mn = Math.min(mn, v); }
