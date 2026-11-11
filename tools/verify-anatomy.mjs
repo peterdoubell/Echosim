@@ -91,6 +91,10 @@ function run(G, p0, d, is, maxLen = 16, start = 0, gap = 0, path = {}) {
 }
 const isT = (...ks) => (t) => ks.includes(t);
 const len = (r) => (r ? r[1] - r[0] : null);
+// papillary muscle: myocardium the classifier paints over the LV blood pool. By
+// the ASE convention it belongs to the CAVITY (volumes, diameters, eccentricity)
+// and is excluded from the wall (thickness).
+const isPapAt = (G, p) => lumenDist(p[0], p[1], p[2], G.A, 'PAP') < 0 && lumenDist(p[0], p[1], p[2], G.A, 'LV') < 0.2;
 
 // ============================================================================
 // 1. LV (PLAX, ASE: at the mitral leaflet tips, perpendicular to the long axis)
@@ -126,14 +130,17 @@ check('LV', 'fractional shortening', lvEDm && lvESm && (1 - lvESm.lvid / lvEDm.l
 // regional systolic thickening (mid-ventricular short axis): normal everywhere
 // (> 30 %), the lateral wall thickening more than the septum
 {
+  // (cavity = blood + papillary muscle, wall = the compact myocardium beyond it)
   const wallAt = (G, ang) => {
     const L = G.A.lv, y = 0.5 * (L.apexY + L.M[1]), d = [Math.cos(ang), 0, Math.sin(ang)];
-    const lv = run(G, [0, y, 0], d, isT(TISSUE.LV), 5);
-    const my = lv && run(G, [0, y, 0], d, isT(TISSUE.MYO), 7, lv[1]);
+    const lv = run(G, [0, y, 0], d, (t, p) => t === TISSUE.LV || (t === TISSUE.MYO && isPapAt(G, p)), 5);
+    const my = lv && run(G, [0, y, 0], d, (t, p) => t === TISSUE.MYO && !isPapAt(G, p), 7, lv[1]);
     return my && Math.abs(my[0] - lv[1]) < 0.05 ? len(my) : null;
   };
   const thick = (ang) => (wallAt(GES, ang) / wallAt(GED, ang) - 1) * 100;
-  const tS = thick(Math.PI), tL = thick(0);               // septum (9 o'clock) / lateral (3 o'clock, clear of the papillaries)
+  // septum (9 o'clock) / lateral wall at ~4.5 o'clock (inferolateral), between the
+  // papillary muscles (the anterolateral one stands at ~3 o'clock)
+  const tS = thick(Math.PI), tL = thick(-0.8);
   check('LV', 'systolic wall thickening, septum (mid SAX)', tS, [30, 70], '%');
   check('LV', 'systolic wall thickening, lateral (mid SAX)', tL, [35, 75], '%');
   check('LV', 'lateral minus septal thickening', tL - tS, [3, 30], 'pts');
@@ -185,9 +192,21 @@ check('LV', 'apical wall thickness', apexWall, [0.4, 0.8], 'cm', 'thinner than b
   const a4 = TTE_VIEWS.A4C.probe(), lat = unit(cross(a4.normal, Y));
   const y = GES.A.lv.apexY + 0.5 * (GES.A.lv.M[1] - GES.A.lv.apexY);
   const c0 = [0, y, 0], c = sub(c0, mul(a4.normal, dot(sub(c0, a4.pos), a4.normal)));
-  let n = 0;
-  for (let t = -4; t <= 4; t += 0.01) { const p = add(c, mul(lat, t)); if (classify(p[0], p[1], p[2], GES, {}).tissue === TISSUE.LV) n++; }
+  // cavity width by the ASE convention (blood + papillary muscle, endocardium to
+  // endocardium); the blood alone must still be one open channel, not a slit
+  // crossed by a muscle bar or split round a papillary island
+  let n = 0, nb = 0, runs = 0, prev = false;
+  for (let t = -4; t <= 4; t += 0.01) {
+    const p = add(c, mul(lat, t)), k = classify(p[0], p[1], p[2], GES, {}).tissue;
+    const blood = k === TISSUE.LV;
+    if (blood || (k === TISSUE.MYO && isPapAt(GES, p))) n++;
+    if (blood) nb++;
+    if (blood && !prev) runs++;
+    prev = blood;
+  }
   check('LV', 'A4C mid-cavity width (ES)', n * 0.01, [2.6, 3.6]);
+  check('LV', 'A4C mid-cavity blood width, papillary muscle excluded (ES)', nb * 0.01, [1.8, 3.6]);
+  check('LV', 'A4C mid-cavity: blood runs across the cavity (ES; 1 = no muscle bar or island)', runs, [1, 1], '');
 }
 
 // LV volumes by voxel integration of the rendered LV blood pool below the valves
@@ -1464,6 +1483,110 @@ function inCapsule(q, v, from = 0) {           // inside a caval tube, beyond `f
 }
 const worstOf = (xs) => xs.reduce((m, v) => (v.val > m.val ? v : m), { val: -1e9 });
 
+// ---- crux offset, papillary muscles, LAA in the 2C views, aortic-root motion --
+// A4C: the septal tricuspid hinge sits 0.5-1 cm apical to the septal (anterior)
+// mitral hinge IN THE IMAGE. The hinges are the leaflet cells of the two valves
+// that face each other across the crux (the closest TV / MV leaflet pair);
+// the offset is their depth difference along the beam.
+{
+  const hinges = (G) => {
+    const S = planeSample(TTE_VIEWS.A4C, G, {}, 0.05);
+    const Tc = G.A.valves.tricuspid.c, Mc = G.A.valves.mitral.c, tv = [], mv = [];
+    for (const k of cellsWhere(S, (l) => l === TISSUE.VALVE)) {
+      const q = ptK(S, k), dt = Math.hypot(...sub(q, Tc)), dm = Math.hypot(...sub(q, Mc));
+      if (dt < dm && dt < LM.TV_R * 1.25) tv.push(xd(S, k)); else if (dm < dt && dm < G.A.lv.mvR + 0.3) mv.push(xd(S, k));
+    }
+    let best = 1e9, bt = null, bm = null;
+    for (const a of tv) for (const b of mv) { const e = Math.hypot(a[0] - b[0], a[1] - b[1]); if (e < best) { best = e; bt = a; bm = b; } }
+    return bt ? { off: bm[1] - bt[1], tv: bt, mv: bm } : null;
+  };
+  for (const [G, ph, lo] of [[GED, 'ED', 0.5], [GES, 'ES', 0.4]]) {
+    const h = hinges(G);
+    check('A4C', `in-plane septal TV hinge minus anterior MV hinge depth along the beam (${ph})`, h && h.off, [lo, 1.0], 'cm',
+      h ? `TV hinge depth ${h.tv[1].toFixed(2)}, MV ${h.mv[1].toFixed(2)} cm` : '');
+  }
+}
+// Papillary muscles: in the TG mid SAX each stands free in the cavity, 1-1.5 cm
+// across with a blood gap from the wall; in the mid PSAX they stay in plane
+// through systole (the plane tracks their descent), larger at ES, filling a
+// fair share of the small systolic cavity.
+{
+  const segD = (q, a, b) => { const ab = sub(b, a), t = Math.max(0, Math.min(1, dot(sub(q, a), ab) / dot(ab, ab))); return Math.hypot(...sub(q, add(a, mul(ab, t)))); };
+  const pms = (view, G) => {
+    const S = planeSample(view, G, {}, 0.05), pm = [[], []], wall = [];
+    let blood = 0;
+    for (let k = 0; k < S.lab.length; k++) {
+      const l = S.lab[k];
+      if (l === TISSUE.LV) { blood++; continue; }
+      if (l !== TISSUE.MYO) continue;
+      const q = ptK(S, k);
+      if (isPapAt(G, q)) pm[segD(q, G.A.pap[0].a, G.A.pap[0].b) < segD(q, G.A.pap[1].a, G.A.pap[1].b) ? 0 : 1].push(xd(S, k));
+      else if (lumenDist(q[0], q[1], q[2], G.A, 'LV') < 0.6) wall.push(xd(S, k));
+    }
+    const area = pm.map((c) => c.length * S.step * S.step);
+    const gap = pm.map((c) => { let g = 1e9; for (const u of c) for (const w of wall) { const e = Math.hypot(u[0] - w[0], u[1] - w[1]); if (e < g) g = e; } return g - S.step; });
+    return { area, gap, share: 100 * (area[0] + area[1]) / (area[0] + area[1] + blood * S.step * S.step) };
+  };
+  const nm = ['anterolateral', 'posteromedial'];
+  const tg = pms(TEE_VIEWS.TGSAX, GED);
+  for (let i = 0; i < 2; i++) {
+    check('TGSAX', `${nm[i]} PM cross-section diameter (ED)`, 2 * Math.sqrt(tg.area[i] / Math.PI), [1.0, 1.5]);
+    check('TGSAX', `${nm[i]} PM to endocardium gap (ED)`, tg.gap[i], [0.15, 0.6]);
+  }
+  const pEd = pms(TTE_VIEWS.PSAX, GED), pEs = pms(TTE_VIEWS.PSAX, GES);
+  for (let i = 0; i < 2; i++) {
+    // KNOWN-FAIL (posteromedial, ~0.9): its head descends below the plane's
+    // (deliberately small) systolic track; a larger track brings the liver into the
+    // far field and the lung edge under the probe
+    KNOWN = i === 1;
+    check('PSAX', `${nm[i]} papillary area in plane, ES / ED`, pEs.area[i] / pEd.area[i], [1.0, 1.6], '', `ES ${pEs.area[i].toFixed(2)} cm2`);
+    KNOWN = false;
+    check('PSAX', `${nm[i]} papillary area in plane (ES)`, pEs.area[i], [0.4, 3], 'cm2');
+  }
+  check('PSAX', 'PM share of the LV cavity at ES', pEs.share, [15, 40], '%', `ED ${pEd.share.toFixed(1)} %`);
+}
+// LAA in the TTE A2C and the ME2C (ED): a finger-like pouch standing off the LA
+// body at the screen-right, beside the anterior mitral annulus. Appendage cells
+// are LA lumen inside the appendage tube and outside the LA body.
+for (const vn of ['A2C', 'ME2C']) {
+  const v = TTE_VIEWS[vn] || TEE_VIEWS[vn], S = planeSample(v, GED, {}, 0.05), p = S.p, A = GED.A;
+  const laa = [], body = [];
+  for (const k of cellsWhere(S, (l) => l === TISSUE.LA)) {
+    const q = ptK(S, k), b = lumenDist(q[0], q[1], q[2], A, 'LA_BODY');
+    if (lumenDist(q[0], q[1], q[2], A, 'LAA') < 0 && b > 0) laa.push(xd(S, k)); else if (b < 0) body.push(xd(S, k));
+  }
+  const inPl = (q) => [dot(sub(q, p.pos), p.lat), dot(sub(q, p.pos), p.dir)];
+  const o = inPl(A.la.aa[0].a), M = inPl(A.valves.mitral.c);
+  const L = laa.reduce((m, c) => Math.max(m, Math.hypot(c[0] - o[0], c[1] - o[1])), 0);
+  check('LA', `${vn}: in-plane LAA length from the ostium (ED)`, L, [2.0, 4.0]);
+  const cx = (cs) => cs.reduce((s2, c) => s2 + c[0], 0) / Math.max(1, cs.length);
+  const near = laa.reduce((m, c) => Math.min(m, Math.hypot(c[0] - M[0], c[1] - M[1])), 1e9);
+  assert('LA', `${vn}: LAA on the screen-right of the LA, beside the mitral annulus (ED)`, laa.length > 0 && cx(laa) > cx(body) && cx(laa) > M[0] && near < 3.5,
+    `LAA x ${cx(laa).toFixed(2)}, LA body x ${cx(body).toFixed(2)}, mitral x ${M[0].toFixed(2)}, nearest ${near.toFixed(2)} cm`);
+}
+// PLAX M-mode through the aortic root: both root walls swing anteriorly in
+// systole as the LA fills behind them (~1 cm), in parallel; less with a low
+// stroke volume / poor LA function (DCM)
+{
+  const pr = TTE_VIEWS.PLAX.probe(), c = add(LM.A, mul(LM.U_AO, 0.9)), d = unit(sub(c, pr.pos));
+  const walls = (G, path) => {
+    let a = null, b = null;
+    for (let t = 0; t < 20; t += 0.01) {
+      const q = add(pr.pos, mul(d, t)), k = classify(q[0], q[1], q[2], G, path).tissue;
+      if (k === TISSUE.AORTA) { if (a == null) a = t; b = t; } else if (a != null && t - b > 0.3) break;
+    }
+    return [a, b];
+  };
+  const exc = (key) => {
+    const path = { ...PATHS[key], grade: 'severe' }, e = walls(geo(0, key), path), s2 = walls(geo(esOf(key), key), path);
+    return [e[0] - s2[0], e[1] - s2[1]];
+  };
+  const [an, pn] = exc('normal'), [ad] = exc('dcm');
+  check('Motion', 'aortic root anterior excursion ED -> ES (PLAX M-mode, normal)', an, [0.7, 1.2]);
+  check('Motion', 'aortic root anterior excursion ED -> ES (DCM)', ad, [0, 0.6]);
+  check('Motion', 'anterior minus posterior root-wall excursion (parallel motion)', Math.abs(an - pn), [0, 0.15]);
+}
+
 // ---- pulmonary veins, left atrial appendage, LA phasic shape ----------------
 // The four veins enter at the four corners of the posterior LA (left and right
 // ostia > 3 cm apart, superior and inferior > 1.2 cm apart across a carina); the
@@ -2244,7 +2367,8 @@ SECTION = 'Pathology';
   const eiAt = (key, ph) => {
     const G = geo(ph, key), S = planeSample(TTE_VIEWS.PSAX, G, PATHS[key], 0.1);
     const big = (pred) => components(S, pred).comps.reduce((m, c) => (c.length > m.length ? c : m), []);
-    const lv = big((l) => l === TISSUE.LV), rv = big((l) => l === TISSUE.RV);
+    // (LV cavity by the ASE convention: blood + papillary muscle)
+    const lv = big((l, k) => l === TISSUE.LV || (l === TISSUE.MYO && isPapAt(G, ptK(S, k)))), rv = big((l) => l === TISSUE.RV);
     const cen = (cs) => { let x = 0, y = 0; for (const k of cs) { x += S.X(k % S.nx); y += S.D(Math.floor(k / S.nx)); } return [x / cs.length, y / cs.length]; };
     const c = cen(lv), r = cen(rv), inLv = new Set(lv);
     let u = [r[0] - c[0], r[1] - c[1]]; const L = Math.hypot(u[0], u[1]); u = [u[0] / L, u[1] / L];
