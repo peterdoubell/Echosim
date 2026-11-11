@@ -128,12 +128,21 @@ function a5cTrack(A) {
   if (!_a5cN) _a5cN = a5cProbe().normal;
   return vadd(APICAL_TRACK(A), vscale(_a5cN, vdot(vsub(A.lv.A, A0.lv.A), _a5cN)));
 }
+// The beam is angled A3C_STEER within the plane, away from the anteroseptal
+// side, from the same apical transducer position: the band of RV in front of the
+// anteroseptal wall leaves the right edge (<= 5 % of the sector) while the LVOT
+// and the root stay in the sector. (15 cm deep: the LA and the root, with the
+// descending aorta behind the LA; the SVC and the right PA, which cross this
+// plane beyond the LA roof at 15-17 cm, are not in it.)
+const A3C_STEER = -6;                                // deg, in plane
 function a3cProbe() {
   // APLAX: the same plane as PLAX (apex + mitral centre + aortic valve centre),
   // imaged from the apex — so the RV drops out; aortic outflow on the right
   const tgt = vscale(vadd(A, M), 0.5);
   const dir = inPlane(vsub(tgt, APEX), PLAX_N);
-  return probeFrom(tgt, dir, inPlane(D_AO, PLAX_N), vdot(vsub(tgt, APEX), dir) + 1.4);
+  const right = inPlane(D_AO, PLAX_N), sd = vdot(vsub(tgt, APEX), dir) + 1.4;
+  const pos = vsub(tgt, vscale(dir, sd)), d2 = vrot(dir, PLAX_N, A3C_STEER * Math.PI / 180);
+  return probeFrom(vadd(pos, vscale(d2, sd)), d2, right, sd);
 }
 // The parasternal window is on the anterior chest wall, so the parasternal
 // beams run POSTERIORLY: body-anterior projected into each imaging plane.
@@ -144,17 +153,20 @@ const PLAX_N = (() => {
   return vdot(n, vcross(Y, D_AO)) < 0 ? vscale(n, -1) : n;
 })();
 const inPlane = (v, n) => norm(vsub(v, vscale(n, vdot(v, n))));
+const PLAX_TIP = 0.12;                                // rad
 function plaxProbe() {
   // aorto-mitral curtain, image centre (projected into the plane)
   const t0 = [-0.35, 0.3, 0.35];
   const tgt = vsub(t0, vscale(PLAX_N, vdot(vsub(t0, M), PLAX_N)));
-  // Beam runs posteriorly from the chest wall, tipped ~20 deg toward the base —
+  // Beam runs posteriorly from the chest wall, tipped PLAX_TIP toward the base —
   // the sonographer's adjustment (one interspace up / probe angulation) that lays
   // the LV long axis near-horizontal on screen with the Ao/LA stacked at right.
+  // (~7 deg: tipped further, the right of the sector reaches past the ascending
+  // aorta to the SVC, which crosses this plane ~1 cm beyond its right wall.)
   const post = vscale(inPlane(BODY_AX.A, PLAX_N), -1);
   const yIn = inPlane(Y, PLAX_N);                   // long axis within the plane
   const perp = inPlane(vsub(post, vscale(yIn, vdot(post, yIn))), PLAX_N); // posterior, perpendicular to it
-  const dir = norm(vadd(vscale(perp, Math.cos(0.35)), vscale(yIn, Math.sin(0.35))));
+  const dir = norm(vadd(vscale(perp, Math.cos(PLAX_TIP)), vscale(yIn, Math.sin(PLAX_TIP))));
   // base / aorta to the right of the screen (ASE)
   return chestWallProbe(tgt, dir, yIn, 5.0 + WALL, WALL);
 }
@@ -190,17 +202,27 @@ function psaxProbe(y, sx, rot, tilt, roll) {
 }
 // mid-papillary: 40 deg toward body-posterior, 13 deg cephalad, slid 0.7 cm laterally
 const PSAX_MID = [-3.4, 0.7, 40, 13, 0];             // y, sx (cm), rot, tilt, roll (deg)
+const PSAX_AV_H = 0.45, PSAX_AV_TILT = [-8, 8];     // cm along the root axis; deg, deg
 function psaxAvProbe() {
-  const tgt = vadd(A, vscale(LM.U_AO, 0.75));        // cusp coaptation level
+  const tgt = vadd(A, vscale(LM.U_AO, PSAX_AV_H));   // just below the cusp coaptation level
   // the plane is the root's short axis (cusps en face); the beam, body-posterior
   // within it, runs on behind the LA into the posterior mediastinum, not down past
   // the RA into the liver
-  const dir = postIn(LM.U_AO);
+  let dir = postIn(LM.U_AO);
   let right = vcross(LM.U_AO, dir);
   if (vdot(right, LM.E_SCR) < 0) right = vscale(right, -1);
+  // tipped PSAX_AV_TILT[0] caudally about screen-right and rolled PSAX_AV_TILT[1]
+  // about the beam (its left edge toward the base): the plane then holds the PA
+  // bifurcation with the origins of both branches — the RPA running screen-left
+  // behind the root, the LPA on down to the right ('trousers') — and cuts the LA
+  // body behind the root rather than its roof and the appendage, while the cusps
+  // stay within ~11 deg of en face
+  dir = vrot(dir, right, PSAX_AV_TILT[0] * Math.PI / 180);
+  right = vrot(right, dir, PSAX_AV_TILT[1] * Math.PI / 180);
   return chestWallProbe(tgt, dir, right, 4.3 + WALL, WALL);
 }
 const SC_W = [0.7, 0.5, 0.4];
+const SC_TURN = -8;                                  // deg about the beam
 const SC_WALL = 6.5;                                 // subcostal skin -> first cardiac structure (cm)
 function subcostalProbe() {
   // Subcostal four-chamber: the four-chamber plane that cuts the interatrial
@@ -220,9 +242,16 @@ function subcostalProbe() {
   let right = vcross(n, dir);
   if (vdot(right, L) < 0) right = vscale(right, -1);
   const tgt = vadd(fossa, vscale(vsub(APEX, fossa), 0.35));
+  // turned SC_TURN about the beam, about the line through the fossa (which stays
+  // in plane, so the septum and any ASD are still cut through the fossa): the
+  // plane runs from the tricuspid hinge along the RV free wall to the RV apex, so
+  // the RV is a full chamber under the liver (~13 cm2, ~half of it at ES)
+  right = vrot(right, dir, SC_TURN * Math.PI / 180);
+  const nn = vcross(dir, right);
+  const tgt2 = vsub(tgt, vscale(nn, vdot(vsub(tgt, fossa), nn)));
   // skin-to-heart depth: ~2 cm of abdominal wall and 3-5 cm of left lobe put
   // the first cardiac structure ~6 cm deep, the whole heart in the mid field
-  return chestWallProbe(tgt, dir, right, 14.0, SC_WALL);
+  return chestWallProbe(tgt2, dir, right, 14.0, SC_WALL);
 }
 
 // apical windows sit over the apex: a remodelled (longer) LV moves its apex, and
@@ -243,7 +272,9 @@ export const TTE_VIEWS = {
   PSAX: { probe: () => psaxProbe(...PSAX_MID), depth: 13 },   // mid-papillary
   PSAX_AV: { probe: psaxAvProbe, depth: 15, track: (A) => [0, 0.8 * (A.lv.A[1] - A0.lv.A[1]), 0] },   // follows the root's descent
   A4C: { probe: a4cProbe, depth: 17, track: a4cTrack },
-  A2C: { probe: a2cProbe, depth: 17, track: APICAL_TRACK },
+  // (15 cm deep: the LA and its roof; the PA bifurcation and the right PA lie
+  // just beyond the LA roof in this plane and run along the beam to 17 cm)
+  A2C: { probe: a2cProbe, depth: 15, track: APICAL_TRACK },
   SUBCOSTAL: { probe: subcostalProbe, depth: 18 },
 };
 // RV inflow (parasternal, tilted from the PLAX toward the right hip): the RV
@@ -259,7 +290,9 @@ export const TTE_VIEWS = {
 // toward the inflow axis (the probe angled inferomedially toward the right hip),
 // so the beam crosses the valve from the RV into the RA instead of passing beside
 // it. RV apex to the left of the screen, base (RA) to the right, as in the PLAX.
-const RVIT_ROLL = 15, RVIT_SWING = 25, RVIT_CS_W = 0.65;    // deg, deg, fraction
+// (rolled 20 deg: the CS ostium is cut wider and the IVC orifice beside it, and
+// the plane's lower edge passes above the gastric fundus at end-systole)
+const RVIT_ROLL = 20, RVIT_SWING = 25, RVIT_CS_W = 0.65;    // deg, deg, fraction
 const csOstium = (A) => A.cs[A.cs.length - 1].b;
 let _rvit = null;
 function rvInflowProbe() {
@@ -296,10 +329,12 @@ function rvInflowTrack(A) {
 // and turned SC_IVC_YAW so that, while the hepatic IVC lies along the plane, the
 // plane passes to the right of the axis at the junction: the IVC opens into the
 // lateral RA body at the right of the sector and the root, the LA, the RVOT/PA
-// and the abdominal aorta (all to the left) drop out.
+// and the abdominal aorta (all to the left) drop out. (Aimed 3.8 cm below the
+// junction and 12.5 cm deep, so the IVC's widening into the RA and the RA
+// chamber itself lie inside the sector, ~2.5 cm from its edge, not cut by it.)
 const SC_IVC_CRANIAL = -5;                        // deg
 const SC_IVC_ROLL = -5;                           // deg
-const SC_IVC_AIM = 4.0, SC_IVC_SHIFT = 0.15;      // cm
+const SC_IVC_AIM = 3.8, SC_IVC_SHIFT = 0.0;       // cm
 const SC_IVC_YAW = 6;                             // deg
 function subcostalIvcProbe() {
   // transducer at the subxiphoid window, aimed at the hepatic IVC; the plane
@@ -360,7 +395,7 @@ function psaxMvTrack(A) {
 // additional apical / parasternal / subcostal / suprasternal views
 export const EXTRA_VIEWS = {
   A5C: { probe: a5cProbe, depth: 14, track: a5cTrack },
-  A3C: { probe: a3cProbe, depth: 17, track: APICAL_TRACK },
+  A3C: { probe: a3cProbe, depth: 15, track: APICAL_TRACK },
   // mitral leaflet level, 0.8 cm below the annulus (closed coaptation line at ED,
   // fish-mouth in diastole): the probe follows the posterolateral annular
   // excursion (the small tilt a sonographer makes), so the plane stays at the
@@ -370,7 +405,7 @@ export const EXTRA_VIEWS = {
   // planimetered — instead of at the leaflet bodies, which cut the dome obliquely.
   PSAX_MV: { probe: psaxMvProbe, depth: 13, track: psaxMvTrack },
   RVIT: { probe: rvInflowProbe, depth: 12, track: rvInflowTrack },
-  SC_IVC: { probe: subcostalIvcProbe, depth: 12 },
+  SC_IVC: { probe: subcostalIvcProbe, depth: 12.5 },
   SSN: { probe: suprasternalProbe, depth: 16 },
 };
 
