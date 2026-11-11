@@ -33,7 +33,7 @@ fs.mkdirSync(OUT, { recursive: true });
 
 const PATHS = {
   normal: {}, dcm: { dilated: true }, as: { aorticStenosis: true, lvh: true }, mr: { mr: true },
-  ms: { mitralStenosis: true }, phtn: { rvpo: true, tr: true }, effusion: { effusion: true },
+  ms: { mitralStenosis: true }, phtn: { rvpo: true, tr: true }, effusion: { effusion: true }, tamponade: { effusion: true, tamponade: true },
   asd: { asd: true }, vsd: { vsd: true }, rwma: { rwma: 'septal' }, tr: { tr: true },
 };
 const TTE_ALL = 'PLAX,PSAX,PSAX_AV,PSAX_MV,A4C,A5C,A2C,A3C,SUBCOSTAL,RVIT,SC_IVC,SSN';
@@ -153,7 +153,13 @@ if (!ONLY || ONLY === 'echo' || ONLY === '3d') {
   }
   if (!QUICK && (!ONLY || ONLY === '3d')) {
     const d = path.join(OUT, '3d'); fs.mkdirSync(d, { recursive: true });
-    for (const v of ['PLAX', 'A4C', 'PSAX', 'SUBCOSTAL']) { await setScene('normal', v, 0.99); await (await page.$('.panel')).screenshot({ path: path.join(d, `${v}.png`) }); }
+    // capture only once the 3D re-bake (worker) and the thoracic context are in,
+    // never behind the 'Rebuilding 3D' spinner
+    const ready3d = () => page.waitForFunction(() => {
+      const ov = document.getElementById('rebuildOverlay'), h = window.echosim && window.echosim.heart3d;
+      return (!ov || ov.classList.contains('hidden')) && (!h || h.contextReady !== false);
+    }, null, { timeout: 90000 }).catch(() => {});
+    for (const v of ['PLAX', 'A4C', 'PSAX', 'SUBCOSTAL']) { await setScene('normal', v, 0.99); await ready3d(); await page.waitForTimeout(400); await (await page.$('.panel')).screenshot({ path: path.join(d, `${v}.png`) }); }
     console.log('3d done');
   }
   fs.writeFileSync(path.join(OUT, 'errors.json'), JSON.stringify(errors, null, 2));

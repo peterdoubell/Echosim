@@ -7,7 +7,7 @@
 // labels, live measurements, and a scrolling spectral-Doppler trace.
 
 import { classify, velocityAt, geometryAt, hemoSummary, hemodynamics, TISSUE, VALVE_DEFS, FLOW, AORTIC_CUSPS, shuntLabel, stenosisCw, FLOW_AXES, FLOW_SITES, membSite } from './cardiac-model.js';
-import { LM, rapEstimate, diaphragmBelow, rwmaBlend, lumenDist } from './anatomy.js';
+import { LM, rapEstimate, diaphragmBelow, rwmaBlend, lumenDist, hepaticVeinSegs } from './anatomy.js';
 import { clamp } from './mathutils.js';
 import { ALL_VIEWS } from './views.js';
 
@@ -25,6 +25,7 @@ const FLOW_LABELS = {
   [FLOW.TR_JET]: 'TR jet',
   [FLOW.PV_FLOW]: 'pulmonary vein',
   [FLOW.HV_FLOW]: 'hepatic vein',
+  [FLOW.AORTA]: 'aortic flow',
 };
 
 // Echogenicity of the body wall at fractional depth f (0 = skin, 1 = pleura /
@@ -181,61 +182,164 @@ const ELEV_DITHER = Float32Array.from([-1, 0.333, -0.333, 1]); // sums to zero
 // (as a real gate is), placed on the valve as it sits in the phase the trace is
 // read in: diastole ('E', at peak inflow) for inflow, systole ('S') otherwise.
 // `axis` is the flow direction there, for the beam-to-flow angle readout.
+// `align`: a lesion jet (CW) or vein (PW) the sonographer brings into line with
+// the beam by angling to a modified window when the view's own beam crosses it
+// too steeply (off-axis apical for an eccentric MR jet, a rocked subcostal for
+// the hepatic veins, parasternal sweeps for a VSD jet).
 const _add = (a, b, s) => [a[0] + b[0] * s, a[1] + b[1] * s, a[2] + b[2] * s];
 const DAX = FLOW_AXES;
 const mrAxis = (path) => (path.mr ? DAX.mrEcc : DAX.mr);
 const hasMR = (path) => !!(path.mr || path.dilated);
+const _hvSeg = (A) => hepaticVeinSegs(A)[1];                 // the middle hepatic vein
+const _hvAt = (A) => { const v = _hvSeg(A); return _add(v.a, v.u, 1.6); };
+const _dtaAxis = (A) => { const d = A.ao.dta, u = [d.a[0] - d.top[0], d.a[1] - d.top[1], d.a[2] - d.top[2]], l = Math.hypot(...u); return [u[0] / l, u[1] / l, u[2] / l]; };
 export const DOPPLER_SITES = {
   mvTips: { name: 'Mitral inflow', label: 'mitral inflow at the leaflet tips', mode: 'PW', ref: 'E',
     at: (A) => _add(A.valves.mitral.c, DAX.mitralIn, 0.5), axis: () => DAX.mitralIn, box: (A) => A.valves.mitral.c },
-  mvCw: { name: 'Mitral valve CW', label: 'CW through the mitral valve', mode: 'CW', ref: (p) => (hasMR(p) ? 'S' : 'E'),
+  mvCw: { name: 'Mitral valve CW', label: 'CW through the mitral valve', mode: 'CW', ref: (p) => (hasMR(p) ? 'S' : 'E'), align: true,
     at: (A) => A.valves.mitral.c,
     axis: (p) => (hasMR(p) ? mrAxis(p) : DAX.mitralIn),
     box: (A, p) => (hasMR(p) ? _add(A.valves.mitral.c, mrAxis(p), 1.5) : A.valves.mitral.c) },
   lvot: { name: 'LVOT', label: 'LVOT, just below the aortic valve', mode: 'PW', ref: 'S',
     at: (A) => _add(A.valves.aortic.c, DAX.lvot, -1.0), axis: () => DAX.lvot, box: (A) => A.valves.aortic.c },
-  avCw: { name: 'Aortic valve CW', label: 'CW through the aortic valve', mode: 'CW', ref: 'S',
+  avCw: { name: 'Aortic valve CW', label: 'CW through the aortic valve', mode: 'CW', ref: 'S', align: true,
     at: (A) => A.valves.aortic.c, axis: () => DAX.lvot, box: (A) => A.valves.aortic.c },
   tvTips: { name: 'Tricuspid inflow', label: 'tricuspid inflow at the leaflet tips', mode: 'PW', ref: 'E',
     at: (A) => _add(A.valves.tricuspid.c, DAX.tricuspidIn, 0.5), axis: () => DAX.tricuspidIn, box: (A) => A.valves.tricuspid.c },
-  tvCw: { name: 'Tricuspid valve CW', label: 'CW through the tricuspid valve', mode: 'CW', ref: (p) => (p.tr ? 'S' : 'E'),
+  tvCw: { name: 'Tricuspid valve CW', label: 'CW through the tricuspid valve', mode: 'CW', ref: (p) => (p.tr ? 'S' : 'E'), align: true,
     at: (A) => A.valves.tricuspid.c, axis: (p) => (p.tr ? DAX.tr : DAX.tricuspidIn),
     box: (A, p) => (p.tr ? _add(A.valves.tricuspid.c, DAX.tr, 1.5) : A.valves.tricuspid.c) },
   rvot: { name: 'RVOT', label: 'RVOT, below the pulmonary valve', mode: 'PW', ref: 'S',
     at: (A) => _add(A.valves.pulmonic.c, DAX.rvot, -0.5), axis: () => DAX.rvot, box: (A) => A.valves.pulmonic.c },
   asd: { name: 'Atrial septum', label: 'interatrial septum (shunt flow)', mode: 'PW', ref: 'S',
-    at: () => FLOW_SITES.asd, axis: () => DAX.asd, box: () => FLOW_SITES.asd },
-  vsd: { name: 'VSD CW', label: 'CW across the VSD', mode: 'CW', ref: 'S',
+    at: () => FLOW_SITES.asd, axis: () => DAX.asd, box: () => _add(FLOW_SITES.asd, DAX.asd, 1.2) },
+  vsd: { name: 'VSD CW', label: 'CW across the VSD', mode: 'CW', ref: 'S', align: true,
     at: (A, p, G) => (p.vsd === 'perimembranous' ? membSite(G).c : FLOW_SITES.vsd),
     axis: (p, G) => (p.vsd === 'perimembranous' ? membSite(G).rad : DAX.vsd),
     box: (A, p, G) => (p.vsd === 'perimembranous' ? membSite(G).c : FLOW_SITES.vsd) },
   ascAo: { name: 'Ascending aorta CW', label: 'CW down the ascending aorta', mode: 'CW', ref: 'S',
     at: (A) => _add(A.valves.aortic.c, DAX.lvot, 1.5), axis: () => DAX.lvot, box: (A) => _add(A.valves.aortic.c, DAX.lvot, 1.5) },
+  hvPw: { name: 'Hepatic vein PW', label: 'middle hepatic vein, ~1.5 cm from the IVC', mode: 'PW', ref: 'S', align: true,
+    at: (A) => _hvAt(A), axis: (p, G) => { const u = _hvSeg(G.A).u; return [-u[0], -u[1], -u[2]]; }, box: (A) => _hvAt(A) },
+  descAoPw: { name: 'Descending aorta PW', label: 'proximal descending aorta', mode: 'PW', ref: 'S',
+    at: (A) => _add(A.ao.dta.top, _dtaAxis(A), 1.5), axis: (p, G) => _dtaAxis(G.A), box: (A) => _add(A.ao.dta.top, _dtaAxis(A), 1.5) },
 };
-// The view's standard spectral-Doppler site for a pathology (null: no standard
-// trace in this view). Lesion-first: a regurgitant or stenotic valve the view is
-// built to interrogate takes CW; otherwise the view's routine PW trace.
-export function dopplerDefault(view, path = {}) {
-  const mr = hasMR(path), ms = !!path.mitralStenosis, as = !!path.aorticStenosis, tr = !!path.tr;
-  switch (view) {
-    case 'PLAX': return as ? 'avCw' : 'mvTips';
-    case 'PSAX': return path.vsd ? 'vsd' : null;
-    case 'PSAX_AV': return tr ? 'tvCw' : as ? 'avCw' : path.asd ? 'asd' : 'rvot';
-    case 'PSAX_MV': return ms ? 'mvCw' : 'mvTips';
-    case 'A4C': case 'ME4C':
-      return (mr || ms) ? 'mvCw' : tr ? 'tvCw' : path.vsd ? 'vsd' : path.asd ? 'asd' : 'mvTips';
-    case 'A5C': return as ? 'avCw' : 'lvot';
-    case 'A3C': return as ? 'avCw' : (mr || ms) ? 'mvCw' : 'lvot';
-    case 'A2C': case 'ME2C': return (mr || ms) ? 'mvCw' : 'mvTips';
-    case 'SUBCOSTAL': return path.asd ? 'asd' : path.vsd ? 'vsd' : tr ? 'tvCw' : 'tvTips';
-    case 'RVIT': return tr ? 'tvCw' : 'tvTips';
-    case 'SSN': return null;   // flow beyond the aortic root (arch) is not modelled; ascAo is user-selectable
-    case 'MELAX': return (mr || ms) ? 'mvCw' : as ? 'avCw' : 'mvTips';
-    case 'MEAVSAX': return tr ? 'tvCw' : path.asd ? 'asd' : 'rvot';
-    case 'MEBICAVAL': return path.asd ? 'asd' : null;
-    case 'MERVIO': return tr ? 'tvCw' : 'rvot';
-    default: return null;            // SC_IVC, MELAA, TGSAX, DESCAO: no modelled standard trace
+// Spectral Doppler is only recorded with the beam within ~20 deg of the flow
+// (the cosine error is then < 6 %). ALIGN_RES is the residual angle a
+// sonographer typically achieves when angling to a modified window.
+export const DOPPLER_MAX_ANGLE = 20;
+const ALIGN_RES = 8;
+// Where the Doppler beam meets a site, seen from probe (pos/dir/lat/normal) with
+// sector half-angle `half` and display depth `depthCm`: the gate (or CW focus)
+// is the site projected into the plane, on a beam from the transducer, clamped
+// into the sector; when the site lies within ~1.2 cm of the plane the beam is
+// aimed through it (the slice has elevation thickness and the operator
+// fine-tilts). With `align`, a beam crossing the flow at more than
+// DOPPLER_MAX_ANGLE is re-aimed through the same point along the flow axis (a
+// modified window), leaving ALIGN_RES of residual angle.
+function siteGeometry(site, path, Gr, P, probe, half, depthCm, align) {
+  const D = probe.dir, L = probe.lat, N = probe.normal;
+  const polar = (q) => {
+    const rx = q[0] - P[0], ry = q[1] - P[1], rz = q[2] - P[2];
+    const al = rx * D[0] + ry * D[1] + rz * D[2], la = rx * L[0] + ry * L[1] + rz * L[2];
+    return { theta: Math.atan2(la, al), depth: Math.hypot(al, la), off: rx * N[0] + ry * N[1] + rz * N[2] };
+  };
+  const q = site.at(Gr.A, path, Gr);
+  const g = polar(q);
+  const theta = clamp(g.theta, -half * 0.97, half * 0.97);
+  let depth = clamp(g.depth, 0.8, depthCm * 0.94);
+  const ct = Math.cos(theta), st = Math.sin(theta);
+  let dir = [ct * D[0] + st * L[0], ct * D[1] + st * L[1], ct * D[2] + st * L[2]];
+  const inside = Math.abs(g.theta) <= half * 0.97 && g.depth <= depthCm * 0.94 && g.depth >= 0.8;
+  const through = inside && Math.abs(g.off) <= 1.2;
+  if (through) {
+    const rx = q[0] - P[0], ry = q[1] - P[1], rz = q[2] - P[2], rl = Math.hypot(rx, ry, rz) || 1;
+    dir = [rx / rl, ry / rl, rz / rl];
+    depth = rl;
   }
+  const ax = site.axis(path, Gr);
+  let cosA = dir[0] * ax[0] + dir[1] * ax[1] + dir[2] * ax[2];
+  const rawAngle = Math.acos(Math.min(1, Math.abs(cosA))) * 180 / Math.PI;
+  let P0 = P, aligned = false;
+  if (align && through && rawAngle > DOPPLER_MAX_ANGLE) {
+    const sg = cosA >= 0 ? 1 : -1;
+    const a = [ax[0] * sg, ax[1] * sg, ax[2] * sg];
+    let pr = [dir[0] - a[0] * Math.abs(cosA), dir[1] - a[1] * Math.abs(cosA), dir[2] - a[2] * Math.abs(cosA)];
+    const pl = Math.hypot(pr[0], pr[1], pr[2]) || 1;
+    pr = [pr[0] / pl, pr[1] / pl, pr[2] / pl];
+    const r = ALIGN_RES * Math.PI / 180, cr = Math.cos(r), sr = Math.sin(r);
+    dir = [a[0] * cr + pr[0] * sr, a[1] * cr + pr[1] * sr, a[2] * cr + pr[2] * sr];
+    P0 = [q[0] - dir[0] * depth, q[1] - dir[1] * depth, q[2] - dir[2] * depth];
+    cosA = sg * cr;
+    aligned = true;
+  }
+  return {
+    q, theta, depth, dir, P0, cosA, aligned, rawAngleDeg: rawAngle, through,
+    angleDeg: Math.acos(Math.min(1, Math.abs(cosA))) * 180 / Math.PI,
+    offPlane: Math.abs(g.off), outside: !inside, box: polar(site.box(Gr.A, path, Gr)),
+  };
+}
+// Candidate standard sites per view, in order of preference (lesion first). Only
+// a candidate the view's beam reaches within DOPPLER_MAX_ANGLE of the flow (after
+// angling to a modified window, for an `align` site) is used; otherwise the next.
+// Spectral Doppler is not part of the PLAX, PSAX mitral or subcostal 4C datasets.
+function siteCandidates(view, path) {
+  const mr = hasMR(path), ms = !!path.mitralStenosis, as = !!path.aorticStenosis, tr = !!path.tr, dcm = !!path.dilated;
+  const L = [];
+  switch (view) {
+    case 'PSAX': if (path.vsd) L.push('vsd'); break;
+    case 'PSAX_AV': if (tr) L.push('tvCw'); L.push('rvot'); break;
+    case 'A4C': case 'ME4C':
+      // DCM: the restrictive E/A on PW at the tips is the A4C trace (its MR is read in A2C/A3C)
+      if (ms || (mr && !dcm)) L.push('mvCw');
+      if (tr) L.push('tvCw');
+      if (path.vsd) L.push('vsd');
+      if (path.asd) L.push('asd');
+      L.push('mvTips');
+      break;
+    case 'A5C': if (as) L.push('avCw'); L.push('lvot'); break;
+    case 'A3C': if (as) L.push('avCw'); if (mr || ms) L.push('mvCw'); L.push('lvot'); break;
+    case 'A2C': case 'ME2C': if (mr || ms) L.push('mvCw'); L.push('mvTips'); break;
+    case 'RVIT': if (tr) L.push('tvCw'); L.push('tvTips'); break;
+    case 'SC_IVC': L.push('hvPw'); break;
+    case 'SSN': L.push('descAoPw'); break;
+    case 'MELAX': if (mr || ms) L.push('mvCw'); L.push('mvTips'); break;
+    case 'MEAVSAX': if (tr) L.push('tvCw'); if (path.asd) L.push('asd'); L.push('rvot'); break;
+    case 'MEBICAVAL': if (path.asd) L.push('asd'); break;
+    case 'MERVIO': if (tr) L.push('tvCw'); L.push('rvot'); break;
+    default: break;                  // PLAX, PSAX_MV, SUBCOSTAL, MELAA, TGSAX, DESCAO
+  }
+  return L;
+}
+// Beam-flow geometry of a site from a view's standard probe (as a default sees it).
+const _defCache = new WeakMap();
+export function defaultSiteGeometry(view, key, path = {}) {
+  let m = _defCache.get(path);
+  if (!m) { m = new Map(); _defCache.set(path, m); }
+  const ck = view + '|' + key;
+  if (m.has(ck)) return m.get(ck);
+  const vw = ALL_VIEWS[view], site = DOPPLER_SITES[key];
+  let r = null;
+  if (vw && site) {
+    const ref = typeof site.ref === 'function' ? site.ref(path) : site.ref;
+    const Gr = refPhases(path)[ref];
+    const probe = vw.probe();
+    let P = probe.pos;
+    if (vw.track) { const o = vw.track(Gr.A); P = [P[0] + o[0], P[1] + o[1], P[2] + o[2]]; }
+    r = siteGeometry(site, path, Gr, P, probe, 0.66, vw.depth || 16, !!site.align);
+  }
+  m.set(ck, r);
+  return r;
+}
+// The view's standard spectral-Doppler site for a pathology (null: no standard
+// trace in this view): the first candidate the view's beam meets within
+// DOPPLER_MAX_ANGLE of the flow, inside the sector and near the plane.
+export function dopplerDefault(view, path = {}) {
+  for (const key of siteCandidates(view, path)) {
+    const g = defaultSiteGeometry(view, key, path);
+    if (g && !g.outside && g.through && g.angleDeg <= DOPPLER_MAX_ANGLE) return key;
+  }
+  return null;
 }
 // Phase a site is placed in: peak mitral inflow ('E') or peak ejection ('S').
 const _refPhaseCache = new WeakMap();
@@ -267,6 +371,19 @@ function hash01(a, b) {
   let h = Math.imul(a, 0x8da6b343) ^ Math.imul(b, 0xd8163841);
   h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d); h = Math.imul(h ^ (h >>> 12), 0x297a2d39); h ^= h >>> 15;
   return (h >>> 0) / 4294967296;
+}
+
+// Whether colour Doppler is on when a view loads. Off where the lesion is
+// MORPHOLOGICAL and colour would paint over it: calcified, restricted aortic
+// cusps (AS) in the parasternal long axis, the short-axis valve views and the
+// TEE long axis; the domed, fish-mouth mitral valve (MS) in the parasternal and
+// TEE long axis and the mitral short axis. A coexisting regurgitant lesion keeps
+// colour on (its jet is then the finding). The learner can always switch it on.
+export function colourDefault(view, path = {}) {
+  if (hasMR(path) || path.tr || path.vsd || path.asd) return true;
+  if (path.aorticStenosis && (view === 'PLAX' || view === 'PSAX_AV' || view === 'MEAVSAX' || view === 'MELAX')) return false;
+  if (path.mitralStenosis && (view === 'PLAX' || view === 'PSAX_MV' || view === 'MELAX')) return false;
+  return true;
 }
 
 export class EchoView {
@@ -808,13 +925,18 @@ export class EchoView {
                 // random velocity (hashed from ~1.5 mm cells, re-drawn each frame
                 // like the blood scatterers) whose spread grows with the jet speed.
                 // Laminar flow keeps clean colour (and a clean reversal if it aliases).
-                let jitter = 0;
-                if (vel.turbulent) {
-                  const jc = 6.5;
-                  jitter = scatGauss(Math.floor(wx * jc), Math.floor(wy * jc), Math.floor(wz * jc), bloodSalt ^ 0x2545f491) *
-                    nyqEff * Math.min(1.1, 0.35 + alos / (3 * nyqEff));
+                // The spread grows with the cell's velocity variance; a high-
+                // variance (mosaic) core keeps the flow's direction hue in most
+                // cells (the mean of a broad spectrum still leans the jet's way),
+                // so a jet toward the probe stays red-yellow and one away blue-cyan.
+                let jitter = 0, vr = vel.variance || 0;
+                if (vr > 0.02) {
+                  const jc = 6.5, cx0 = Math.floor(wx * jc), cy0 = Math.floor(wy * jc), cz0 = Math.floor(wz * jc);
+                  jitter = scatGauss(cx0, cy0, cz0, bloodSalt ^ 0x2545f491) * nyqEff * vr * Math.min(1.1, 0.35 + alos / (3 * nyqEff));
+                  // per-cell variance estimate: noisy, as a scanner's is
+                  vr = clamp(vr * (0.75 + 0.5 * hash01(cx0 * 73856093 ^ cy0 * 19349663, cz0 ^ bloodSalt)), 0, 1);
                 }
-                const col = dopplerColor(los, nyqEff, vel.turbulent, jitter);
+                const col = dopplerColor(los, nyqEff, vr, jitter);
                 // colour REPLACES the grey wherever flow is detected (write priority)
                 dA = 0.92;
                 dR = col[0]; dG = col[1]; dB = col[2];
@@ -1324,7 +1446,7 @@ export class EchoView {
     // already-composited part of the same beam. Modelled for the descending-aorta
     // views, where the lung meets the aorta face-on; the lung at the edges of the
     // other TEE sectors and the transthoracic pleura are not mirrored here.
-    const mirAmp = (this.nearFieldCm || 0) < 0.5 && this.viewName === 'DESCAO' ? 0.3 : 0;
+    const mirAmp = (this.nearFieldCm || 0) < 0.5 && this.viewName === 'DESCAO' ? 0.38 : 0;
     // the reflecting plane: tangent to the pleura on the beam that meets it most
     // squarely (well inside the line), as [x, y, nx, ny] in buffer px
     let mirP = null;
@@ -1391,26 +1513,41 @@ export class EchoView {
             const gr = 0.6 + 0.8 * (lGrain[ab0] * (1 - fr) + lGrain[ab1] * fr);
             const sig = 0.06 + 0.004 * depth;
             let al = 0, pl = 0;
-            for (let m = 1, amp = pleuraAmp; m <= 4; m++, amp *= 0.45) {
+            // A-lines: reverberations between the pleura and the transducer face, at
+            // integer multiples of the pleural depth (concentric with the transducer),
+            // each round trip ~6 dB down (amplitude x 0.5). The m-th reverberation
+            // has met the pleura m times, so it needs a pleura facing the beam (spec^m):
+            // a grazing pleura gives a line but no A-lines.
+            for (let m = 1, amp = pleuraAmp, sp = spec; m <= 4; m++, amp *= 0.5, sp *= spec) {
               const q = (depth - m * dl) / (sig * (1 + 0.3 * (m - 1))), g = amp * Math.exp(-q * q);
-              if (m === 1) pl = g * spec * tp * gr; else al += g * spec * tp;
+              if (m === 1) pl = g * spec * tp * gr; else al += g * sp * tp;
             }
-            // reverberation haze beyond the air (~ -40 dB, below tissue), streaked
-            // along the beams by the same coarse lateral grain as the pleural line
-            // (reverberation, not tissue: only lightly speckled)
-            let haze = 0.01 * (0.35 + 1.3 * (lGrain[ab0] * (1 - fr) + lGrain[ab1] * fr)) * Math.exp(-(depth - dl) / 4) * (0.7 + 0.3 * spk[idx]);
+            // 'dirty' acoustic shadow beyond the air: low-level reverberation clutter
+            // (~ -40 dB, below tissue) that carries the system's speckle like any echo
+            // (fully developed: the PSF-convolved speckle field, mean-normalised) — no
+            // smooth CG gradient and no per-beam streaks. Most of it is multiple
+            // reflection off the pleura, so it follows the pleural incidence (a pleura
+            // the beam grazes sends its echo away and leaves a darker, noisier shadow)
+            // and fades slowly with distance beyond the line.
+            const sN = spk[idx] * 1.128;
+            let haze = 0.007 * (0.35 + 0.65 * spec) * (0.45 + 0.55 * Math.exp(-(depth - dl) / 3)) * sN;
             // mirror image of the tissue in front of the pleura (TEE): the beam
             // reflects off the pleura, so the echo at depth d comes from the point
             // the reflected beam reaches, i.e. the image point mirrored across the
             // reflecting plane (the pleura's tangent plane where it faces the probe
             // squarely; see mirP below). The copy replaces most of the reverberation
             // haze where it falls, so its lumen reads dark too.
+            // The replica took the longer path (attenuation) and was defocused by the
+            // curved reflector, so it is weaker (~ -10 dB) and laterally blurred (a
+            // ~2.5 mm FWHM smear across the receiving beam), its lumen carries clutter
+            // (the haze is only partly displaced), and it re-speckles at the mirror point.
             let mir = 0;
             if (mirP && depth >= dl) {
               const ddx = i - mirP[0], ddy = j - mirP[1];
               const dist = ddx * mirP[2] + ddy * mirP[3];
               if (dist > 0) {
-                const mx = Math.round(i - 2 * dist * mirP[2]), my = Math.round(j - 2 * dist * mirP[3]);
+                const fx = i - 2 * dist * mirP[2], fy = j - 2 * dist * mirP[3];
+                const mx = Math.round(fx), my = Math.round(fy);
                 if (mx >= 0 && mx < SW && my >= 0 && my < j) {
                   const q = my * SW + mx;
                   if (mask[q]) {
@@ -1421,14 +1558,27 @@ export class EchoView {
                     const aF = clamp((Math.hypot(mdx, mdy) / pxPerCm - 0.3) / 0.5, 0, 1);
                     const mv = tp * (0.4 + 0.6 * ci) * Math.min(1, (depth - dl) / 0.15) * eF * eF * aF *
                       Math.min(1, dist / (0.4 * pxPerCm));
-                    mir = mirAmp * mv * lin[q] * (0.6 + 0.8 * spk[idx]);
-                    haze *= 1 - 0.75 * mv;
+                    // receiving beam's lateral direction at this pixel, reflected into
+                    // the source half-space; Gaussian taps (sigma 1.2 mm) along it
+                    const pdx = i - cx, pdy = j - apexY, pr = Math.hypot(pdx, pdy) || 1;
+                    let lx = pdy / pr, ly = -pdx / pr;
+                    const ln = lx * mirP[2] + ly * mirP[3]; lx -= 2 * ln * mirP[2]; ly -= 2 * ln * mirP[3];
+                    const stepPx = 0.04 * pxPerCm;
+                    let sw = 0, sv = 0;
+                    for (let t = -6; t <= 6; t++) {
+                      const tx = Math.round(fx + t * stepPx * lx), ty = Math.round(fy + t * stepPx * ly);
+                      if (tx < 0 || tx >= SW || ty < 0 || ty >= j) continue;
+                      const qq = ty * SW + tx; if (!mask[qq]) continue;
+                      const wt = Math.exp(-(t * 0.4 / 1.2) * (t * 0.4 / 1.2) / 2); sw += wt; sv += wt * lin[qq];
+                    }
+                    mir = mirAmp * mv * (sw > 0 ? sv / sw : lin[q]) * sN;
+                    haze *= 1 - 0.45 * mv;
                   }
                 }
               }
             }
             const wa = w * (0.3 + 0.7 * tp);                              // a partial air hit at the ends
-            b = b * (1 - wa) + wa * (0.02 * b + (pl * (0.55 + 0.9 * spk[idx]) + al * (0.5 + 0.8 * spk[idx]) + haze) * gain + mir);
+            b = b * (1 - wa) + wa * (0.02 * b + (pl * (0.55 + 0.9 * spk[idx]) + al * sN + haze) * gain + mir);
           }
         }
         // subtle near-field reverberation: faint repeating echoes close to the
@@ -1532,10 +1682,36 @@ export class EchoView {
   // (PW) or CW focus is the site projected into the plane, on a beam from the
   // transducer, clamped into the sector. Records the beam-to-flow angle, which
   // is what every Doppler reading depends on (v_measured = v cos(theta)).
+  // Where the colour box goes in a view with no spectral trace: on the lesion
+  // the view shows (the shunt, the stenotic or regurgitant valve), else on the
+  // valve the view is built around; mid-sector when none lies in the plane.
+  _colourFocus(G, path, probe) {
+    const L = [];
+    if (path.asd) L.push('asd');
+    if (path.vsd) L.push('vsd');
+    if (path.aorticStenosis) L.push('avCw');
+    if (path.mr || path.mitralStenosis || path.dilated) L.push('mvCw');
+    if (path.tr) L.push('tvCw');
+    L.push(({ PLAX: 'mvTips', PSAX_MV: 'mvTips', SUBCOSTAL: 'tvTips' })[this.viewName]);
+    const half = this.sectorHalf;
+    for (const key of L) {
+      const site = key && DOPPLER_SITES[key];
+      if (!site) continue;
+      const ref = typeof site.ref === 'function' ? site.ref(path) : site.ref;
+      const Gr = refPhases(path)[ref] || G;
+      const g = siteGeometry(site, path, Gr, probe.pos, probe, half, this.depthCm, false);
+      if (g.outside || g.offPlane > 1.5) continue;
+      return { theta: clamp(g.box.theta, -half, half), depth: clamp(g.box.depth, 1, this.depthCm * 0.9) };
+    }
+    return null;
+  }
+
   _resolveGate(G, path, probe) {
-    const key = this.dopplerSite || dopplerDefault(this.viewName, path);
+    const user = !!this.dopplerSite;
+    const key = this.dopplerSite || dopplerDefault(this.viewName, path) || (ALL_VIEWS[this.viewName] || {}).doppler || null;   // (a view's own standard site)
     const site = key ? DOPPLER_SITES[key] : null;
-    if (!site) { this._dGate = null; return null; }
+    this._cfocus = null;
+    if (!site) { this._dGate = null; this._cfocus = this._colourFocus(G, path, probe); return null; }
     const ref = typeof site.ref === 'function' ? site.ref(path) : site.ref;
     const Gr = refPhases(path)[ref] || G;
     // A view that tracks a landmark slides the probe with the cycle; the Doppler
@@ -1547,41 +1723,20 @@ export class EchoView {
       const o1 = vw.track(G.A), o0 = vw.track(Gr.A);
       P = [P[0] - o1[0] + o0[0], P[1] - o1[1] + o0[1], P[2] - o1[2] + o0[2]];
     }
-    const D = probe.dir, L = probe.lat, N = probe.normal;
-    const polar = (q) => {
-      const rx = q[0] - P[0], ry = q[1] - P[1], rz = q[2] - P[2];
-      const al = rx * D[0] + ry * D[1] + rz * D[2], la = rx * L[0] + ry * L[1] + rz * L[2];
-      return { theta: Math.atan2(la, al), depth: Math.hypot(al, la), off: rx * N[0] + ry * N[1] + rz * N[2] };
-    };
     const half = this.sectorHalf;
-    const q = site.at(Gr.A, path, Gr);
-    const g = polar(q);
-    const theta = clamp(g.theta, -half * 0.97, half * 0.97);
-    let depth = clamp(g.depth, 0.8, this.depthCm * 0.94);
-    const ct = Math.cos(theta), st = Math.sin(theta);
-    let dir = [ct * D[0] + st * L[0], ct * D[1] + st * L[1], ct * D[2] + st * L[2]];
-    // The Doppler beam has the slice's elevation thickness and the operator
-    // fine-tilts for the best signal, so when the site lies within ~1.2 cm of the
-    // displayed plane the beam is aimed through the site itself (the cursor is
-    // drawn at its projection). Further off, the view does not show the site and
-    // the beam stays in the plane.
-    const inside = Math.abs(g.theta) <= half * 0.97 && g.depth <= this.depthCm * 0.94 && g.depth >= 0.8;
-    if (inside && Math.abs(g.off) <= 1.2) {
-      const rx = q[0] - P[0], ry = q[1] - P[1], rz = q[2] - P[2], rl = Math.hypot(rx, ry, rz) || 1;
-      dir = [rx / rl, ry / rl, rz / rl];
-      depth = rl;
-    }
-    const ax = site.axis(path, Gr);
-    const cosA = dir[0] * ax[0] + dir[1] * ax[1] + dir[2] * ax[2];
-    const b = polar(site.box(Gr.A, path, Gr));
+    // the view's standard site is recorded aligned (angling to a modified window
+    // where the jet needs it); a site the operator picks is taken as the beam
+    // meets it, and flagged when that is too steep to measure
+    const sg = siteGeometry(site, path, Gr, P, probe, half, this.depthCm, !user && !!site.align);
     const modeDef = typeof site.mode === 'function' ? site.mode(path) : site.mode;
     const mode = this.dopplerMode === 'PW' || this.dopplerMode === 'CW' ? this.dopplerMode : modeDef;
     this._dGate = {
-      key, name: site.name, label: site.label, mode, theta, depth, dir, P0: P,
-      p: [P[0] + dir[0] * depth, P[1] + dir[1] * depth, P[2] + dir[2] * depth],
-      angleDeg: Math.acos(Math.min(1, Math.abs(cosA))) * 180 / Math.PI, cosA,
-      offPlane: Math.abs(g.off), outside: Math.abs(g.theta) > half * 0.97 || g.depth > this.depthCm * 0.94,
-      box: { theta: clamp(b.theta, -half, half), depth: clamp(b.depth, 1, this.depthCm * 0.9) },
+      key, name: site.name, label: site.label, mode, theta: sg.theta, depth: sg.depth, dir: sg.dir, P0: sg.P0,
+      p: [sg.P0[0] + sg.dir[0] * sg.depth, sg.P0[1] + sg.dir[1] * sg.depth, sg.P0[2] + sg.dir[2] * sg.depth],
+      q: sg.q, angleDeg: sg.angleDeg, cosA: sg.cosA, aligned: sg.aligned, rawAngleDeg: sg.rawAngleDeg, user,
+      steep: sg.angleDeg > DOPPLER_MAX_ANGLE,
+      offPlane: sg.offPlane, outside: sg.outside,
+      box: { theta: clamp(sg.box.theta, -half, half), depth: clamp(sg.box.depth, 1, this.depthCm * 0.9) },
     };
     return this._dGate;
   }
@@ -1595,9 +1750,10 @@ export class EchoView {
     const half = this.sectorHalf;
     const size = clamp(this.cboxSize || 0.45, 0.15, 1);
     const bw = size * half;
-    const tc = gate ? clamp(gate.box.theta, -half + bw, half - bw) : 0;
+    const fb = gate ? gate.box : this._cfocus;
+    const tc = fb ? clamp(fb.theta, -half + bw, half - bw) : 0;
     const span = Math.min(this.depthCm * 0.92, 3 + 0.6 * this.depthCm * size);
-    const dc = gate ? gate.box.depth : this.depthCm * 0.5;
+    const dc = fb ? fb.depth : this.depthCm * 0.5;
     let d1 = Math.min(this.depthCm * 0.94, dc + span * 0.5);
     const d0 = Math.max(0.4, d1 - span);
     d1 = Math.min(this.depthCm * 0.94, d0 + span);
@@ -1829,6 +1985,7 @@ export class EchoView {
       ctx.font = '10px monospace';
       ctx.textAlign = 'left';
       ctx.fillText('No standard spectral Doppler trace in this view', 6, plotH * 0.5);
+      ctx.fillText('(no site the beam meets within ' + DOPPLER_MAX_ANGLE + '° of the flow)', 6, plotH * 0.5 + 13);
       this._drawEcg(ctx, W, H, plotH, G);
       this.spectralData = { mode: null, site: null, cols: 0, vs: new Float32Array(0) };
       return;
@@ -1847,6 +2004,34 @@ export class EchoView {
       S = this._specCache = this._sweep(path, P, dir, gate, mode, cols, key);
       S.p = gate.p.slice(); S.dir = dir.slice();
     }
+    // ---- spectral envelope (per column, each direction) ----
+    // CW: the fastest scatterer on the beam, smoothed in time by the analysis
+    // window (~8 ms Gaussian, as the FFT window of a scanner smooths it), so the
+    // onset ramps over tens of ms. PW: the modal velocity of the sample volume.
+    // The scale and the peak readout are both taken from this same envelope,
+    // which is also what the bright edge of the trace is drawn on.
+    if (!S.env || S.envMode !== mode) {
+      const eP = new Float32Array(cols), eN = new Float32Array(cols), vP = new Float32Array(cols), vN = new Float32Array(cols);
+      for (let c = 0; c < cols; c++) {
+        let mp = 0, mn = 0, rp = 0, rn = 0;
+        for (let k = S.start[c]; k < S.start[c + 1]; k++) {
+          const v = S.v[k];
+          if (v > mp) { mp = v; rp = S.t[k]; } else if (-v > mn) { mn = -v; rn = S.t[k]; }
+        }
+        eP[c] = mp; eN[c] = mn; vP[c] = rp; vN[c] = rn;
+      }
+      if (mode === 'CW') {
+        const sig = Math.max(0.6, 0.008 / (this.rrSec || 0.833) * cols), R = Math.ceil(2.5 * sig);
+        const wk = []; let ws = 0;
+        for (let i = -R; i <= R; i++) { const w = Math.exp(-0.5 * (i / sig) * (i / sig)); wk.push(w); ws += w; }
+        const sm = (a) => { const o = new Float32Array(cols); for (let c = 0; c < cols; c++) { let t = 0; for (let i = -R; i <= R; i++) t += wk[i + R] * a[(c + i + cols) % cols]; o[c] = t / ws; } return o; };
+        S.envP = sm(eP); S.envN = sm(eN);
+      } else { S.envP = eP; S.envN = eN; }
+      S.varP = vP; S.varN = vN;
+      let pm = 0, nm = 0;
+      for (let c = 0; c < cols; c++) { pm = Math.max(pm, S.envP[c]); nm = Math.max(nm, S.envN[c]); }
+      S.envPosMax = pm; S.envNegMax = nm; S.env = true; S.envMode = mode;
+    }
     // PW velocity scale: set to fit the signal (as the sonographer would), but
     // never above the Nyquist limit the PRF allows at the gate depth, so flow
     // faster than that limit wraps around (aliases)
@@ -1854,23 +2039,30 @@ export class EchoView {
     const fit = [0.4, 0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0].find((x) => x >= 1.25 * Math.max(S.posMax, S.negMax)) || 3.0;
     const nyqPW = this.pwNyquist || Math.min(nyqMax, fit);
     // ---- scale and baseline ----
-    let scale, fTop;
-    if (mode === 'PW') { scale = nyqPW; fTop = 0.5; }
+    // CW: the baseline is placed so each direction gets the share of the plot
+    // its envelope needs (at least a quarter when both carry real flow: MR with
+    // its inflow), and the scale so the whole envelope fits inside with ~10 %
+    // headroom (no clipping at the edge).
+    let fTop, kpx;
+    if (mode === 'PW') { fTop = 0.5; kpx = plotH * 0.5 / nyqPW; }
     else {
-      const m = Math.max(S.posMax, S.negMax, 0.5) * 1.12;
-      scale = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 8].find((x) => x >= m) || Math.ceil(m);
-      fTop = S.posMax < 0.3 * S.negMax ? 0.24 : S.negMax < 0.3 * S.posMax ? 0.76 : 0.5;
+      const pe = Math.max(S.envPosMax, 0.05), ne = Math.max(S.envNegMax, 0.05);
+      if (pe > 0.25 && ne > 0.25) fTop = clamp(pe / (pe + ne), 0.25, 0.75);
+      else fTop = pe < ne ? 0.24 : 0.76;
+      const head = 1.12;
+      // flow above the baseline keeps clear of the header line at the top
+      const hdr = fTop > 0.5 ? 13 : 0;
+      kpx = Math.min((fTop * plotH - hdr) / (head * Math.max(pe, 0.3)), (1 - fTop) * plotH / (head * Math.max(ne, 0.3)));
     }
     const zeroY = fTop * plotH;
-    const kpx = (mode === 'PW' ? plotH * 0.5 : Math.max(fTop, 1 - fTop) * plotH * 0.94) / scale;   // px per m/s
     const vTop = zeroY / kpx, vBot = -(plotH - zeroY) / kpx;                                      // display range
+    const scale = mode === 'PW' ? nyqPW : (S.envNegMax > S.envPosMax ? -vBot : vTop);
     // ---- power spectrum raster (cols x plotH) ----
     const NP = cols * plotH;
     if (!this._specP || this._specP.length < NP) this._specP = new Float32Array(NP);
     const Pw = this._specP; Pw.fill(0, 0, NP);
     const dv = 1 / kpx;                                  // m/s per row
-    const span = vTop - vBot;
-    const wrap = (u) => (mode === 'PW' ? u - 2 * scale * Math.round(u / (2 * scale)) : u);
+    const wrap = (u) => (mode === 'PW' ? u - 2 * nyqPW * Math.round(u / (2 * nyqPW)) : u);
     const addAt = (c, u, w) => {
       const uu = wrap(u);
       if (uu > vTop || uu < vBot) return;
@@ -1880,27 +2072,43 @@ export class EchoView {
     let wrapped = 0;
     for (let c = 0; c < cols; c++) {
       for (let k = S.start[c]; k < S.start[c + 1]; k++) {
-        const v = S.v[k], w = S.w[k], turb = S.t[k] === 1, av = Math.abs(v), sg = v < 0 ? -1 : 1;
+        const v = S.v[k], w = S.w[k], vr = S.t[k], av = Math.abs(v), sg = v < 0 ? -1 : 1;
         if (av < 0.03) continue;
         if (mode === 'PW' && av > nyqPW) wrapped++;
         if (mode === 'PW') {
           // spectral band: laminar = narrow band just below the modal velocity
-          // (dark window beneath); turbulent = broad, down toward the baseline
-          const lo = turb ? av * 0.15 : Math.max(0, av * 0.86 - 0.03), hi = av + (turb ? 0.12 : 0.035);
+          // (dark window beneath); disturbed flow broadens it toward the baseline
+          const lo = Math.max(0, av * (0.86 - 0.71 * vr) - 0.03), hi = av + 0.035 + 0.06 * vr;
           const n = Math.max(2, Math.ceil((hi - lo) / (dv * 0.7)));
           for (let i = 0; i <= n; i++) {
             const u = lo + (hi - lo) * i / n, t = (u - lo) / (hi - lo + 1e-9);
             addAt(c, sg * u, w * (0.35 + 0.65 * t) * (u > av ? Math.max(0, 1 - (u - av) / (hi - av + 1e-9)) : 1) / n * 6);
           }
         } else {
-          // CW: each scatterer along the beam adds a line at its own velocity
-          // (spread by turbulence), and the beam's sweep through slower flow fills
-          // the spectrum below it toward the baseline
-          const sig = 0.05 + (turb ? 0.12 : 0.02);
-          const n0 = Math.ceil(2.5 * sig / dv);
-          for (let i = -n0; i <= n0; i++) { const u = av + i * dv; if (u > 0) addAt(c, sg * u, w * Math.exp(-((i * dv) / sig) * ((i * dv) / sig))); }
-          const nf = Math.ceil(av / dv), wf = w * (turb ? 0.22 : 0.08);
-          for (let i = 1; i < nf; i++) addAt(c, sg * i * dv, wf);
+          // CW: each scatterer on the beam adds a line at its own velocity,
+          // broadened inward (toward the baseline) by its variance
+          const so = 0.02, si = 0.04 + 0.1 * vr;
+          const n0 = Math.ceil(2.5 * si / dv), n1 = Math.ceil(2.5 * so / dv);
+          for (let i = -n0; i <= n1; i++) { const d = i * dv, u = av + d; if (u > 0) addAt(c, sg * u, 0.12 * w * Math.exp(-(d / (d < 0 ? si : so)) * (d / (d < 0 ? si : so)))); }
+        }
+      }
+      if (mode === 'CW') {
+        // the CW envelope: a dense bright edge over the outer ~13 % at the
+        // instantaneous maximum, a softer fill toward the baseline beneath it
+        for (const sg of [1, -1]) {
+          const e = sg > 0 ? S.envP[c] : S.envN[c];
+          if (e < 0.08) continue;
+          const vr = sg > 0 ? S.varP[c] : S.varN[c];
+          const nr = Math.ceil(e / dv), B = 2.2;
+          for (let i = 0; i <= nr; i++) {
+            const u = i * dv, f = u / e;
+            let w;
+            if (f >= 0.87) w = B * (0.65 + 0.35 * (f - 0.87) / 0.13);
+            else w = B * (0.025 + 0.045 * vr) * (0.3 + 0.7 * Math.pow(f / 0.87, 1.6));
+            addAt(c, sg * Math.min(u, e), w);
+          }
+          const ro = 0.022 + 0.02 * vr;                    // the edge's soft outer roll-off
+          for (let i = 1; i * dv < 2.5 * ro; i++) addAt(c, sg * (e + i * dv), B * Math.exp(-((i * dv) / ro) * ((i * dv) / ro)));
         }
       }
     }
@@ -1909,6 +2117,16 @@ export class EchoView {
     let pref = 0;
     { const sample = []; for (let i = 0; i < NP; i += 7) if (Pw[i] > 0) sample.push(Pw[i]);
       sample.sort((a, b) => a - b); pref = sample.length ? sample[Math.floor(sample.length * 0.97)] : 1; }
+    // the plotted envelope, read back off the raster: per column the outermost
+    // row holding >= 5 % of that column's maximum
+    let rasterPos = 0, rasterNeg = 0;
+    for (let c = 0; c < cols; c++) {
+      let mx = 0;
+      for (let r = 0; r < plotH; r++) mx = Math.max(mx, Pw[r * cols + c]);
+      if (mx <= 0) continue;
+      for (let r = 0; r < plotH; r++) if (Pw[r * cols + c] >= 0.05 * mx) { rasterPos = Math.max(rasterPos, vTop - r * dv); break; }
+      for (let r = plotH - 1; r >= 0; r--) if (Pw[r * cols + c] >= 0.05 * mx) { rasterNeg = Math.max(rasterNeg, -(vTop - r * dv)); break; }
+    }
     if (!this._specImg || this._specImg.width !== W || this._specImg.height !== H) this._specImg = ctx.createImageData(W, H);
     const img = this._specImg, d = img.data;
     const DR = 32, gain = this.gain || 1;
@@ -1934,71 +2152,118 @@ export class EchoView {
     for (let v = -Math.floor(-vBot / gstep) * gstep; v <= vTop + 1e-6; v += gstep) {
       if (Math.abs(v) < 1e-6) continue;
       const y = zeroY - v * kpx;
+      if (y < 4 || y > plotH - 2) continue;
       ctx.strokeStyle = 'rgba(90,130,170,0.18)';
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W - 30, y); ctx.stroke();
       ctx.fillStyle = 'rgba(150,200,240,0.75)';
       ctx.textAlign = 'right';
-      ctx.fillText((v > 0 ? '+' : '') + v.toFixed(gstep < 0.5 ? 1 : 1), W - 3, y + 3);
+      ctx.fillText((v > 0 ? '+' : '') + v.toFixed(1), W - 3, y + 3);
     }
     ctx.strokeStyle = 'rgba(140,190,230,0.6)';
     ctx.beginPath(); ctx.moveTo(0, zeroY); ctx.lineTo(W, zeroY); ctx.stroke();
-    const cxp = (G.phase % 1) * W;
+    const nb = S.nb || 1;
     ctx.strokeStyle = 'rgba(255,90,77,0.8)';
-    ctx.beginPath(); ctx.moveTo(cxp, 0); ctx.lineTo(cxp, H); ctx.stroke();
+    for (let b = 0; b < nb; b++) {
+      const cxp = ((G.phase % 1) + b) / nb * W;
+      ctx.beginPath(); ctx.moveTo(cxp, 0); ctx.lineTo(cxp, H); ctx.stroke();
+    }
+    if (nb > 1) {                                   // respiratory phase of each beat
+      ctx.fillStyle = 'rgba(170,215,245,0.75)';
+      ctx.textAlign = 'center';
+      ctx.font = '9px monospace';
+      for (let b = 0; b < nb; b++) ctx.fillText(specBeats(path)[b].resp === 'insp' ? 'insp' : 'exp', (b + 0.5) / nb * W, plotH - 4);
+      ctx.font = '10px monospace';
+    }
     ctx.textAlign = 'left';
-    ctx.fillStyle = 'rgba(170,215,245,0.9)';
-    ctx.fillText(`${mode}  ${gate.name}  θ ${Math.round(gate.angleDeg)}°  m/s`, 4, 10);
-    ctx.fillStyle = 'rgba(150,200,240,0.6)';
-    if (mode === 'PW') ctx.fillText(`Nyquist ±${nyqPW.toFixed(2)}  gate ${gate.depth.toFixed(1)} cm`, 4, 20);
-    // peak readout: CW from the envelope; PW only when it is not aliased
+    // readouts sit on a dark backing so the trace never runs through them
+    const label = (t, x, y, col, font, align = 'left') => {
+      ctx.font = font; ctx.textAlign = align;
+      const w = ctx.measureText ? (ctx.measureText(t).width || 0) : 0;
+      ctx.fillStyle = 'rgba(4,6,10,0.72)';
+      ctx.fillRect(align === 'right' ? x - w - 2 : x - 2, y - 9, w + 4, 11);
+      ctx.fillStyle = col; ctx.fillText(t, x, y);
+    };
+    label(`${mode}  ${gate.name}  θ ${Math.round(gate.angleDeg)}°  m/s`, 4, 10, 'rgba(170,215,245,0.95)', '9px monospace');
+    // (a CW trace above the baseline: the flag goes below it, clear of the envelope)
+    let y2 = mode === 'CW' && fTop > 0.5 ? plotH - 4 : 21;
+    if (gate.steep) {
+      // an operator-placed site the beam crosses too steeply: the trace is shown
+      // but flagged, since v cos(theta) under-reads the flow
+      label(`θ > ${DOPPLER_MAX_ANGLE}°: velocity underestimated`, 4, y2, 'rgba(255,95,80,0.98)', '600 10px monospace');
+      y2 += 11;
+    } else if (gate.aligned) {
+      label(`aligned: modified window (view θ ${Math.round(gate.rawAngleDeg)}°)`, 4, y2, 'rgba(150,200,240,0.8)', '9px monospace');
+      y2 += 11;
+    }
+    if (mode === 'PW') label(`Nyquist ±${nyqPW.toFixed(2)}  gate ${gate.depth.toFixed(1)} cm`, 4, y2, 'rgba(150,200,240,0.8)', '9px monospace');
+    // peak readout: from the same envelope the trace's edge is drawn on; PW only
+    // when it is not aliased
+    // (an aliased direction has no readable peak: the other one keeps its own)
+    const lim = mode === 'PW' ? nyqPW : 1e9;
+    const pOk = S.envPosMax <= lim, nOk = S.envNegMax <= lim;
     let peak = 0, sign = 1;
-    if (S.negMax >= S.posMax) { peak = S.negMax; sign = -1; } else { peak = S.posMax; }
+    if (nOk && (!pOk || S.envNegMax >= S.envPosMax)) { peak = S.envNegMax; sign = -1; } else if (pOk) { peak = S.envPosMax; }
     const aliased = mode === 'PW' && wrapped > 0;
-    if (aliased) {
-      ctx.fillStyle = 'rgba(255,190,110,0.95)';
-      ctx.font = '600 10px monospace';
-      ctx.textAlign = 'right';
-      ctx.fillText('aliased above Nyquist: use CW', W - 34, 11);
-    } else if (peak > 0.12) {
+    if (aliased) label('aliased above Nyquist: use CW', W - 34, plotH - 3, 'rgba(255,190,110,0.95)', '600 10px monospace', 'right');
+    if (peak > 0.12) {
       const py = zeroY - sign * peak * kpx;
       ctx.strokeStyle = 'rgba(255,210,90,0.6)';
       ctx.setLineDash([3, 3]);
       ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(W - 30, py); ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillStyle = 'rgba(255,225,140,0.95)';
-      ctx.textAlign = 'right';
-      ctx.font = '600 10px monospace';
-      ctx.fillText('peak ' + peak.toFixed(1) + ' m/s', W - 34, py - 3 < 9 ? py + 11 : py - 3);
+      // the label goes on the side of the line away from the trace
+      label('peak ' + peak.toFixed(1) + ' m/s', W - 34, sign > 0 ? Math.max(10, py - 3) : Math.min(plotH - 2, py + 11), 'rgba(255,225,140,0.95)', '600 10px monospace', 'right');
     }
-    this._drawEcg(ctx, W, H, plotH, G);
+    this._drawEcg(ctx, W, H, plotH, G, nb);
     this.spectralData = {
       mode, site: gate.key, label: gate.label, angleDeg: gate.angleDeg, cols, vs: S.vs.slice(0, cols),
       nyq: mode === 'PW' ? nyqPW : null, scale, baseline: fTop, wrapped, aliased,
-      peak, peakSign: sign, posMax: S.posMax, negMax: S.negMax,
+      peak, peakSign: sign, posMax: S.posMax, negMax: S.negMax, beats: nb,
+      // what is drawn: the per-column envelope in each direction, the display
+      // limits, and the envelope read back off the raster (outermost row >= 5 %)
+      envPos: S.envP.slice(0, cols), envNeg: S.envN.slice(0, cols), vTop, vBot,
+      envMax: Math.max(rasterPos, rasterNeg), envSign: rasterNeg >= rasterPos ? -1 : 1,
+      aligned: !!gate.aligned, steep: !!gate.steep, rawAngleDeg: gate.rawAngleDeg, rrSec: this.rrSec || 0.833,
     };
   }
 
   // One cycle of Doppler samples on the gate beam: PW, a 7-point (3 mm) sample volume
-  // around the gate; CW, every 0.2 cm along the whole beam. Velocities are the
-  // components toward the transducer (positive = toward, above the baseline).
+  // around the gate; CW, every 0.12 cm along the whole beam. Velocities are the
+  // components toward the transducer (positive = toward, above the baseline);
+  // `t` holds each sample's velocity variance (0..1).
   _sweep(path, P, dir, gate, mode, cols, key) {
     const offs = [];
     if (mode === 'PW') for (let o = -0.15; o <= 0.151; o += 0.05) offs.push(gate.depth + o);
     else for (let dd = 0.4; dd <= this.depthCm * 0.98; dd += 0.12) offs.push(dd);
-    const cap = cols * offs.length;
-    const v = new Float32Array(cap), w = new Float32Array(cap), t = new Uint8Array(cap);
+    // CW insonates a beam a few mm wide: it is sampled on its axis and on four
+    // lines 2 mm off it (lateral and elevation), so a jet whose orifice drifts
+    // with the annulus through systole stays in the beam, as it does on a scanner
+    const lines = [[0, 0, 0, 1]];
+    if (mode === 'CW') {
+      const e1 = Math.abs(dir[1]) < 0.9 ? [dir[2], 0, -dir[0]] : [0, -dir[2], dir[1]];
+      const l1 = Math.hypot(...e1); for (let k = 0; k < 3; k++) e1[k] /= l1;
+      const e2 = [dir[1] * e1[2] - dir[2] * e1[1], dir[2] * e1[0] - dir[0] * e1[2], dir[0] * e1[1] - dir[1] * e1[0]];
+      for (const e of [e1, e2]) for (const sg of [0.2, -0.2]) lines.push([e[0] * sg, e[1] * sg, e[2] * sg, 0.6]);
+    }
+    const cap = cols * offs.length * lines.length;
+    const v = new Float32Array(cap), w = new Float32Array(cap), t = new Float32Array(cap);
     const start = new Int32Array(cols + 1), vs = new Float32Array(cols);
     let n = 0, posMax = 0, negMax = 0;
+    // tamponade: several beats across a breath (expiration, inspiration,
+    // expiration), each read from that respiratory phase's solved circulation
+    const beats = specBeats(path), nb = beats.length;
     for (let c = 0; c < cols; c++) {
       start[c] = n;
-      const Gp = geometryAt(c / cols, path);
+      const u = c * nb / cols, bi = Math.min(nb - 1, Math.floor(u));
+      const Gp = geometryAt(nb > 1 ? u - bi : c / cols, beats[bi]);
       let best = 0;
-      for (const dd of offs) {
-        const vel = velocityAt(P[0] + dir[0] * dd, P[1] + dir[1] * dd, P[2] + dir[2] * dd, Gp, path);
+      for (const ln of lines) for (const dd of offs) {
+        const vel = velocityAt(P[0] + ln[0] + dir[0] * dd, P[1] + ln[1] + dir[1] * dd, P[2] + ln[2] + dir[2] * dd, Gp, beats[bi]);
         if (!vel) continue;
         const vt = -(vel.vx * dir[0] + vel.vy * dir[1] + vel.vz * dir[2]);
         if (Math.abs(vt) < 0.02) continue;
-        v[n] = vt; w[n] = vel.turbulent ? 1.6 : 1; t[n] = vel.turbulent ? 1 : 0; n++;
+        const vr = vel.variance || 0;
+        v[n] = vt; w[n] = (1 + 0.6 * vr) * ln[3]; t[n] = vr; n++;
         if (Math.abs(vt) > Math.abs(best)) best = vt;
       }
       const vc = best;            // the modal (brightest-edge) velocity of the column
@@ -2007,20 +2272,20 @@ export class EchoView {
       if (-best > negMax) negMax = -best;
     }
     start[cols] = n;
-    return { key, path, v, w, t, start, vs, posMax, negMax };
+    return { key, path, v, w, t, start, vs, posMax, negMax, nb };
   }
 
   // ECG strip and time scale under the spectrum (0.1 s ticks, 0.5 s major).
-  _drawEcg(ctx, W, H, plotH, G) {
+  _drawEcg(ctx, W, H, plotH, G, nb = 1) {
     ctx.fillStyle = '#04060a';
     ctx.fillRect(0, plotH, W, H - plotH);
     const mid = plotH + (H - plotH) * 0.62, amp = (H - plotH) * 0.5;
     ctx.strokeStyle = 'rgba(90,230,120,0.85)';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    for (let x = 0; x <= W; x += 1) { const y = mid - ecgAt(x / W) * amp; if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
+    for (let x = 0; x <= W; x += 1) { const y = mid - ecgAt((x / W * nb) % 1) * amp; if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
     ctx.stroke();
-    const rr = this.rrSec || 0.833;
+    const rr = (this.rrSec || 0.833) * nb;
     ctx.strokeStyle = 'rgba(150,200,240,0.55)';
     for (let k = 0, ts = 0; ts <= rr + 1e-6; k++, ts = k * 0.1) {
       const x = ts / rr * W, major = k % 5 === 0;
@@ -2033,22 +2298,45 @@ export class EchoView {
   }
 }
 
-// Map a line-of-sight velocity (m/s) to an RGB colour using BART convention.
-// Negative los = towards probe = RED/orange. Positive = away = BLUE/cyan.
+// Beats shown across the spectral display: one cycle, or for tamponade three
+// beats over a breath (expiration, inspiration, expiration) so the reciprocal
+// respiratory swing of mitral and tricuspid inflow shows. The path objects are
+// built once per case so the per-case caches stay warm.
+const _beatCache = new WeakMap();
+function specBeats(path) {
+  if (!path || !path.tamponade) return [path];
+  let b = _beatCache.get(path);
+  if (!b) {
+    const ex = { ...path, resp: 'exp' }, ins = { ...path, resp: 'insp' };
+    b = [ex, ins, ex];
+    _beatCache.set(path, b);
+  }
+  return b;
+}
+
+// Map a line-of-sight velocity (m/s) and a velocity variance (0..1) to RGB: a
+// BART-plus-variance map. Negative los = towards probe = RED/yellow; positive =
+// away = BLUE/cyan; variance adds GREEN in proportion while keeping the direction
+// hue (towards + variance -> yellow-green, away + variance -> cyan-green), the
+// 2-D map the colour bar shows.
 // Aliasing is decoupled from brightness: the WRAPPED value only picks the hue /
-// red-vs-blue direction (so a fast jet still wraps into a mosaic), while the
-// TRUE (pre-wrap) flow strength drives intensity so a fast jet stays bright
-// instead of going black at every Nyquist multiple. Turbulence adds green.
-function dopplerColor(los, nyq, turbulent, jitter) {
+// red-vs-blue direction (so a fast laminar jet still wraps into a clean
+// reversal), while the TRUE (pre-wrap) flow strength drives intensity. In a
+// high-variance cell the mean of the broad spectrum still leans the flow's way,
+// so the hue follows the true direction (with a random magnitude), and only an
+// occasional cell wraps.
+export function dopplerColor(los, nyq, variance, jitter) {
   const raw = Number.isFinite(los) ? los : 0;
   const jit = Number.isFinite(jitter) ? jitter : 0;
-  // wrapped value chooses hue/direction (constant time, finite-safe). A small
-  // position-seeded jitter perturbs los ONLY for the wrap decision, dithering the
-  // aliasing boundary so hue-wrap stripes dissolve into a natural mosaic. The
-  // brightness envelope below uses the UNPERTURBED strength, so the jitter shifts
-  // only where the wrap lands, never how bright the flow reads.
+  const vr = typeof variance === 'number' ? clamp(variance, 0, 1) : (variance ? 0.85 : 0);
   const wrapArg = raw + jit;
-  const v = wrapArg - 2 * nyq * Math.round(wrapArg / (2 * nyq));
+  let v = wrapArg - 2 * nyq * Math.round(wrapArg / (2 * nyq));
+  if (vr > 0.45 && Math.abs(raw) > nyq) {
+    // mosaic core: direction from the true flow except where the jitter is large
+    const keep = Math.abs(jit) < 0.9 * nyq;
+    const m = Math.abs(v);
+    v = keep ? (raw < 0 ? -m : m) : v;
+  }
   const mag = clamp(Math.abs(v) / nyq, 0, 1);       // wrapped magnitude -> hue saturation
   const trueMag = clamp(Math.abs(raw) / nyq, 0, 1); // pre-wrap strength -> brightness
   const i = 0.45 + 0.55 * trueMag; // intensity envelope (bright for fast jets)
@@ -2058,11 +2346,9 @@ function dopplerColor(los, nyq, turbulent, jitter) {
   } else {
     r = 25 * i; g = (30 + 200 * mag * mag) * i; b = (150 + 105 * mag) * i;
   }
-  if (turbulent) {
-    const t = 0.5;
-    r = r * (1 - t) + 120 * t;
-    g = g * (1 - t) + 235 * t;
-    b = b * (1 - t) + 90 * t;
+  if (vr > 0) {
+    r *= 1 - 0.35 * vr; b *= 1 - 0.35 * vr;
+    g = Math.min(255, g + 180 * vr);
   }
   return [r, g, b];
 }

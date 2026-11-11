@@ -10,10 +10,10 @@ import { buildReport, reportText, fillTemplate, TEMPLATES, TEMPLATE_FOR, DEFAULT
 import { initFeedback } from './feedback.js';
 import { initPathway } from './pathway-ui.js';
 import { Heart3D } from './heart3d.js';
-import { EchoView } from './echo.js';
+import { EchoView, colourDefault, dopplerColor } from './echo.js';
 import { MeasureTool } from './measure.js';
 import { vadd, vsub, vscale, vdot, vcross, norm, vrot } from './mathutils.js';
-import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, makeProbe } from './views.js';
+import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, makeProbe, teeManipulate, teeOmni } from './views.js';
 import { Heartbeat, vcgToLeads, LEAD_NAMES, PH_AVO, PH_AVC, PH_MVO, PH_ATR } from './electrophysiology.js';
 import { RWMA_SCENARIOS, DCM_SEVERITIES } from './scenarios.js';
 import { PlaybackClock } from './playback-clock.js';
@@ -30,13 +30,15 @@ const viewDepth = (name) => (TTE_VIEWS[name] || EXTRA_VIEWS[name] || {}).depth |
 const VIEW_LABEL = {
   PSAX_AV: 'PSAX-AV', MELAA: 'ME LAA', PSAX_MV: 'PSAX-MV', RVIT: 'RV inflow', SC_IVC: 'Subcostal IVC',
   SSN: 'Suprasternal', ME2C: 'ME 2C', MEAVSAX: 'ME AV SAX', MEBICAVAL: 'ME bicaval', MERVIO: 'ME RV in-out',
-  DESCAO: 'Desc Ao SAX',
+  DESCAO: 'Desc Ao SAX', MEAVLAX: 'ME AV LAX', MECOMM: 'ME commissural', TG2C: 'TG 2C', TGLAX: 'TG LAX',
+  DTG5C: 'Deep TG 5C', DESCAOLAX: 'Desc Ao LAX',
 };
 
 // Transesophageal (TEE) window set (views.js): a higher-frequency probe in the
 // oesophagus directly behind the left atrium, so the atria sit in the near field.
 const TEE_CAM = { ME4C: 'A4C', MELAX: 'PLAX', TGSAX: 'PSAX', MELAA: 'A2C', ME2C: 'A2C', MEAVSAX: 'PSAX_AV',
-  MEBICAVAL: 'SUBCOSTAL', MERVIO: 'PSAX_AV', DESCAO: 'PSAX' }; // reuse a sensible 3D camera
+  MEBICAVAL: 'SUBCOSTAL', MERVIO: 'PSAX_AV', DESCAO: 'PSAX', MEAVLAX: 'PLAX', MECOMM: 'A2C', TG2C: 'A2C',
+  TGLAX: 'PLAX', DTG5C: 'A4C', DESCAOLAX: 'PSAX' }; // reuse a sensible 3D camera
 
 const PATHOLOGY = {
   normal:    { flags: {}, view: 'PLAX', name: 'Normal heart',
@@ -53,6 +55,8 @@ const PATHOLOGY = {
     text: 'After a myocardial infarction one territory stops contracting. <span class="cue">Watch the <b>septal</b> wall fail to thicken and move inward in systole while the other walls contract normally — regional, not global, dysfunction. Overall EF is reduced.</span>' },
   effusion: { flags: { effusion: true }, view: 'PLAX', name: 'Pericardial effusion',
     text: 'Fluid collects in the pericardial sac. <span class="cue">An echo-free (black) space surrounding the heart, typically first seen posteriorly/inferiorly.</span>' },
+  tamponade: { flags: { effusion: true, tamponade: true }, view: 'A4C', name: 'Cardiac tamponade',
+    text: 'The effusion is under pressure: the pericardial pressure exceeds the right heart\'s filling pressure. <span class="cue">The RA free wall <b>inverts</b> from late diastole into systole and the RV free wall is pushed in in early diastole; the IVC is plethoric; mitral and tricuspid inflow swing in opposite directions with respiration (PW shows several breaths).</span>' },
   vsd: { flags: { vsd: true }, view: 'A4C', name: 'Ventricular septal defect',
     text: 'A hole in the interventricular septum shunts blood LV → RV. <span class="cue">A turbulent systolic jet crossing the septum at high velocity (left-to-right shunt).</span>' },
   asd: { flags: { asd: true }, view: 'SUBCOSTAL', name: 'Atrial septal defect',
@@ -72,6 +76,7 @@ const CHECKS = {
   dcm:      { look: ['Enlarged rounded LV', 'Little wall thickening', 'Low EF'], hint: 'Compare LVIDd and EF in Measurements against a normal heart.' },
   rwma:     { look: ['One akinetic wall segment', 'Thinned, bright scar', 'Normal thickening elsewhere', 'Reduced global EF'], hint: 'Pause in systole and watch the septum fail to thicken while the lateral wall does.' },
   effusion: { look: ['Echo-free rim around the heart', 'Largest posteriorly', 'Anterior to the descending aorta'], hint: 'Look behind the LV posterior wall for the dependent black crescent.' },
+  tamponade: { look: ['RA free-wall inversion (> 1/3 of the cycle)', 'RV early-diastolic collapse', 'Plethoric IVC', 'Mitral E falls > 25% in inspiration, tricuspid E rises > 40%'], hint: 'A4C: scrub through late diastole and early systole to catch the RA wall folding in; then PW the mitral and tricuspid inflow over several breaths.' },
   vsd:      { look: ['Interventricular septum', 'Systolic jet LV→RV', 'Turbulent mosaic'], hint: 'Centre the septum and pause in systole to catch the trans-septal jet.' },
   asd:      { look: ['Interatrial septum', 'Flow LA→RA', 'Dilated right heart'], hint: 'Use the subcostal window where the atrial septum lies across the beam.' },
   tr:       { look: ['Tricuspid valve', 'Systolic jet into the RA', 'Peak jet velocity → PA pressure'], hint: 'Peak TR velocity estimates pulmonary pressures — read it off the trace.' },
@@ -97,6 +102,9 @@ const state = {
   playing: true,
   hr: 72,
   az: 0, tilt: 0, slide: 0,
+  // TEE probe manipulation (views.js teeManipulate): omniplane angle (null = the
+  // view's own), advance (+) / withdraw (cm), shaft turn and tip flexion (deg)
+  tee: { omni: null, adv: 0, rot: 0, flex: 0 },
   lastT: performance.now(),
 };
 
@@ -108,6 +116,10 @@ function effectiveProbe(A) {
   const vw = TTE_VIEWS[state.viewName] || EXTRA_VIEWS[state.viewName] || TEE_VIEWS[state.viewName];
   const trk = A && vw && vw.track;
   if (trk) { const o = trk(A); pos = vadd(pos, o); target = vadd(target, o); }
+  const tm = state.tee;
+  if (TEE_VIEWS[state.viewName] && (tm.omni != null || tm.adv || tm.rot || tm.flex)) {
+    ({ pos, dir, lat, normal, target } = teeManipulate({ pos, dir, lat, normal, target }, { omni: tm.omni, advance: tm.adv, rotate: tm.rot, flex: tm.flex }));
+  }
   const Y = [0, 1, 0];
   if (state.az) {
     const a = state.az * Math.PI / 180;
@@ -161,6 +173,7 @@ let vcgHead = 0, vcgFilled = 0;
 let ecgLead = 'II';                 // lead shown in the top-bar rhythm strip
 const playback = new PlaybackClock(heart, pushVcg, ECG_FS, ECG_SECONDS);
 window.echosim.playback = playback;
+window.echosim.heart3d = heart3d;   // (3D panel state for the capture tools: bake / context readiness)
 
 function pushVcg(v) {
   vcgBuf[vcgHead * 3] = v[0]; vcgBuf[vcgHead * 3 + 1] = v[1]; vcgBuf[vcgHead * 3 + 2] = v[2];
@@ -261,8 +274,27 @@ function drawLead(ctx, W, H, leadName, secShown, opts = {}) {
 
 // Colour-bar velocity labels: +/- the colour box's Nyquist limit in cm/s (the
 // box depth sets the PRF, so the limit can sit below the slider setting).
-let _cbarNyq = -1;
+let _cbarNyq = -1, _cbarMap = false;
+// The colour bar is the 2-D map the image uses: velocity down the bar (toward
+// the probe at the top), velocity variance across it (green growing to the right).
+function paintColorMap() {
+  const bar = document.querySelector('.ds-bar');
+  if (!bar) return;
+  try {
+    const cv = document.createElement('canvas'), W = 16, H = 128;
+    cv.width = W; cv.height = H;
+    const c = cv.getContext('2d'), im = c.createImageData(W, H);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const los = -(1 - 2 * (y + 0.5) / H), col = dopplerColor(los, 1, x / (W - 1), 0), o = (y * W + x) * 4;
+      im.data[o] = col[0]; im.data[o + 1] = col[1]; im.data[o + 2] = col[2]; im.data[o + 3] = 255;
+    }
+    c.putImageData(im, 0, 0);
+    bar.style.backgroundImage = `url(${cv.toDataURL()})`;
+    bar.style.backgroundSize = '100% 100%';
+  } catch (e) { /* keep the CSS gradient */ }
+}
 function updateColorScale() {
+  if (!_cbarMap) { _cbarMap = true; paintColorMap(); }
   const nq = Math.round((echo.colorNyquist || echo.nyquist) * 100);
   if (nq === _cbarNyq) return;
   _cbarNyq = nq;
@@ -651,6 +683,15 @@ function setView(name) {
     heart3d.setCameraForView(name);
   }
   state.az = 0; state.tilt = 0; state.slide = 0;
+  state.tee = { omni: null, adv: 0, rot: 0, flex: 0 };
+  {
+    // the TEE probe readouts start at the view's own omniplane angle
+    const om = tee ? Math.round(Math.min(180, Math.max(0, teeOmni(state.baseProbe)))) : 0;
+    setRange('omni', om, 'omniOut', om + '°', om + '°');
+    setRange('adv', 0, 'advOut', '0', '0 cm'); setRange('rot', 0, 'rotOut', '0°', '0°'); setRange('flex', 0, 'flexOut', '0°', '0°');
+    const ctl = document.getElementById('teeProbeCtl');
+    if (ctl) ctl.classList.toggle('hidden', !tee);
+  }
   setRange('az', 0, 'azOut', '0°', '0°');
   setRange('tilt', 0, 'tiltOut', '0°', '0°');
   setRange('slide', 0, 'slideOut', '0', '0 cm');
@@ -660,8 +701,19 @@ function setView(name) {
     b.classList.toggle('active', on);
     b.setAttribute('aria-pressed', on ? 'true' : 'false');
   });
+  applyColourDefault(name);
   updateProbeInfo(tee);
   updatePlaneFlag();
+}
+// Colour Doppler on or off as the view loads (colourDefault: off where it would
+// hide a morphological lesion, e.g. AS cusps or MS leaflets). In a hidden-diagnosis
+// case colour stays on, so its state never gives the answer away.
+function applyColourDefault(name) {
+  const hidden = challenge.active || pathwayCase.active;
+  const on = hidden ? true : colourDefault(name, state.path || {});
+  echo.colorOn = on;
+  const c = document.getElementById('colorOn');
+  if (c) c.checked = on;
 }
 
 // Scanner-style probe banner. Real machines annotate the active imaging mode on
@@ -895,6 +947,16 @@ bind('az', 'azOut', (v) => { state.az = v; updatePlaneFlag(); }, '°', '°');
 bind('tilt', 'tiltOut', (v) => { state.tilt = v; updatePlaneFlag(); }, '°', '°');
 bind('slide', 'slideOut', (v) => { state.slide = v; updatePlaneFlag(); }, '', ' cm');
 bind('depth', 'depthOut', (v) => (state.depthCm = v), '', ' cm');
+// TEE probe: omniplane angle, advance / withdraw (slider in mm), turn and flex
+bind('omni', 'omniOut', (v) => { state.tee.omni = v; }, '°', '°');
+document.getElementById('adv').addEventListener('input', (e) => {
+  state.tee.adv = +e.target.value / 10;
+  const t = state.tee.adv.toFixed(1);
+  document.getElementById('advOut').textContent = t;
+  e.target.setAttribute('aria-valuetext', t + ' cm');
+});
+bind('rot', 'rotOut', (v) => { state.tee.rot = v; }, '°', '°');
+bind('flex', 'flexOut', (v) => { state.tee.flex = v; }, '°', '°');
 bind('gain', 'gainOut', (v) => (echo.gain = v));
 bind('nyq', 'nyqOut', (v) => (echo.nyquist = v), '', ' m/s');
 bind('pers', 'persOut', (v) => (echo.persistence = v));
@@ -929,6 +991,8 @@ document.getElementById('labelsOn').addEventListener('change', (e) => (echo.show
 document.getElementById('flowOn').addEventListener('change', (e) => (heart3d.showFlow = e.target.checked));
 document.getElementById('transp').addEventListener('change', (e) => (heart3d.transparent = e.target.checked));
 document.getElementById('fibersOn').addEventListener('change', (e) => heart3d.showFibers(e.target.checked));
+document.getElementById('thoraxOn').addEventListener('change', (e) => (heart3d.showContext = e.target.checked));
+document.getElementById('labels3dOn').addEventListener('change', (e) => (heart3d.showLabels = e.target.checked));
 
 document.getElementById('resetPlane').addEventListener('click', () => { setView(state.viewName); });
 
@@ -958,7 +1022,8 @@ function resetAll() {
   setRange('pers', 0, 'persOut', '0', '0');
   const toggles = [['elevOn', (v) => (echo.elevation = v)],
     ['colorOn', (v) => (echo.colorOn = v)], ['labelsOn', (v) => (echo.showLabels = v)],
-    ['flowOn', (v) => (heart3d.showFlow = v)], ['transp', (v) => (heart3d.transparent = v)]];
+    ['flowOn', (v) => (heart3d.showFlow = v)], ['transp', (v) => (heart3d.transparent = v)],
+    ['thoraxOn', (v) => (heart3d.showContext = v)], ['labels3dOn', (v) => (heart3d.showLabels = v)]];
   toggles.forEach(([id, fn]) => { const c = document.getElementById(id); if (c) { c.checked = true; fn(true); } });
   // plane offsets (az/tilt/slide) reset via setView, which also clears the flag
   setView(state.viewName);
@@ -1150,6 +1215,7 @@ const SIGNATURE = {
   dcm:      'a dilated, poorly-contracting LV with a low EF',
   rwma:     'a single akinetic wall segment with normal thickening elsewhere',
   effusion: 'an echo-free fluid rim surrounding the heart',
+  tamponade: 'an effusion compressing the right heart: RA inversion, RV diastolic collapse, plethoric IVC',
   vsd:      'a systolic shunt jet crossing the VENTRICULAR septum',
   asd:      'a low-velocity shunt across the ATRIAL septum',
   tr:       'a systolic regurgitant jet INTO the right atrium',
@@ -1316,6 +1382,7 @@ function simLoad({ path: key = 'normal', grade = 'severe', view, rwma, dcmSeveri
   setGradeButtons(grade);
   if (hidden) {
     pathwayCase.active = true;
+    applyColourDefault(state.viewName);
     lockForCase(true);
     setViewTagHidden(hideView);
     if (hideView) document.querySelectorAll('[data-view]').forEach((b) => { b.classList.remove('active'); b.setAttribute('aria-pressed', 'false'); });
