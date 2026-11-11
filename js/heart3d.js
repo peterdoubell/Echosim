@@ -9,6 +9,7 @@ import { geometryAt, velocityAt, VALVE_DEFS } from './cardiac-model.js';
 import { myoDist, lumenDist, LM } from './anatomy.js';
 import { buildMesh } from './marching.js';
 import { VESSELS, VESSEL_BOX, VESSEL_CELL } from './vessels3d.js';
+import { CONTEXT, buildContext, structureLabels, cameraDir, CAMERA_UP } from './thorax3d.js';
 
 const MUSCLE = 0x8a3330;
 // Chamber tints. Ventricles read bright; atria are a touch deeper/darker and
@@ -49,7 +50,10 @@ export class Heart3D {
     this.scene.background = new THREE.Color(0x0a0e16);
 
     this.camera = new THREE.PerspectiveCamera(42, w / h, 0.1, 200);
-    this.camera.position.set(11, 4, 13);
+    // patient-superior up (set before the orbit controls, which orbit about it),
+    // so every preset shows the heart head-up as in an anatomical view
+    this.camera.up.set(CAMERA_UP[0], CAMERA_UP[1], CAMERA_UP[2]);
+    this.camera.position.set(...cameraDir('default').map((v) => v * 18));
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
@@ -69,10 +73,13 @@ export class Heart3D {
     rim.position.set(-9, 2, -8);
     this.scene.add(rim);
 
-    // subtle ground grid for spatial reference
+    // subtle ground grid for spatial reference, level in the patient's frame
+    // (normal = superior) below the liver
     const grid = new THREE.GridHelper(40, 40, 0x1f3550, 0x14202f);
-    grid.position.y = BBOX.min[1] - 1.2;                // just below the apex
+    grid.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(...CAMERA_UP));
+    grid.position.set(...CAMERA_UP.map((v) => v * -19));
     this.scene.add(grid);
+    this.grid = grid;
 
     this.heartGroup = new THREE.Group();
     this.scene.add(this.heartGroup);
@@ -80,6 +87,7 @@ export class Heart3D {
     this._buildHeart();
     this._buildProbe();
     this._buildFlow();
+    this._buildContext();
 
     window.addEventListener('resize', () => this._resize());
     this.showFlow = true;
@@ -181,6 +189,75 @@ export class Heart3D {
     this._maxPhasesPerTick = 4;
     this._tickEMA = null;        // EMA of per-phase bake cost (ms)
     this._bakeInitial();
+  }
+
+  // Thoracic context (thorax3d.js): translucent lungs, diaphragm, liver,
+  // oesophagus and stomach, pericardial sac and chest wall around the heart, so
+  // the probe's position in the body reads at a glance; plus text labels for the
+  // LAA, the pulmonary veins, the cavae, the great arteries and the organs. The
+  // meshes are baked in a worker (main-thread fallback) after the first frame;
+  // they are static (end-diastolic anatomy) and live outside heartGroup so the
+  // camera presets still frame the heart.
+  _buildContext() {
+    this.contextGroup = new THREE.Group();
+    this.scene.add(this.contextGroup);
+    this.contextMeshes = {};
+    CONTEXT.forEach((c, i) => {
+      const m = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshStandardMaterial({
+        color: c.color, transparent: true, opacity: c.opacity, roughness: 0.7, metalness: 0,
+        side: c.back ? THREE.BackSide : THREE.FrontSide, depthWrite: false,
+      }));
+      m.renderOrder = i < 2 ? 0 : 1;            // chest wall and lungs first, organs, then the heart
+      this.contextMeshes[c.key] = m;
+      this.contextGroup.add(m);
+    });
+    this.labelGroup = new THREE.Group();
+    this.scene.add(this.labelGroup);
+    const L = structureLabels(geometryAt(0, {}).A);
+    for (const [t, p] of L.heart) this.labelGroup.add(this._label(t, p, '#ffe9a8'));
+    this.ctxLabels = new THREE.Group();
+    for (const [t, p] of L.context) this.ctxLabels.add(this._label(t, p, '#b9c7dc'));
+    this.contextGroup.add(this.ctxLabels);
+    this.contextReady = false;
+    this._contextPromise = new Promise((resolve) => {
+      const bind = (meshes) => {
+        for (const k in meshes) if (meshes[k] && this.contextMeshes[k]) this.contextMeshes[k].geometry = this._geometryFromMesh(meshes[k]);
+        this.contextReady = true;
+        resolve(true);
+      };
+      const local = () => requestAnimationFrame(() => bind(buildContext(geometryAt(0, {}).A, buildMesh, BBOX)));
+      if (typeof Worker === 'undefined') { local(); return; }
+      try {
+        const wk = new Worker(new URL('./thorax-mesh-worker.js', import.meta.url), { type: 'module' });
+        wk.onmessage = ({ data }) => { wk.terminate(); bind(data.meshes); };
+        wk.onerror = (e) => { e.preventDefault(); wk.terminate(); local(); };
+        wk.postMessage({ heartBox: BBOX });
+      } catch (err) { local(); }
+    });
+    this.showContext = true;
+    this.showLabels = true;
+  }
+
+  // a camera-facing text label anchored at world point p (cm), ~0.9 cm cap height
+  _label(text, p, color) {
+    const cv = document.createElement('canvas'), fs = 44;
+    const ctx = cv.getContext('2d');
+    ctx.font = `600 ${fs}px system-ui, sans-serif`;
+    const w = Math.ceil(ctx.measureText(text).width) + 20;
+    cv.width = w; cv.height = fs + 16;
+    ctx.font = `600 ${fs}px system-ui, sans-serif`;
+    ctx.textBaseline = 'middle';
+    ctx.lineWidth = 8; ctx.strokeStyle = 'rgba(6,10,18,0.9)'; ctx.strokeText(text, 10, cv.height / 2);
+    ctx.fillStyle = color; ctx.fillText(text, 10, cv.height / 2);
+    const tex = new THREE.CanvasTexture(cv);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, depthWrite: false, transparent: true }));
+    const h = 1.15;
+    sp.scale.set(h * cv.width / cv.height, h, 1);
+    sp.position.set(p[0], p[1], p[2]);
+    sp.renderOrder = 10;
+    sp.userData.label = text;
+    return sp;
   }
 
   // Initial normal-heart bake. Phase 0 is baked synchronously so the very first
@@ -767,6 +844,11 @@ export class Heart3D {
       this.flowPoints.visible = false;
     }
 
+    this.contextGroup.visible = !!this.showContext;
+    this.grid.visible = !this.showContext;           // the thorax is the reference frame then
+    this.labelGroup.visible = !!this.showLabels;
+    this.ctxLabels.visible = !!this.showLabels;
+
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
   }
@@ -851,10 +933,9 @@ export class Heart3D {
   setCameraForView(name) {
     // Per-view direction, but distance is derived from the heart's bounding
     // sphere so every view is framed consistently (never oversized/clipped).
-    const dirs = {
-      PLAX: [12, 2, 6], A4C: [2, -3, 15], PSAX: [3, 12, 4], PSAX_AV: [3, 10, 5], SUBCOSTAL: [4, -8, 11], A2C: [13, 1, 3],
-    };
-    const dir = new THREE.Vector3(...(dirs[name] || [11, 4, 13])).normalize();
+    // (thorax3d CAMERA_PRESETS: patient-superior up, the SVC to the patient's
+    // right of the ascending aorta in every preset)
+    const dir = new THREE.Vector3(...cameraDir(name)).normalize();
     const box = new THREE.Box3().setFromObject(this.heartGroup);
     if (box.isEmpty()) { // no geometry yet — fall back to a fixed frame
       this.camera.position.copy(dir.multiplyScalar(18));

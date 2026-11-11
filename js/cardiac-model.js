@@ -1083,7 +1083,7 @@ function valveTissue(px, py, pz, G, path) {
     if (!hit && isCusp && open < 0.25 * (asv ? AS_OPEN : 1)) {
       const angDist = Math.abs(kh) / 3;                   // angular distance to a commissure
       const rho = rad / v.r;
-      if (rho < 0.92 && angDist * rad < 0.07 * (asv ? 1.8 : 1)) {
+      if (rho < 0.92 && angDist * rad < (asv ? 0.126 : 0.04)) {
         const tb = 1 - rho;
         const base = SL_COAPT * tb - SL_SAG * Math.sin(Math.PI * tb);
         const top = SL_COAPT + SL_COAPT_H + rho * (cd - SL_COAPT - SL_COAPT_H);
