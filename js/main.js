@@ -10,7 +10,11 @@ import { buildReport, reportText, fillTemplate, TEMPLATES, TEMPLATE_FOR, DEFAULT
 import { initFeedback } from './feedback.js';
 import { initPathway } from './pathway-ui.js';
 import { Heart3D } from './heart3d.js';
+<<<<<<< HEAD
 import { EchoView, colourDefault } from './echo.js';
+=======
+import { EchoView, dopplerColor } from './echo.js';
+>>>>>>> wi11/doppler
 import { MeasureTool } from './measure.js';
 import { vadd, vsub, vscale, vdot, vcross, norm, vrot } from './mathutils.js';
 import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, makeProbe, teeManipulate, teeOmni } from './views.js';
@@ -274,8 +278,27 @@ function drawLead(ctx, W, H, leadName, secShown, opts = {}) {
 
 // Colour-bar velocity labels: +/- the colour box's Nyquist limit in cm/s (the
 // box depth sets the PRF, so the limit can sit below the slider setting).
-let _cbarNyq = -1;
+let _cbarNyq = -1, _cbarMap = false;
+// The colour bar is the 2-D map the image uses: velocity down the bar (toward
+// the probe at the top), velocity variance across it (green growing to the right).
+function paintColorMap() {
+  const bar = document.querySelector('.ds-bar');
+  if (!bar) return;
+  try {
+    const cv = document.createElement('canvas'), W = 16, H = 128;
+    cv.width = W; cv.height = H;
+    const c = cv.getContext('2d'), im = c.createImageData(W, H);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const los = -(1 - 2 * (y + 0.5) / H), col = dopplerColor(los, 1, x / (W - 1), 0), o = (y * W + x) * 4;
+      im.data[o] = col[0]; im.data[o + 1] = col[1]; im.data[o + 2] = col[2]; im.data[o + 3] = 255;
+    }
+    c.putImageData(im, 0, 0);
+    bar.style.backgroundImage = `url(${cv.toDataURL()})`;
+    bar.style.backgroundSize = '100% 100%';
+  } catch (e) { /* keep the CSS gradient */ }
+}
 function updateColorScale() {
+  if (!_cbarMap) { _cbarMap = true; paintColorMap(); }
   const nq = Math.round((echo.colorNyquist || echo.nyquist) * 100);
   if (nq === _cbarNyq) return;
   _cbarNyq = nq;
