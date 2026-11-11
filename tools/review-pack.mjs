@@ -23,7 +23,7 @@ import zlib from 'zlib';
 import { execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { geometryAt, classify, TISSUE } from '../js/cardiac-model.js';
-import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS } from '../js/views.js';
+import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, teeManipulate } from '../js/views.js';
 import { hemoSummary } from '../js/hemodynamics.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -37,22 +37,27 @@ const PATHS = {
   asd: { asd: true }, vsd: { vsd: true }, rwma: { rwma: 'septal' }, tr: { tr: true },
 };
 const TTE_ALL = 'PLAX,PSAX,PSAX_AV,PSAX_MV,A4C,A5C,A2C,A3C,SUBCOSTAL,RVIT,SC_IVC,SSN';
-const TEE_ALL = 'ME4C,ME2C,MELAX,MEAVSAX,MEBICAVAL,MERVIO,MELAA,TGSAX,DESCAO';
+const TEE_ALL = 'ME4C,MECOMM,ME2C,MELAX,MEAVLAX,MEAVSAX,MEBICAVAL,MERVIO,MELAA,TGSAX,TG2C,TGLAX,DTG5C,DESCAO,DESCAOLAX';
 // [scene dir, pathology key, views, phase]
 let ECHO_SCENES = [
   ['normal_ED', 'normal', TTE_ALL, 0.99], ['normal_ES', 'normal', 'PLAX,PSAX,PSAX_AV,PSAX_MV,A4C,A2C,SUBCOSTAL', 0.42],
   ['normal_TEE', 'normal', TEE_ALL, 0.99],
-  ['dcm', 'dcm', 'A4C,PSAX,PLAX', 0.99], ['as', 'as', 'PLAX,PSAX_AV', 0.2], ['mr', 'mr', 'A4C,PLAX', 0.25],
+  ['dcm', 'dcm', 'A4C,PSAX,PLAX', 0.99], ['as', 'as', 'PLAX,PSAX_AV,A5C,DTG5C', 0.2], ['mr', 'mr', 'A4C,PLAX', 0.25],
   ['ms', 'ms', 'PSAX_MV,A4C,PLAX', 0.62], ['phtn', 'phtn', 'PSAX,A4C', 0.3], ['eff', 'effusion', 'PLAX,A4C,SUBCOSTAL', 0.99],
-  ['asd', 'asd', 'SUBCOSTAL,A4C,MEBICAVAL', 0.5], ['vsd', 'vsd', 'A4C,PSAX', 0.25], ['rwma', 'rwma', 'PSAX,A4C', 0.42],
+  ['asd', 'asd', 'SUBCOSTAL,A4C,MEBICAVAL,MEAVSAX', 0.5], ['vsd', 'vsd', 'A4C,PSAX', 0.25], ['rwma', 'rwma', 'PSAX,A4C', 0.42],
   ['tr', 'tr', 'A4C,RVIT', 0.25],
+  // tamponade: RA inversion (late diastole into early systole) and RV early-diastolic collapse
+  ['tamp_RAinv', 'tamponade', 'A4C,SUBCOSTAL,SC_IVC', 0.05], ['tamp_RVcol', 'tamponade', 'PLAX,PSAX', 0.55],
 ];
+// TEE omniplane sweep from the ME4C probe position: [scene dir, view, omniplane angles]
+let OMNI_SCENES = [['tee_omni', 'ME4C', [0, 60, 90, 130]]];
 let TISSUE_SCENES = [
   ['normal_ED', 'normal', `${TTE_ALL},${TEE_ALL}`, 0.99], ['normal_ES', 'normal', `${TTE_ALL},${TEE_ALL}`, 0.42],
   ...['dcm', 'as', 'mr', 'ms', 'phtn', 'effusion', 'asd', 'vsd', 'rwma', 'tr'].flatMap((p) => [
     [`${p}_ED`, p, 'PLAX,PSAX,PSAX_AV,PSAX_MV,A4C,A2C,SUBCOSTAL,ME4C,MEBICAVAL', 0.99],
     [`${p}_ES`, p, 'PLAX,PSAX,A4C,SUBCOSTAL', 0.42],
   ]),
+  ['tamponade_RAinv', 'tamponade', 'A4C,SUBCOSTAL,SC_IVC,PLAX,PSAX', 0.05], ['tamponade_RVcol', 'tamponade', 'A4C,SUBCOSTAL,PLAX,PSAX', 0.55],
 ];
 
 // quick single-scene mode
@@ -64,6 +69,7 @@ if (si > 0) {
   const dir = `${key}_${ph}`;
   ECHO_SCENES = [[dir, key, views, +ph]];
   TISSUE_SCENES = [[dir, key, views, +ph]];
+  OMNI_SCENES = [];
   QUICK = true;
 }
 
@@ -89,11 +95,13 @@ function png(w, h, rgb) {
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
 }
 const viewOf = (name) => TTE_VIEWS[name] || EXTRA_VIEWS[name] || TEE_VIEWS[name];
-function tissueMap(name, phase, flags, size = 420) {
+function tissueMap(name, phase, flags, size = 420, omni = null) {
   const v = viewOf(name), G = geometryAt(phase, flags);
-  const p = v.probe();
+  let p = v.probe();
   let pos = p.pos;
   if (v.track) { const o = v.track(G.A); pos = pos.map((x, i) => x + o[i]); }
+  // the TEE omniplane control turns the plane about the beam, as the app does
+  if (omni != null && TEE_VIEWS[name]) { p = teeManipulate({ ...p, pos }, { omni }); pos = p.pos; }
   const depth = v.depth || 16, half = 0.66, W = size, H = size;
   const sx = (2 * depth * Math.sin(half)) / W, sy = depth / H;
   const rgb = Buffer.alloc(W * H * 3);
@@ -111,6 +119,10 @@ if (!ONLY || ONLY === 'tissue') {
   for (const [dir, key, views, phase] of TISSUE_SCENES) {
     const d = path.join(OUT, 'tissue', dir); fs.mkdirSync(d, { recursive: true });
     for (const v of views.split(',')) fs.writeFileSync(path.join(d, `${v}.png`), tissueMap(v, phase, { ...PATHS[key], grade: 'severe' }));
+  }
+  for (const [dir, v, angles] of OMNI_SCENES) {
+    const d = path.join(OUT, 'tissue', dir); fs.mkdirSync(d, { recursive: true });
+    for (const a of angles) fs.writeFileSync(path.join(d, `${v}_omni${a}.png`), tissueMap(v, 0.99, {}, 420, a));
   }
   console.log('tissue maps done');
 }
@@ -150,6 +162,17 @@ if (!ONLY || ONLY === 'echo' || ONLY === '3d') {
       for (const v of views.split(',')) { await setScene(key, v, phase); await (await page.$('.viewEcho')).screenshot({ path: path.join(d, `${v}.png`) }); }
       console.log('echo', dir);
     }
+    for (const [dir, v, angles] of OMNI_SCENES) {
+      const d = path.join(OUT, 'echo', dir); fs.mkdirSync(d, { recursive: true });
+      for (const a of angles) {
+        await setScene('normal', v, 0.99);
+        await page.$eval('#omni', (el, x) => { el.value = String(x); el.dispatchEvent(new Event('input', { bubbles: true })); }, a);
+        await page.waitForTimeout(1300);
+        await (await page.$('.viewEcho')).screenshot({ path: path.join(d, `${v}_omni${a}.png`) });
+        if (a === angles[1]) { const c = await page.$('#teeProbeCtl'); if (c) await c.screenshot({ path: path.join(d, 'probe_controls.png') }); }
+      }
+      console.log('echo', dir);
+    }
   }
   if (!QUICK && (!ONLY || ONLY === '3d')) {
     const d = path.join(OUT, '3d'); fs.mkdirSync(d, { recursive: true });
@@ -159,7 +182,10 @@ if (!ONLY || ONLY === 'echo' || ONLY === '3d') {
       const ov = document.getElementById('rebuildOverlay'), h = window.echosim && window.echosim.heart3d;
       return (!ov || ov.classList.contains('hidden')) && (!h || h.contextReady !== false);
     }, null, { timeout: 90000 }).catch(() => {});
-    for (const v of ['PLAX', 'A4C', 'PSAX', 'SUBCOSTAL']) { await setScene('normal', v, 0.99); await ready3d(); await page.waitForTimeout(400); await (await page.$('.panel')).screenshot({ path: path.join(d, `${v}.png`) }); }
+    for (const v of ['PLAX', 'A4C', 'PSAX', 'SUBCOSTAL', 'ME4C']) { await setScene('normal', v, 0.99); await ready3d(); await page.waitForTimeout(400); await (await page.$('.panel')).screenshot({ path: path.join(d, `${v}.png`) }); }
+    // the heart alone: thoracic context and 3D labels off
+    await page.evaluate(() => { for (const id of ['thoraxOn', 'labels3dOn']) { const c = document.getElementById(id); if (c && c.checked) c.click(); } });
+    for (const v of ['A4C', 'PLAX']) { await setScene('normal', v, 0.99); await ready3d(); await page.waitForTimeout(400); await (await page.$('.panel')).screenshot({ path: path.join(d, `${v}_heart_only.png`) }); }
     console.log('3d done');
   }
   fs.writeFileSync(path.join(OUT, 'errors.json'), JSON.stringify(errors, null, 2));
