@@ -427,6 +427,8 @@ export const EXTRA_VIEWS = {
 };
 
 // ---- TEE -------------------------------------------------------------------
+// Multiplane TEE probes image a 90 deg sector (the TTE phased arrays here +/-0.66 rad)
+export const TEE_HALF = Math.PI / 4, TTE_HALF = 0.66;
 // The probe sits in the oesophagus directly behind the left atrium (just in
 // front of the descending aorta), so the atria are in the near field.
 const A0 = anatomyParams(0, 0, {}, null, 0);
@@ -475,43 +477,53 @@ export function teePathPoint(s) {
   else for (let i = 0; i + 1 < K.length; i++) if (s <= K[i + 1][0]) { r = K[i][1] + (K[i + 1][1] - K[i][1]) * (s - K[i][0]) / (K[i + 1][0] - K[i][0]); break; }
   return vadd(vadd(ESO, vscale(_S, s)), vscale(_ER, r));
 }
-const ME4C_RETRO = 0.4, ME4C_SWING = 1, ME4C_UP = 2;    // cm, deg, cm
-function me4cProbe() {
-  // The plane that cuts the interatrial septum at right angles through the fossa
-  // ovalis and runs down to the apex (both atria, the septum and any ASD / PFO in
-  // profile, both ventricles); the probe sits where the oesophagus meets it.
-  // (0 deg): the plane through both AV-valve centres and the true apex, so the
-  // crux, the atrial septum and both ventricles lie in plane with their true
-  // proportions. Retroflexed slightly: the base end of the plane is tipped
-  // ME4C_RETRO cm posterior, off the LVOT, so the non-coronary sinus is not cut
-  // tangentially against the upper septum (a crux 'mass') and the plane takes
-  // in the posterior (larger) part of the RA and the fossa ovalis.
-  const Mp = vadd(M, [0, 0, -ME4C_RETRO]), Tp = vadd(T, [0, 0, -ME4C_RETRO]);
-  const n = norm(vcross(vsub(Tp, Mp), vsub(APEX, Mp)));
-  // (the transducer withdrawn ME4C_UP cm up the oesophagus from the LA-level
-  // reference: the beam then runs further down the LV long axis, so the apex is
-  // not foreshortened against the right edge of the sector)
-  const eso = vadd(ESO, vscale(BODY_AX.S, ME4C_UP));
-  const pos = vsub(eso, vscale(n, vdot(vsub(eso, Mp), n)));
-  const crux = vscale(vadd(Mp, Tp), 0.5);
-  const tgt = vadd(crux, vscale(vsub(APEX, crux), 0.2));
-  let dir = norm(vsub(tgt, pos));
-  let right = vcross(n, dir);
-  if (vdot(right, vsub(M, T)) < 0) right = vscale(right, -1);   // LV on the right
-  // the beam swung ME4C_SWING toward the RA about the transducer (in plane): just
-  // enough to keep the RA and the fossa inside the left edge while the LV long axis
-  // stays within ~30 deg of the beam and the whole apex well inside the right edge
-  const sw = ME4C_SWING * Math.PI / 180;
-  dir = norm(vsub(vscale(dir, Math.cos(sw)), vscale(right, Math.sin(sw))));
-  const sd = vdot(vsub(tgt, pos), dir);
-  return teeClear(probeFrom(vadd(pos, vscale(dir, sd)), dir, right, sd));
+// The mid-oesophageal station: ONE probe position and beam from which the ME
+// four-chamber, commissural, two-chamber and long-axis views are reached by
+// turning the omniplane alone, as on a real multiplane probe. The transducer sits
+// on the oesophageal path ME_S cm above the LA-level reference (where the
+// oesophagus lies behind the mitral annulus), and the beam is aimed ME_AIM of the
+// way from the mitral-valve centre to the epicardial apex, ME_POST cm posterior
+// (heart -z, off the LVOT: the transducer any higher, or the aim any more
+// anterior, lays the aortic root wall in the four-chamber plane), so it runs within
+// ~10 deg of the LV long axis: the apex then stays within ~1 cm of the imaging
+// plane at every omniplane angle (rotation turns the plane about the beam, and
+// the beam runs down the LV) — the mitral valve centred and the LV apex in the
+// far field in each view.
+const ME_S = 0.5, ME_AIM = 0.65, ME_POST = 0.4;
+function meBaseProbe() {
+  const pos = teePathPoint(ME_S), tgt = vadd(vadd(M, vscale(vsub(APEX, M), ME_AIM)), [0, 0, -ME_POST]);
+  const dir = norm(vsub(tgt, pos));
+  const { lft } = teeFrame(dir);                     // 0 deg: the patient's left on the screen-right
+  return teeClear(probeFrom(tgt, dir, lft, Math.hypot(...vsub(tgt, pos))));
 }
-function melaxProbe() {
-  const tgt = vscale(vadd(A, M), 0.5);
-  const dir = norm(vsub(tgt, ESO));
-  // ME LAX (~130 deg): LVOT / aorta to the right of the screen
-  return teeClear(probeFrom(tgt, dir, vadd(Y, vscale(D_AO, 0.6)), vdot(vsub(tgt, ESO), dir)));
+// omniplane angle (deg, searched in [lo, hi]) of the ME station that lays point q in the plane
+function meOmniThrough(q, lo, hi) {
+  const b = meBaseProbe();
+  let best = null;
+  for (let o = lo; o <= hi + 1e-9; o += 0.25) {
+    const p = teeManipulate(b, { omni: o }), d = Math.abs(vdot(vsub(q, p.pos), p.normal));
+    if (!best || d < best.d) best = { o, d };
+  }
+  return best.o;
 }
+// ME4C (~0-10 deg): ME4C_TRIM beyond the omniplane angle that brings the
+// tricuspid-valve centre into the plane (the mitral valve is on the beam): both AV
+// valves, the crux and the atrial septum in profile, both ventricles, the LV apex
+// in the far field (the trim keeps the RV apex short of the LV's and the plane off
+// the aortic root through systole).
+// MECOMM = ME4C + 60 (P3-A2-P1 and both papillary muscles), ME2C = ME4C + 90
+// (the inferior wall and CS on the left, the anterior wall and LAA on the right),
+// MELAX = the angle that brings the aortic-valve centre into the plane (~150 deg:
+// the LVOT, cusps and root to the screen-right, the inferolateral wall on the left).
+const ME4C_TRIM = 0.75;                                // deg
+let _meOm = null;
+const meOmni = () => _meOm || (_meOm = (() => {
+  const o4 = meOmniThrough(T, -15, 40) + ME4C_TRIM;
+  return { ME4C: o4, MECOMM: o4 + 60, ME2C: o4 + 90, MELAX: meOmniThrough(A, 110, 175) };
+})());
+const meView = (key) => { let c = null; return () => { if (!c) c = teeManipulate(meBaseProbe(), { omni: meOmni()[key] }); return { ...c, pos: c.pos.slice(), dir: c.dir.slice(), lat: c.lat.slice(), normal: c.normal.slice(), target: c.target.slice() }; }; };
+const me4cProbe = meView('ME4C');
+const melaxProbe = meView('MELAX');
 // The transducer is anteflexed and slid TG_ROLL further round the LV long axis
 // toward the diaphragmatic face than the reference gastric contact, along the
 // greater curvature, so it looks up through the INFERIOR wall: the posteromedial
@@ -542,22 +554,6 @@ function tgsaxProbe() {
 // at end-diastole and end-systole (the LV wall swings into a plane grazing the
 // AV groove as the base descends).
 const A_ES = anatomyParams(1, 0, {}, null, 0.42);
-function laaArea(aa, pos, dir, lat, step = 0.15) {
-  // in-plane lumen of the appendage segments (round cones), sampled on the plane
-  let n = 0;
-  const c = aa[1].a;
-  const s0 = vdot(vsub(c, pos), dir), l0 = vdot(vsub(c, pos), lat);
-  for (let a = -3; a <= 3; a += step) for (let b = -3; b <= 3; b += step) {
-    if (s0 + a < 0.3 || Math.abs(l0 + b) > (s0 + a) * 0.75) continue;   // inside the sector
-    const q = vadd(pos, vadd(vscale(dir, s0 + a), vscale(lat, l0 + b)));
-    for (const g of aa) {
-      const ab = vsub(g.b, g.a), t = Math.max(0, Math.min(1, vdot(vsub(q, g.a), ab) / vdot(ab, ab)));
-      const r = g.r1 + (g.r2 - g.r1) * t;
-      if (Math.hypot(...vsub(q, vadd(g.a, vscale(ab, t)))) < r) { n++; break; }
-    }
-  }
-  return n * step * step;
-}
 let _melaa = null;
 // the appendage rides down with the AV plane in systole: the operator follows it
 // (a slight probe flex), so the plane shifts along its normal with the LAA
@@ -623,46 +619,35 @@ function melaaProbe() {
   _melaa = teeClear(probeFrom(tgt, pick.dir, pick.lat, vdot(vsub(tgt0, ESO), pick.dir)));
   return melaaProbe();
 }
-let _me2c = null;
-const ME2C_BACK = 1.0;                               // cm
-// ME two-chamber (~60-90 deg): LA near field, LV below, the LAA and anterior
+// ME two-chamber (ME4C + 90 deg): LA near field, LV below, the LAA and anterior
 // wall on the right, the inferior wall and coronary sinus on the left.
-function me2cProbe() {
-  const tgt = vscale(vadd(M, APEX), 0.5);
-  const dir0 = norm(vsub(tgt, ESO));
-  const l0 = norm(vsub([0.26, 0, 0.97], vscale(dir0, vdot([0.26, 0, 0.97], dir0))));
-  const w = vcross(dir0, l0);
-  // roll the plane about the beam (from the [0.26, 0, 0.97] reference) to the
-  // angle that lays the most appendage lumen in plane at the worse of
-  // end-diastole and end-systole: the LAA is then a finger on the right of the
-  // screen, while the CS stays on the left; and swing the beam up to 12 deg
-  // toward the appendage within the plane (the apex then sits a little left of
-  // centre), so the LAA lies inside the sector
-  if (_me2c) return { ..._me2c, pos: _me2c.pos.slice(), target: _me2c.target.slice() };
-  let right = l0, dir = dir0, best = -1;
-  for (let deg = -10; deg <= 50; deg += 2) {
-    const th = deg * Math.PI / 180;
-    const r = vadd(vscale(l0, Math.cos(th)), vscale(w, Math.sin(th)));
-    for (let sw = 0; sw <= 12; sw += 2) {
-      const d = norm(vadd(vscale(dir0, Math.cos(sw * Math.PI / 180)), vscale(r, Math.sin(sw * Math.PI / 180))));
-      const lat = norm(vsub(r, vscale(d, vdot(r, d))));
-      const a = Math.min(laaArea(A0.la.aa, ESO, d, lat), laaArea(A_ES.la.aa, ESO, d, lat)) - 0.02 * sw;
-      if (a > best + 1e-6) { best = a; right = lat; dir = d; }
-    }
-  }
-  // (the transducer then withdrawn ME2C_BACK along the beam, so the LA fills the
-  // top 3.5-5 cm of the sector even at end-diastole rather than a sliver at its apex)
-  const sd = vdot(vsub(tgt, ESO), dir);
-  _me2c = teeClear(probeFrom(vadd(ESO, vscale(dir, sd)), dir, right, sd + ME2C_BACK));
-  return me2cProbe();
-}
-// ME aortic-valve short axis (~30-45 deg): the three cusps en face, the LA in
+const me2cProbe = meView('ME2C');
+// ME aortic-valve short axis (~30-60 deg): the three cusps en face, the LA in
 // the near field, the RVOT in the far field; NCC beside the interatrial septum.
+// The transducer stays on the oesophageal path, MEAVSAX_S cm above the LA-level
+// reference (0.5 cm below the ME station: the probe barely moves between the ME
+// views and the AV SAX), and the plane holds the transducer and the cusps (the
+// beam aimed at the cusp level) while turned as near to perpendicular to the root
+// axis as that allows — about 17 deg off a true root short axis, the cranial tip
+// an operator gives with slight anteflexion. (The path only crosses the true
+// cusp-level short-axis plane ~3.3 cm up, behind the arch, where the beam meets the
+// interatrial septum and its shunt at 30-35 deg instead of ~19.)
+const MEAVSAX_S = 0.75, MEAVSAX_FOSSA = 0.7;
 function meAvSaxProbe() {
-  const tgt = vadd(A, vscale(LM.U_AO, 0.75));
-  const raw = vsub(tgt, ESO);
-  const dir = norm(vsub(raw, vscale(LM.U_AO, vdot(raw, LM.U_AO))));
-  return teeClear(probeFrom(tgt, dir, LM.E_SCR, vdot(raw, dir)));
+  const tgt = vadd(A, vscale(LM.U_AO, 0.75)), pos = teePathPoint(MEAVSAX_S);
+  const dir = norm(vsub(tgt, pos));
+  const n0 = norm(vsub(LM.U_AO, vscale(dir, vdot(LM.U_AO, dir))));
+  let l0 = vcross(n0, dir);
+  if (vdot(l0, LM.E_SCR) < 0) l0 = vscale(l0, -1);
+  // rolled about the beam no further than needed to keep the centre of the fossa ovalis (the
+  // interatrial septum beside the non-coronary cusp) within MEAVSAX_FOSSA of the plane
+  let lat = l0;
+  for (let r = 0; r <= 20; r += 0.5) {
+    const cand = [r, -r].map((d) => vrot(l0, dir, d * Math.PI / 180))
+      .filter((l) => Math.abs(vdot(vsub(LM.IAS.asdC, pos), vcross(dir, l))) <= MEAVSAX_FOSSA);
+    if (cand.length) { lat = cand[0]; break; }
+  }
+  return teeClear(probeFrom(tgt, dir, lat, Math.hypot(...vsub(tgt, pos))));
 }
 // ME bicaval (~90-110 deg): the RA with the SVC entering on the right of the
 // screen and the IVC on the left, the interatrial septum and fossa in profile
@@ -710,7 +695,12 @@ function meRvioProbe() {
 // Descending thoracic aorta short axis: the probe turned to face posteriorly;
 // the round aorta lies immediately behind the oesophagus.
 const DESCAO_GAP = 1.05;                             // probe face -> aortic lumen (cm)
+let _descao = null;
 function descAoSaxProbe() {
+  if (!_descao) _descao = descAoSaxBuild();
+  return { ..._descao, pos: _descao.pos.slice(), dir: _descao.dir.slice(), lat: _descao.lat.slice(), normal: _descao.normal.slice(), target: _descao.target.slice() };
+}
+function descAoSaxBuild() {
   const tgt = LM.DTA_P;
   const raw = vsub(tgt, ESO);
   const dir = norm(vsub(raw, vscale(BODY_AX.S, vdot(raw, BODY_AX.S))));
@@ -718,7 +708,7 @@ function descAoSaxProbe() {
   // facing the aorta, the LA lies behind and beside the transducer: close in on the
   // aortic wall (>= 0.5 cm stand-off) until no beam of the sector reaches LA blood
   const laInSector = () => {
-    for (let a = -0.7; a <= 0.701; a += 0.1) {
+    for (let a = -TEE_HALF; a <= TEE_HALF + 1e-3; a += TEE_HALF / 8) {
       const d = vadd(vscale(pr.dir, Math.cos(a)), vscale(pr.lat, Math.sin(a)));
       for (let r = 0; r <= 3.5; r += 0.1) if (lumenDist(...vadd(pr.pos, vscale(d, r)), A0, 'LA') < 0) return true;
     }
@@ -732,8 +722,11 @@ function descAoSaxProbe() {
     pr.pos = vadd(pr.pos, vscale(pr.dir, 0.05));
   }
   if (gap() < DESCAO_GAP) pr.pos = vsub(pr.pos, vscale(pr.dir, DESCAO_GAP - gap()));
-  return pr;
+  // the shaft turned DESCAO_TURN (to the patient's left) so the edge of the 90 deg
+  // sector clears the left lower pulmonary vein, the aorta still whole in the sector
+  return teeManipulate(pr, { rotate: DESCAO_TURN });
 }
+const DESCAO_TURN = -4;                              // deg
 export const TEE_VIEWS = {
   ME4C: { probe: me4cProbe, depth: 14 },
   ME2C: { probe: me2cProbe, depth: 14 },
@@ -753,10 +746,15 @@ export const TEE_VIEWS = {
 // the stomach). The probe can then be manipulated as on a real TEE: the
 // omniplane angle turns the imaging plane about the beam (0 deg transverse with
 // the patient's left on the screen-right, 90 deg longitudinal with cranial on
-// the screen-right, 180 deg the mirror of 0), advance (+) / withdraw (-) slides
-// the probe along the oesophagus, rotation turns the shaft (+ to the patient's
-// right, clockwise) and flexion tilts the tip (+ anteflexion: the beam swings
-// caudally, - retroflexion).
+// the screen-right, 180 deg the mirror of 0), advance (+) / withdraw (-) moves
+// the transducer along the one path (teePathAt: the oesophagus, then through the
+// gastro-oesophageal junction along the gastric polyline to the transgastric and
+// deep transgastric stations), the beam carried with the path tangent; rotation
+// turns the shaft about the local path tangent (+ to the patient's right,
+// clockwise) and flexion tilts the tip (+ anteflexion: the beam swings
+// cranially — in the oesophagus from the ME4C up into the LVOT and aortic valve
+// (ME 5C), in the stomach up into the heart; - retroflexion: caudally, from the
+// ME4C down to the coronary sinus).
 function teeFrame(dir) {
   const up = norm(vsub(_S, vscale(dir, vdot(_S, dir))));
   let lft = vcross(dir, up);
@@ -768,23 +766,100 @@ export function teeOmni(p) {
   const { up, lft } = teeFrame(p.dir);
   return Math.atan2(vdot(p.lat, up), vdot(p.lat, lft)) * 180 / Math.PI;
 }
+// The whole probe path as one coordinate u (cm): u >= TEE_GEJ is the oesophagus
+// (u = s of teePathPoint, + toward the mouth); below the junction u runs on along
+// the gastric polyline (GEJ -> TG SAX contact -> deep TG contact), u = TEE_GEJ
+// minus the distance travelled into the stomach. Advancing the probe lowers u.
+let _gastric = null;
+function gastricPolyline() {
+  if (!_gastric) _gastric = [teePathPoint(TEE_GEJ), tgsaxProbe().pos, dtg5cProbe().pos];
+  return _gastric;
+}
+export const TEE_PATH_TOP = 12;                      // cm: the upper oesophagus, above the arch
+let _pathMin = null;
+export function teePathMin() {
+  if (_pathMin == null) {
+    const g = gastricPolyline();
+    let L = 0;
+    for (let i = 0; i + 1 < g.length; i++) L += Math.hypot(...vsub(g[i + 1], g[i]));
+    _pathMin = TEE_GEJ - L;
+  }
+  return _pathMin;
+}
+export function teePathAt(u) {
+  if (u >= TEE_GEJ) return teePathPoint(Math.min(u, TEE_PATH_TOP));
+  const g = gastricPolyline();
+  let L = TEE_GEJ - u;
+  for (let i = 0; i + 1 < g.length; i++) {
+    const seg = vsub(g[i + 1], g[i]), l = Math.hypot(...seg);
+    if (L <= l || i + 2 === g.length) return vadd(g[i], vscale(seg, Math.min(L, l) / l));
+    L -= l;
+  }
+  return g[g.length - 1].slice();
+}
+// unit tangent of the path at u, pointing toward the mouth (withdrawal); taken
+// over +/-0.6 cm so the frame turns through the junction rather than jumping
+export function teePathTangent(u) {
+  return norm(vsub(teePathAt(Math.min(TEE_PATH_TOP, u + 0.6)), teePathAt(Math.max(teePathMin(), u - 0.6))));
+}
+// path coordinate of the path point nearest q
+export function teePathParam(q) {
+  const near = (u0, u1, du) => {
+    let best = null;
+    for (let u = Math.max(teePathMin(), u0); u <= Math.min(TEE_PATH_TOP, u1) + 1e-9; u += du) {
+      const d = Math.hypot(...vsub(q, teePathAt(u)));
+      if (!best || d < best.d) best = { u, d };
+    }
+    return best.u;
+  };
+  const u = near(teePathMin(), TEE_PATH_TOP, 0.5);
+  return near(u - 0.5, u + 0.5, 0.02);
+}
+// points along the path from u1 down to u0 (the 3D oesophagus and probe shaft)
+export function teePathPolyline(u0 = teePathMin(), u1 = TEE_PATH_TOP, step = 0.5) {
+  const out = [];
+  for (let u = u1; u > u0 - 1e-9; u -= step) out.push(teePathAt(u));
+  return out;
+}
 const ROT_SIGN = vdot(vrot(BODY_AX.A, _S, 0.1), BODY_AX.R) > vdot(BODY_AX.A, BODY_AX.R) ? 1 : -1;
+// the minimal rotation taking unit a onto unit b, applied to v
+function turnWith(v, a, b) {
+  const k = vcross(a, b), s = Math.hypot(...k), c = vdot(a, b);
+  if (s < 1e-9) return v.slice();
+  return vrot(v, k, Math.atan2(s, c));
+}
 export function teeManipulate(p, { omni = null, advance = 0, rotate = 0, flex = 0 } = {}) {
   const om = omni == null ? teeOmni(p) : omni;
   let pos = p.pos.slice(), dir = p.dir.slice();
   let target = (p.target || vadd(p.pos, vscale(p.dir, 5))).slice();
   if (!rotate && !flex && !advance && omni == null) return { ...p, pos, dir, lat: p.lat.slice(), normal: p.normal.slice(), target };
+  let tan = _S;
+  if (advance || rotate) {
+    const u0 = teePathParam(pos);
+    let u1 = u0;
+    if (advance) {
+      // the transducer moves along the path; the beam (and any offset of the
+      // transducer from the path centreline) turns with the path tangent
+      u1 = Math.max(teePathMin(), Math.min(TEE_PATH_TOP, u0 - advance));
+      const t0 = teePathTangent(u0), t1 = teePathTangent(u1), q0 = teePathAt(u0);
+      const rel = vsub(target, pos);
+      pos = vadd(teePathAt(u1), turnWith(vsub(pos, q0), t0, t1));
+      dir = norm(turnWith(dir, t0, t1)); target = vadd(pos, turnWith(rel, t0, t1));
+    }
+    tan = teePathTangent(u1);
+  }
   if (rotate) {
     const a = ROT_SIGN * rotate * Math.PI / 180;
-    dir = vrot(dir, _S, a); target = vadd(pos, vrot(vsub(target, pos), _S, a));
+    dir = vrot(dir, tan, a); target = vadd(pos, vrot(vsub(target, pos), tan, a));
   }
   if (flex) {
-    const k = norm(vcross(dir, _S));
-    const a = flex * Math.PI / 180, d1 = vrot(dir, k, a);
-    const sg = vdot(d1, _S) < vdot(dir, _S) ? 1 : -1;               // anteflexion: caudally
-    dir = vrot(dir, k, sg * a); target = vadd(pos, vrot(vsub(target, pos), k, sg * a));
+    // about the axis that tips the beam toward the body's cranial axis: +flex
+    // (anteflexion) raises dir.S, -flex (retroflexion) lowers it
+    let k = vcross(dir, _S);
+    if (Math.hypot(...k) < 0.15) k = p.normal;
+    const a = flex * Math.PI / 180;
+    dir = vrot(dir, k, a); target = vadd(pos, vrot(vsub(target, pos), k, a));
   }
-  if (advance) { pos = vsub(pos, vscale(_S, advance)); target = vsub(target, vscale(_S, advance)); }
   const { up, lft } = teeFrame(dir), t = om * Math.PI / 180;
   const lat = norm(vadd(vscale(lft, Math.cos(t)), vscale(up, Math.sin(t))));
   return { pos, dir, lat, normal: vcross(dir, lat), target };
@@ -801,37 +876,142 @@ function meAvLaxProbe() {
   return teeClear(probeFrom(tgt, dir, vsub(LM.U_AO, vscale(dir, vdot(LM.U_AO, dir))), Math.hypot(...vsub(tgt, pos))));
 }
 const MEAVLAX_UP = 1.0;                              // cm withdrawn: the beam meets the root side-on
-// ME mitral commissural (~50-70 deg): from the ME four-chamber position the
-// plane turned onto the line through both commissures — P3 on the left, A2 in
-// the middle, P1 on the right, both papillary muscles below.
-const MECOMM_LINE = (() => {
-  const ap = vsub(A, M); ap[1] = 0;                  // aorto-mitral (antero-posterior) direction, level
-  let c = norm(vcross([0, 1, 0], ap));
-  if (c[0] < 0) c = vscale(c, -1);                   // anterolateral commissure (patient's left) to the screen-right
-  return c;
-})();
-const MECOMM_UP = 0.4;                               // cm: where the oesophagus meets the four-chamber plane
-function meCommProbe() {
-  const pos = teePathPoint(MECOMM_UP), tgt = vadd(M, vscale(vsub(APEX, M), 0.25));
+// ME mitral commissural (ME4C + 60 deg): the plane through both commissures —
+// P3 on the left, A2 in the middle, P1 on the right, both papillary muscles below.
+const meCommProbe = meView('MECOMM');
+// Transgastric views are manipulations of the one TG SAX probe position (the
+// fundal contact on the gastric path), so they lie on the path by construction
+// and follow the anatomy: a small search picks each preset's controls.
+const cachedProbe = (build) => { let c = null; return () => { if (!c) c = build(); return { ...c, pos: c.pos.slice(), dir: c.dir.slice(), lat: c.lat.slice(), normal: c.normal.slice(), target: c.target.slice() }; }; };
+const distToPlane = (p, q) => Math.abs(vdot(vsub(q, p.pos), p.normal));
+const inPlaneAng = (p, q) => { const w = vsub(q, p.pos); return Math.atan2(vdot(w, p.lat), vdot(w, p.dir)); };
+// TG two-chamber (~90 deg): the plane holding both papillary heads (end-diastole
+// and end-systole) with the LV long axis: the inferior wall in the near field,
+// the anterior wall beyond, both papillary muscles with their chordae running to
+// the mitral leaflets. Searched over the omniplane angle, a little flex, a
+// shaft turn and up to TG2C_ADV cm of advance / withdrawal along the gastric path.
+const TG2C_ADV = [-2, 3];
+const tg2cProbe = cachedProbe(() => {
+  const tg = tgsaxProbe(), heads = [A0.pap, A_ES.pap].flatMap((ps) => ps.map((pp) => pp.b));
+  let best = null;
+  const tryIt = (adv, th, f, rot) => {
+    if (adv < TG2C_ADV[0] || adv > TG2C_ADV[1]) return;
+    const p = teeManipulate(tg, { omni: th, flex: f, advance: adv, rotate: rot });
+    const m = Math.max(...heads.map((h) => distToPlane(p, h)));
+    const s = m + 0.1 * Math.max(0, distToPlane(p, APEX) - 0.5) + 0.01 * (Math.abs(adv) + Math.abs(f) / 10 + Math.abs(rot) / 5);
+    if (!best || s < best.s) best = { s, p, k: [adv, th, f, rot] };
+  };
+  // coarse grid, then a fine one about the best
+  for (let adv = TG2C_ADV[0]; adv <= TG2C_ADV[1]; adv += 1) for (let th = 40; th <= 140; th += 4) for (let f = -30; f <= 30; f += 6) for (const rot of [-10, 0, 10]) tryIt(adv, th, f, rot);
+  const [a0, t0, f0, r0] = best.k;
+  for (let adv = a0 - 1; adv <= a0 + 1; adv += 0.5) for (let th = t0 - 4; th <= t0 + 4; th += 1) for (let f = f0 - 6; f <= f0 + 6; f += 2) for (let rot = r0 - 5; rot <= r0 + 5; rot += 2.5) tryIt(adv, th, f, rot);
+  return best.p;
+});
+// TG long axis: the plane through the LVOT, the cusps in profile and the root
+// axis (<= 10 deg out of plane), the beam meeting the LVOT flow within ~15 deg:
+// the probe advanced TGLAX_ADV cm along the greater curvature toward the deep
+// transgastric position and anteflexed, the aortic valve to the screen-right.
+const TGLAX_ADV = 5;
+const tgLaxProbe = cachedProbe(() => {
+  const tg = tgsaxProbe(), ax = norm(vsub(A, LM.LVOT0));
+  let best = null;
+  for (let th = 0; th <= 180; th += 2) for (let f = 30; f <= 90; f += 2) {
+    const p = teeManipulate(tg, { omni: th, flex: f, advance: TGLAX_ADV });
+    const avOff = distToPlane(p, A), avAng = inPlaneAng(p, A) * 180 / Math.PI;
+    if (avOff > 0.3 || avAng < 3 || avAng > 35) continue;
+    const rootOut = Math.asin(Math.min(1, Math.abs(vdot(LM.U_AO, p.normal)))) * 180 / Math.PI;
+    const beam = Math.acos(Math.min(1, Math.abs(vdot(norm(vsub(A, p.pos)), ax)))) * 180 / Math.PI;
+    const s = Math.max(0, rootOut - 5) + Math.max(0, beam - 12) + avOff;
+    if (!best || s < best.s) best = { s, p };
+  }
+  return best.p;
+});
+// body-classifier areas (cm2) of a probe's sector at a coarse step (preset searches)
+function sectorAreas(p, A, depth, h = 0.3) {
+  const c = {};
+  for (let d = h; d < depth; d += h) for (let x = -d; x <= d; x += h) {
+    if (Math.hypot(x, d) > depth || Math.abs(Math.atan2(x, d)) > TEE_HALF) continue;
+    const q = vadd(p.pos, vadd(vscale(p.dir, d), vscale(p.lat, x)));
+    const k = bodyClassify(q[0], q[1], q[2], A).code;
+    c[k] = (c[k] || 0) + h * h;
+  }
+  return (k) => c[k] || 0;
+}
+// TG basal short axis (~0 deg): the TG SAX probe withdrawn toward the junction,
+// anteflexed and turned until the plane cuts the mitral leaflets (within 0.5 cm
+// of the mitral centre, the fish-mouth) across the LV long axis, the most LV and
+// the least atrial / aortic lumen in the sector.
+const tgBasalSaxProbe = cachedProbe(() => {
+  const tg = tgsaxProbe(), axl = norm(vsub(M, APEX));
+  let best = null;
+  for (let adv = -3; adv <= 1; adv += 0.5) for (let f = -10; f <= 50; f += 4) for (const rot of [-10, 0, 10]) {
+    const p = teeManipulate(tg, { advance: adv, flex: f, rotate: rot });
+    const mo = distToPlane(p, M);
+    if (mo > 0.5) continue;
+    const tilt = Math.acos(Math.min(1, Math.abs(vdot(axl, p.normal)))) * 180 / Math.PI;
+    const c = sectorAreas(p, A0, 12, 0.5);
+    const s = -c(BODY.LV) + 3 * mo + 0.2 * Math.max(0, tilt - 15) + 0.3 * (c(BODY.AO) + c(BODY.RA) + c(BODY.LA));
+    if (!best || s < best.s) best = { s, p };
+  }
+  return best.p;
+});
+// TG RV inflow (~100-160 deg): the TG two-chamber probe turned to the patient's
+// right onto the tricuspid valve (within 0.8 cm of the plane), the omniplane
+// and flex adjusted for the most RV (end-diastole and end-systole) and RA: the
+// RA, the tricuspid leaflets and their chordae, the RV inflow and apex.
+const tgRvInProbe = cachedProbe(() => {
+  const b = tg2cProbe(), om0 = teeOmni(b);
+  let best = null;
+  for (let rot = 20; rot <= 80; rot += 10) for (let d = 0; d <= 90; d += 15) for (const f of [-25, -10, 5]) {
+    const p = teeManipulate(b, { rotate: rot, omni: om0 + d, flex: f });
+    const tv = distToPlane(p, T);
+    if (tv > 0.8) continue;
+    const c0 = sectorAreas(p, A0, 14, 0.5), c1 = sectorAreas(p, A_ES, 14, 0.5);
+    const s = -Math.min(c0(BODY.RV), 2.5 * c1(BODY.RV)) - 0.5 * Math.min(c0(BODY.RA), 6) + 0.3 * (c0(BODY.LV) + 0.3 * c0(BODY.LUNG)) + 2 * tv;
+    if (!best || s < best.s) best = { s, p };
+  }
+  return best.p;
+});
+// ME ascending-aortic short axis (~0-40 deg): the probe withdrawn up the
+// oesophagus toward the level of the right pulmonary artery, the beam on the
+// ascending aorta (between the STJ and the arch landmark) and the plane turned to
+// cut it square (the aorta round) with the RPA in plane behind it, the main PA
+// beside it. ME ascending-aortic long axis: the same probe at +90 deg, the
+// ascending aorta along its length with the RPA in cross-section behind it.
+// (From the arch landmarks, so they follow the arch.)
+function ascAxis() { return norm(vsub(LM.AO_ASC_TOP, LM.AO_STJ)); }
+const meAscSaxProbe = cachedProbe(() => {
+  const U = ascAxis(), rpa = vadd(LM.PA_BIF, vscale(LM.U_RPA, 1.5));
+  let best = null;
+  for (let s = 2; s <= 9; s += 0.5) {
+    const pos = teePathPoint(s);
+    for (let h = 0; h <= 3; h += 0.5) {
+      const Pa = vadd(LM.AO_STJ, vscale(U, h)), dir = norm(vsub(Pa, pos));
+      const base = probeFrom(Pa, dir, teeFrame(dir).lft, Math.hypot(...vsub(Pa, pos)));
+      for (let o = 0; o < 180; o += 3) {
+        const p = teeManipulate(base, { omni: o });
+        const tilt = Math.acos(Math.min(1, Math.abs(vdot(p.normal, U)))) * 180 / Math.PI;
+        const sc = tilt / 10 + distToPlane(p, rpa);
+        if (!best || sc < best.sc) best = { sc, p };
+      }
+    }
+  }
+  return best.p;
+});
+const meAscLaxProbe = cachedProbe(() => { const p = meAscSaxProbe(); return teeManipulate(p, { omni: teeOmni(p) + 90 }); });
+// Upper-oesophageal aortic arch long axis: the probe withdrawn behind the arch
+// (UE_ARCH_DROP cm below the level of the arch summit landmark), the plane holding
+// the transducer and the distal arch along its length toward the descending
+// aorta; UE arch short axis: the same probe at +90 deg, the arch in
+// cross-section. (From the arch landmarks, so they follow the arch.)
+const UE_ARCH_DROP = 1.0;
+const ueArchLaxProbe = cachedProbe(() => {
+  const s = vdot(vsub(LM.AO_ARCH_MID, ESO), _S) - UE_ARCH_DROP;
+  const pos = teePathPoint(Math.min(TEE_PATH_TOP, s)), tgt = vscale(vadd(LM.AO_ARCH_MID, LM.DTA_TOP), 0.5);
   const dir = norm(vsub(tgt, pos));
-  return teeClear(probeFrom(tgt, dir, vsub(MECOMM_LINE, vscale(dir, vdot(MECOMM_LINE, dir))), Math.hypot(...vsub(tgt, pos))));
-}
-// Transgastric views from the TG SAX position: 90 deg (two-chamber: the
-// inferior wall in the near field, the anterior wall beyond, the apex on the
-// left and the mitral valve and LA on the right) and ~120 deg (long axis: the
-// plane turned onto the LVOT, the aortic valve and root on the right).
-function tg2cProbe() {
-  const p = tgsaxProbe(), c = vadd(p.pos, vscale(p.dir, 4));
-  const dir = norm(vsub(vadd([0, LM.LV.apexY * 0.4, 0], [0, 0, 0]), p.pos));
-  return probeFrom(c, dir, vsub([0, 1, 0], vscale(dir, dir[1])), Math.hypot(...vsub(c, p.pos)));
-}
-function tgLaxProbe() {
-  const p = tgsaxProbe(), n = norm(vcross(vsub(A, p.pos), vsub(vadd(M, vscale(vsub(APEX, M), 0.5)), p.pos)));
-  const tgt = vscale(vadd(A, vadd(M, vscale(vsub(APEX, M), 0.5))), 0.5), dir = norm(vsub(tgt, p.pos));
-  let right = vcross(n, dir);
-  if (vdot(right, vsub(A, APEX)) < 0) right = vscale(right, -1);    // the aortic valve on the screen-right
-  return probeFrom(tgt, dir, right, Math.hypot(...vsub(tgt, p.pos)));
-}
+  return probeFrom(tgt, dir, vsub(LM.DTA_TOP, LM.AO_ARCH_MID), Math.hypot(...vsub(tgt, pos)));
+});
+const ueArchSaxProbe = cachedProbe(() => { const p = ueArchLaxProbe(); return teeManipulate(p, { omni: teeOmni(p) + 90 }); });
 // Deep transgastric five-chamber (0 deg): the probe advanced from the fundus
 // into the gastric body beneath the apex and anteflexed, so the beam runs up the
 // LV long axis through the LVOT to the aortic valve — aligned with ejection,
@@ -848,22 +1028,52 @@ export const TEE_EXTRA = {
   MECOMM: { probe: meCommProbe, depth: 12 },
   TG2C: { probe: tg2cProbe, depth: 13 },
   TGLAX: { probe: tgLaxProbe, depth: 15 },
-  DTG5C: { probe: dtg5cProbe, depth: 16, doppler: 'avCw' },
+  DTG5C: { probe: dtg5cProbe, depth: 16 },
   DESCAOLAX: { probe: omniOf(descAoSaxProbe, 90), depth: 8 },
+  // review 12: the rest of the ASE/SCA set
+  MEASCSAX: { probe: meAscSaxProbe, depth: 10 },
+  MEASCLAX: { probe: meAscLaxProbe, depth: 10 },
+  // (the plane follows the mitral annulus down in systole along its normal, as the
+  // operator follows the base with slight flexion: PSAX-MV does the same)
+  TGBSAX: { probe: tgBasalSaxProbe, depth: 12, track: (A) => { const n = tgBasalSaxProbe().normal; return vscale(n, vdot(vsub(A.valves.mitral.c, A0.valves.mitral.c), n)); } },
+  TGRVIN: { probe: tgRvInProbe, depth: 14 },
+  UEARCHLAX: { probe: ueArchLaxProbe, depth: 8 },
+  UEARCHSAX: { probe: ueArchSaxProbe, depth: 8 },
 };
 Object.assign(TEE_VIEWS, TEE_EXTRA);
+// Every TEE view carries its half-angle, which the renderer, the Doppler site
+// geometry and the audits read through sectorHalfOf.
+for (const v of Object.values(TEE_VIEWS)) v.half = TEE_HALF;
+export const sectorHalfOf = (view) => (view && view.half) || TTE_HALF;
 // the oesophageal / gastric path every TEE probe position lies on: the
 // oesophagus from the gastro-oesophageal junction up past the arch, then the
 // stomach from the junction to the fundal contact (TG views) and on to the
 // deep transgastric position beneath the apex
 export function teePathDist(q) {
   let best = 1e9;
-  for (let s = TEE_GEJ; s <= 12; s += 0.1) best = Math.min(best, Math.hypot(...vsub(q, teePathPoint(s))));
-  const g = [teePathPoint(TEE_GEJ), tgsaxProbe().pos, dtg5cProbe().pos];
+  for (let s = TEE_GEJ; s <= TEE_PATH_TOP; s += 0.1) best = Math.min(best, Math.hypot(...vsub(q, teePathPoint(s))));
+  const g = gastricPolyline();
   for (let i = 0; i + 1 < g.length; i++) {
     const ab = vsub(g[i + 1], g[i]), t = Math.max(0, Math.min(1, vdot(vsub(q, g[i]), ab) / vdot(ab, ab)));
     best = Math.min(best, Math.hypot(...vsub(q, vadd(g[i], vscale(ab, t)))));
   }
+  return best;
+}
+// The TEE preset nearest a (manipulated) probe: transducer distance (cm) and the
+// angles (deg) between the beams and between the imaging planes (normals, either
+// sense). `match` when the probe is at that preset's station and plane — the live
+// view is then named after it (e.g. ME4C turned to 60 deg reads ME commissural).
+export function nearestTeePreset(p) {
+  let best = null;
+  for (const [name, v] of Object.entries(TEE_VIEWS)) {
+    const q = v.probe();
+    const dPos = Math.hypot(...vsub(p.pos, q.pos));
+    const dDir = Math.acos(Math.max(-1, Math.min(1, vdot(p.dir, q.dir)))) * 180 / Math.PI;
+    const dPl = Math.acos(Math.min(1, Math.abs(vdot(p.normal, q.normal)))) * 180 / Math.PI;
+    const score = dPos * 10 + dDir + dPl;
+    if (!best || score < best.score) best = { name, dPos, dDir, dPl, score };
+  }
+  best.match = best.dPos < 0.6 && best.dDir < 8 && best.dPl < 8;
   return best;
 }
 export const ALL_VIEWS = { ...TTE_VIEWS, ...EXTRA_VIEWS, ...TEE_VIEWS };

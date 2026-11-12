@@ -166,6 +166,28 @@ try {
   await page.click('#challengeBtn');
   await page.selectOption('#pathology', 'normal');
   check('normal heart hides both scenario selectors', !(await page.locator('#rwmaRegion').isVisible()) && !(await page.locator('#dcmSeverity').isVisible()));
+  // TEE orientation aids (review 12): manipulating the probe flags the plane as
+  // modified and the view tag carries the live omniplane angle (and the preset the
+  // one ME probe now matches: ME4C turned to ~60 deg reads ME commissural)
+  {
+    const tag = () => page.evaluate(() => ({ flag: document.getElementById('planeFlag').textContent, tag: document.getElementById('viewTag').textContent }));
+    const setIn = (id, v) => page.$eval(id, (el, v) => { el.value = String(v); el.dispatchEvent(new Event('input', { bubbles: true })); }, v);
+    await page.evaluate(() => window.echosim.setView('ME4C'));
+    const t0 = await tag();
+    check('TEE ME4C preset: no modified flag, plain view tag', t0.flag === '' && !/omni/.test(t0.tag), `${t0.flag} | ${t0.tag}`);
+    const om0 = await page.$eval('#omni', (el) => +el.value);
+    await setIn('#omni', om0 + 60);
+    const t1 = await tag();
+    check('TEE: omniplane turned 60 deg -> "modified" flag and live omniplane angle in the view tag', /modified/.test(t1.flag) && new RegExp(`omni ${om0 + 60}`).test(t1.tag), `${t1.flag} | ${t1.tag}`);
+    check('TEE: ME4C + 60 deg is named after the preset it matches (ME commissural)', /commissural/.test(t1.tag), t1.tag);
+    for (const [id, v] of [['#adv', 30], ['#rot', 15], ['#flex', 12]]) {
+      await page.evaluate(() => window.echosim.setView('ME4C'));
+      await setIn(id, v);
+      const t = await tag();
+      check(`TEE: ${id.slice(1)} -> "modified" flag and live omniplane angle in the view tag`, /modified/.test(t.flag) && /omni \d+/.test(t.tag), `${t.flag} | ${t.tag}`);
+    }
+    await page.evaluate(() => window.echosim.setView('PLAX'));
+  }
   check('no browser runtime errors', errors.length === 0, errors.slice(0, 4).join(' | '));
 } catch (error) {
   check('test run completes', false, error.stack || error.message);

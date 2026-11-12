@@ -9,7 +9,7 @@
 import { classify, velocityAt, geometryAt, hemoSummary, hemodynamics, TISSUE, VALVE_DEFS, FLOW, AORTIC_CUSPS, shuntLabel, stenosisCw, FLOW_AXES, FLOW_SITES, membSite } from './cardiac-model.js';
 import { LM, rapEstimate, diaphragmBelow, rwmaBlend, lumenDist, hepaticVeinSegs } from './anatomy.js';
 import { clamp } from './mathutils.js';
-import { ALL_VIEWS } from './views.js';
+import { ALL_VIEWS, sectorHalfOf } from './views.js';
 
 // Human-readable labels for the flow compartment that produced the frame's peak
 // velocity (surfaced to the UI as metrics.peakLabel for teaching context).
@@ -26,6 +26,7 @@ const FLOW_LABELS = {
   [FLOW.PV_FLOW]: 'pulmonary vein',
   [FLOW.HV_FLOW]: 'hepatic vein',
   [FLOW.AORTA]: 'aortic flow',
+  [FLOW.LAA_FLOW]: 'LA appendage',
 };
 
 // Echogenicity of the body wall at fractional depth f (0 = skin, 1 = pleura /
@@ -193,6 +194,11 @@ const hasMR = (path) => !!(path.mr || path.dilated);
 const _hvSeg = (A) => hepaticVeinSegs(A)[1];                 // the middle hepatic vein
 const _hvAt = (A) => { const v = _hvSeg(A); return _add(v.a, v.u, 1.6); };
 const _dtaAxis = (A) => { const d = A.ao.dta, u = [d.a[0] - d.top[0], d.a[1] - d.top[1], d.a[2] - d.top[2]], l = Math.hypot(...u); return [u[0] / l, u[1] / l, u[2] / l]; };
+const _pvVein = (A) => A.pv.veins.find((v) => v.name === 'LSPV') || A.pv.veins[0];
+const _pvAt = (A) => { const v = _pvVein(A), u = [v.b[0] - v.w[0], v.b[1] - v.w[1], v.b[2] - v.w[2]], l = Math.hypot(...u); return _add(v.w, [u[0] / l, u[1] / l, u[2] / l], 0.5); };
+// (the appendage axis out of the appendage: emptying flow is + along it)
+const _laaAxis = (A) => { const g = A.la.aa[0], u = [g.a[0] - g.b[0], g.a[1] - g.b[1], g.a[2] - g.b[2]], l = Math.hypot(...u); return [u[0] / l, u[1] / l, u[2] / l]; };
+const _laaAt = (A) => _add(A.la.aa[0].a, _laaAxis(A), -1.0);
 export const DOPPLER_SITES = {
   mvTips: { name: 'Mitral inflow', label: 'mitral inflow at the leaflet tips', mode: 'PW', ref: 'E',
     at: (A) => _add(A.valves.mitral.c, DAX.mitralIn, 0.5), axis: () => DAX.mitralIn, box: (A) => A.valves.mitral.c },
@@ -221,6 +227,14 @@ export const DOPPLER_SITES = {
     at: (A) => _add(A.valves.aortic.c, DAX.lvot, 1.5), axis: () => DAX.lvot, box: (A) => _add(A.valves.aortic.c, DAX.lvot, 1.5) },
   hvPw: { name: 'Hepatic vein PW', label: 'middle hepatic vein, ~1.5 cm from the IVC', mode: 'PW', ref: 'S', align: true,
     at: (A) => _hvAt(A), axis: (p, G) => { const u = _hvSeg(G.A).u; return [-u[0], -u[1], -u[2]]; }, box: (A) => _hvAt(A) },
+  // TEE venous / appendage sites (review 12): pulmonary-vein PW (S, D and the
+  // atrial reversal Ar) 0.5 cm inside the left upper vein's ostium, and the LAA
+  // emptying velocity ~1 cm inside the appendage ostium (normal > 0.4 m/s), both
+  // from the ME LAA view; the operator angles the beam down the vein / appendage.
+  pvPw: { name: 'Pulmonary vein PW', label: 'left upper pulmonary vein, 0.5 cm inside its ostium', mode: 'PW', ref: 'S', align: true,
+    at: (A) => _pvAt(A), axis: (p, G) => _pvVein(G.A).ax, box: (A) => _pvAt(A) },
+  laaPw: { name: 'LAA emptying PW', label: 'left atrial appendage, ~1 cm inside its ostium', mode: 'PW', ref: 'E', align: true,
+    at: (A) => _laaAt(A), axis: (p, G) => _laaAxis(G.A), box: (A) => _laaAt(A) },
   descAoPw: { name: 'Descending aorta PW', label: 'proximal descending aorta', mode: 'PW', ref: 'S',
     at: (A) => _add(A.ao.dta.top, _dtaAxis(A), 1.5), axis: (p, G) => _dtaAxis(G.A), box: (A) => _add(A.ao.dta.top, _dtaAxis(A), 1.5) },
 };
@@ -307,7 +321,10 @@ function siteCandidates(view, path) {
     case 'MEAVSAX': if (tr) L.push('tvCw'); if (path.asd) L.push('asd'); L.push('rvot'); break;
     case 'MEBICAVAL': if (path.asd) L.push('asd'); break;
     case 'MERVIO': if (tr) L.push('tvCw'); L.push('rvot'); break;
-    default: break;                  // PLAX, PSAX_MV, SUBCOSTAL, MELAA, TGSAX, DESCAO
+    case 'MELAA': L.push('laaPw', 'pvPw'); break;
+    // the TEE windows for the continuity equation: AV CW and LVOT PW both aligned
+    case 'TGLAX': case 'DTG5C': L.push('avCw', 'lvot'); break;
+    default: break;                  // PLAX, PSAX_MV, SUBCOSTAL, TGSAX, DESCAO
   }
   return L;
 }
@@ -326,7 +343,7 @@ export function defaultSiteGeometry(view, key, path = {}) {
     const probe = vw.probe();
     let P = probe.pos;
     if (vw.track) { const o = vw.track(Gr.A); P = [P[0] + o[0], P[1] + o[1], P[2] + o[2]]; }
-    r = siteGeometry(site, path, Gr, P, probe, 0.66, vw.depth || 16, !!site.align);
+    r = siteGeometry(site, path, Gr, P, probe, sectorHalfOf(vw), vw.depth || 16, !!site.align);
   }
   m.set(ck, r);
   return r;
@@ -878,7 +895,13 @@ export class EchoView {
           // (subcostal windows) it is abdominal wall / retroperitoneal tissue, and
           // from the notch the superior mediastinum round the arch, and through the
           // liver window the posterior mediastinum behind the heart: medi throughout.
-          if (this.nearFieldCm < 0.5 || MEDI_VIEWS[this.viewName] || diaphragmBelow(wx, wy, wz) > 0.5) e = AMP.medi;
+          // Through a TEE sector, the left hemidiaphragm (muscle) and the soft
+          // tissue below it (gastric fundus wall, spleen) read as solid muscle /
+          // abdominal viscera, as echogenic as liver, not as mediastinal fat: the
+          // 90 deg ME long-axis sector reaches them beyond the LV inferolateral wall.
+          const db = diaphragmBelow(wx, wy, wz);
+          if (this.nearFieldCm < 0.5 && db > -0.3) e = AMP.liver;
+          else if (this.nearFieldCm < 0.5 || MEDI_VIEWS[this.viewName] || db > 0.5) e = AMP.medi;
           else {
             const u = clamp((depth - this.nearFieldCm - 2.5) / 2.5, 0, 1);
             e = AMP.medi + (AMP.soft - AMP.medi) * u;
@@ -1727,7 +1750,9 @@ export class EchoView {
     // the view's standard site is recorded aligned (angling to a modified window
     // where the jet needs it); a site the operator picks is taken as the beam
     // meets it, and flagged when that is too steep to measure
-    const sg = siteGeometry(site, path, Gr, P, probe, half, this.depthCm, !user && !!site.align);
+    // (a user-picked site is recorded as the beam meets it, unless dopplerAlign:
+    // the operator angles to a modified window, as for the standard site)
+    const sg = siteGeometry(site, path, Gr, P, probe, half, this.depthCm, (!user || !!this.dopplerAlign) && !!site.align);
     const modeDef = typeof site.mode === 'function' ? site.mode(path) : site.mode;
     const mode = this.dopplerMode === 'PW' || this.dopplerMode === 'CW' ? this.dopplerMode : modeDef;
     this._dGate = {

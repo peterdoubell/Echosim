@@ -131,6 +131,12 @@
           <button data-view="TGLAX" aria-pressed="false" title="Transgastric long axis (LVOT and aortic valve)">TG LAX</button>
           <button data-view="DTG5C" aria-pressed="false" title="Deep transgastric five-chamber (aortic-valve CW aligned with the LVOT)">Deep TG 5C</button>
           <button data-view="DESCAOLAX" aria-pressed="false" title="Descending thoracic aorta long axis">Desc Ao LAX</button>
+          <button data-view="MEASCSAX" aria-pressed="false" title="Mid-oesophageal ascending aorta short axis (aorta round, RPA behind it)">ME Asc SAX</button>
+          <button data-view="MEASCLAX" aria-pressed="false" title="Mid-oesophageal ascending aorta long axis">ME Asc LAX</button>
+          <button data-view="TGBSAX" aria-pressed="false" title="Transgastric basal short axis (mitral leaflets, fish-mouth)">TG basal SAX</button>
+          <button data-view="TGRVIN" aria-pressed="false" title="Transgastric RV inflow (RA, tricuspid valve, RV)">TG RV inflow</button>
+          <button data-view="UEARCHLAX" aria-pressed="false" title="Upper-oesophageal aortic arch long axis">UE arch LAX</button>
+          <button data-view="UEARCHSAX" aria-pressed="false" title="Upper-oesophageal aortic arch short axis">UE arch SAX</button>
         </div>
       </div>
 
@@ -282,13 +288,13 @@
         <label title="Omniplane angle: turns the imaging plane about the beam (0° transverse, 90° longitudinal, 180° mirror of 0°)">Omniplane <output id="omniOut" for="omni" aria-live="polite">0°</output>
           <input type="range" id="omni" min="0" max="180" value="0" aria-label="Omniplane angle (degrees)" aria-valuetext="0°" />
         </label>
-        <label title="Advance (+) or withdraw (−) the probe along the oesophagus (cm)">Advance / withdraw <output id="advOut" for="adv" aria-live="polite">0</output> cm
-          <input type="range" id="adv" min="-40" max="40" value="0" aria-label="Advance or withdraw the probe (mm)" aria-valuetext="0 cm" />
+        <label title="Advance (+) or withdraw (−) the probe along the oesophagus, through the gastro-oesophageal junction into the stomach (cm)">Advance / withdraw <output id="advOut" for="adv" aria-live="polite">0</output> cm
+          <input type="range" id="adv" min="-120" max="200" value="0" aria-label="Advance or withdraw the probe (mm)" aria-valuetext="0 cm" />
         </label>
         <label title="Turn the probe shaft: + to the patient's right (clockwise), − to the left">Turn <output id="rotOut" for="rot" aria-live="polite">0°</output>
           <input type="range" id="rot" min="-60" max="60" value="0" aria-label="Turn the probe (degrees)" aria-valuetext="0°" />
         </label>
-        <label title="Flex the tip: + anteflexion (beam swings caudally), − retroflexion">Flex <output id="flexOut" for="flex" aria-live="polite">0°</output>
+        <label title="Flex the tip: + anteflexion (beam tips cranially: from the ME4C up to the LVOT and aortic valve; in the stomach up into the heart), − retroflexion (caudally, toward the coronary sinus)">Flex <output id="flexOut" for="flex" aria-live="polite">0°</output>
           <input type="range" id="flex" min="-30" max="30" value="0" aria-label="Flex the probe tip (degrees)" aria-valuetext="0°" />
         </label>
       </div>

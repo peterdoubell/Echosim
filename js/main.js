@@ -13,7 +13,7 @@ import { Heart3D } from './heart3d.js';
 import { EchoView, colourDefault, dopplerColor } from './echo.js';
 import { MeasureTool } from './measure.js';
 import { vadd, vsub, vscale, vdot, vcross, norm, vrot } from './mathutils.js';
-import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, makeProbe, teeManipulate, teeOmni } from './views.js';
+import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, makeProbe, teeManipulate, teeOmni, sectorHalfOf, nearestTeePreset } from './views.js';
 import { Heartbeat, vcgToLeads, LEAD_NAMES, PH_AVO, PH_AVC, PH_MVO, PH_ATR } from './electrophysiology.js';
 import { RWMA_SCENARIOS, DCM_SEVERITIES } from './scenarios.js';
 import { PlaybackClock } from './playback-clock.js';
@@ -31,14 +31,16 @@ const VIEW_LABEL = {
   PSAX_AV: 'PSAX-AV', MELAA: 'ME LAA', PSAX_MV: 'PSAX-MV', RVIT: 'RV inflow', SC_IVC: 'Subcostal IVC',
   SSN: 'Suprasternal', ME2C: 'ME 2C', MEAVSAX: 'ME AV SAX', MEBICAVAL: 'ME bicaval', MERVIO: 'ME RV in-out',
   DESCAO: 'Desc Ao SAX', MEAVLAX: 'ME AV LAX', MECOMM: 'ME commissural', TG2C: 'TG 2C', TGLAX: 'TG LAX',
-  DTG5C: 'Deep TG 5C', DESCAOLAX: 'Desc Ao LAX',
+  DTG5C: 'Deep TG 5C', DESCAOLAX: 'Desc Ao LAX', MEASCSAX: 'ME Asc SAX', MEASCLAX: 'ME Asc LAX',
+  TGBSAX: 'TG basal SAX', TGRVIN: 'TG RV inflow', UEARCHLAX: 'UE arch LAX', UEARCHSAX: 'UE arch SAX',
 };
 
 // Transesophageal (TEE) window set (views.js): a higher-frequency probe in the
 // oesophagus directly behind the left atrium, so the atria sit in the near field.
-const TEE_CAM = { ME4C: 'A4C', MELAX: 'PLAX', TGSAX: 'PSAX', MELAA: 'A2C', ME2C: 'A2C', MEAVSAX: 'PSAX_AV',
-  MEBICAVAL: 'SUBCOSTAL', MERVIO: 'PSAX_AV', DESCAO: 'PSAX', MEAVLAX: 'PLAX', MECOMM: 'A2C', TG2C: 'A2C',
-  TGLAX: 'PLAX', DTG5C: 'A4C', DESCAOLAX: 'PSAX' }; // reuse a sensible 3D camera
+// 3D camera: every TEE view uses the oblique left-posterior 'TEE' camera off its
+// imaging plane (thorax3d cameraDirForPlane), so the probe in the oesophagus
+// behind the LA and its fan face the viewer
+const TEE_CAM = Object.fromEntries(Object.keys(TEE_VIEWS).map((k) => [k, 'TEE']));
 
 const PATHOLOGY = {
   normal:    { flags: {}, view: 'PLAX', name: 'Normal heart',
@@ -359,7 +361,7 @@ function loop(now) {
   const probe = effectiveProbe(G.A);
 
   echo.depthCm = state.depthCm || 17;
-  heart3d.updateProbe(probe, echo.sectorHalf, echo.depthCm);
+  heart3d.updateProbe(probe, echo.sectorHalf, echo.depthCm, !!TEE_VIEWS[state.viewName]);
   // Particle advection can use a bounded step without altering the heart clock.
   heart3d.update(G, state.path, probe, advancing ? Math.min(dt, 0.05) : 0);
   echo.rrSec = 60 / (state.hr || 72);
@@ -666,21 +668,23 @@ function setView(name) {
     state.baseProbe = tee.probe();
     state.depthCm = tee.depth; echo.depthCm = tee.depth;
     echo.freqMHz = 5.5;                 // TEE probes run higher-frequency → finer PSF
+    echo.sectorHalf = sectorHalfOf(tee); // multiplane TEE: a 90 deg sector
     echo.nearFieldCm = 0.3;             // only the oesophageal wall lies in front
     // small high-frequency TEE aperture: a thin slab focused in the near field
     echo.elevFocus = 4.0; echo.elevMin = 0.05; echo.elevDiv = 0.015;
     setRange('depth', tee.depth, 'depthOut', String(tee.depth), tee.depth + ' cm');
-    heart3d.setCameraForView(TEE_CAM[name] || 'A4C');
+    heart3d.setCameraForView(TEE_CAM[name] || 'TEE', state.baseProbe, true);
   } else {
     state.baseProbe = (VIEWS[name] || EXTRA_VIEWS[name].probe)();
     echo.freqMHz = 2.7;                 // standard transthoracic probe
+    echo.sectorHalf = sectorHalfOf(null);
     echo.elevFocus = 8.0; echo.elevMin = 0.09; echo.elevDiv = 0.025;
     // chest wall (parasternal / apical) or abdominal wall (subcostal) under the probe
     echo.nearFieldCm = name === 'SUBCOSTAL' ? 1.6 : /^A\dC$/.test(name) ? 1.4 : 2.0;
     const d = viewDepth(name);          // fill the FOV per view
     state.depthCm = d; echo.depthCm = d;
     setRange('depth', d, 'depthOut', String(d), d + ' cm');
-    heart3d.setCameraForView(name);
+    heart3d.setCameraForView(name, state.baseProbe, false);
   }
   state.az = 0; state.tilt = 0; state.slide = 0;
   state.tee = { omni: null, adv: 0, rot: 0, flex: 0 };
@@ -935,10 +939,32 @@ const bind = (id, outId, fn, suffix = '', unit) => {
     e.target.setAttribute('aria-valuetext', unit != null ? e.target.value + unit : disp);
   });
 };
+// TEE manipulation away from the view's preset: omniplane angle (the slider reads
+// whole degrees), advance / withdraw, turn or flex
+function teeModified() {
+  if (!TEE_VIEWS[state.viewName]) return false;
+  const tm = state.tee, om0 = Math.round(Math.min(180, Math.max(0, teeOmni(state.baseProbe))));
+  return (tm.omni != null && Math.abs(tm.omni - om0) >= 1) || !!tm.adv || !!tm.rot || !!tm.flex;
+}
+// the on-image view tag: the preset's name, or for a manipulated TEE probe the
+// live omniplane angle and the preset it now matches (one probe: the ME4C turned
+// to ~60 deg is the ME commissural), else '<view> → omni N°, modified'
+function updateViewTag() {
+  const t = document.getElementById('viewTag');
+  if (!t) return;
+  const name = state.viewName, lab = VIEW_LABEL[name] || name;
+  if (!teeModified()) { t.textContent = lab; return; }
+  const p = effectiveProbe(null), om = Math.round(((teeOmni(p) % 180) + 180) % 180);
+  const near = nearestTeePreset(p);
+  t.textContent = near.match && near.name !== name
+    ? `${VIEW_LABEL[near.name] || near.name} · omni ${om}°`
+    : `${lab} → omni ${om}°, modified`;
+}
 function updatePlaneFlag() {
-  const modified = !!(state.az || state.tilt || state.slide);
+  const modified = !!(state.az || state.tilt || state.slide) || teeModified();
   const f = document.getElementById('planeFlag');
   if (f) f.textContent = modified ? '• modified' : '';
+  updateViewTag();
   // the reset affordance reflects whether the plane has actually been moved
   const reset = document.getElementById('resetPlane');
   if (reset) { reset.disabled = !modified; reset.classList.toggle('muted', !modified); }
@@ -948,15 +974,16 @@ bind('tilt', 'tiltOut', (v) => { state.tilt = v; updatePlaneFlag(); }, '°', '°
 bind('slide', 'slideOut', (v) => { state.slide = v; updatePlaneFlag(); }, '', ' cm');
 bind('depth', 'depthOut', (v) => (state.depthCm = v), '', ' cm');
 // TEE probe: omniplane angle, advance / withdraw (slider in mm), turn and flex
-bind('omni', 'omniOut', (v) => { state.tee.omni = v; }, '°', '°');
+bind('omni', 'omniOut', (v) => { state.tee.omni = v; updatePlaneFlag(); }, '°', '°');
 document.getElementById('adv').addEventListener('input', (e) => {
   state.tee.adv = +e.target.value / 10;
   const t = state.tee.adv.toFixed(1);
   document.getElementById('advOut').textContent = t;
   e.target.setAttribute('aria-valuetext', t + ' cm');
+  updatePlaneFlag();
 });
-bind('rot', 'rotOut', (v) => { state.tee.rot = v; }, '°', '°');
-bind('flex', 'flexOut', (v) => { state.tee.flex = v; }, '°', '°');
+bind('rot', 'rotOut', (v) => { state.tee.rot = v; updatePlaneFlag(); }, '°', '°');
+bind('flex', 'flexOut', (v) => { state.tee.flex = v; updatePlaneFlag(); }, '°', '°');
 bind('gain', 'gainOut', (v) => (echo.gain = v));
 bind('nyq', 'nyqOut', (v) => (echo.nyquist = v), '', ' m/s');
 bind('pers', 'persOut', (v) => (echo.persistence = v));

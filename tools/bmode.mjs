@@ -3,7 +3,7 @@
 // canvases, and returns the grey image together with the per-pixel tissue kind,
 // depth and beam index, so image-physics properties (which reflector is the
 // brightest, how a pleural line fades) can be checked numerically.
-import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS } from '../js/views.js';
+import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, sectorHalfOf } from '../js/views.js';
 
 const noop = () => {};
 const stubCtx = () => new Proxy({
@@ -35,6 +35,7 @@ export function renderBmode(name, phase = 0, path = {}) {
     e.nearFieldCm = name === 'SUBCOSTAL' ? 1.6 : /^A\dC$/.test(name) ? 1.4 : 2.0;
     e.depthCm = vw.depth || 16;
   }
+  e.sectorHalf = sectorHalfOf(vw);           // (90 deg TEE sector, as main.js setView)
   const G = geometryAt(phase, path);
   let probe = { ...base };
   if (vw.track) { const o = vw.track(G.A); probe = { ...base, pos: add(base.pos, o), target: base.target && add(base.target, o) }; }
@@ -92,6 +93,7 @@ export function renderDoppler(name, phase = 0, path = {}, opts = {}) {
   const base = vw.probe();
   e.viewName = name; e.colorOn = opts.color !== false; e.showLabels = false;
   e.dopplerSite = opts.site || null; e.dopplerMode = opts.mode || 'auto'; e.pwNyquist = opts.pwNyquist || null;
+  e.dopplerAlign = !!opts.align;
   if (opts.nyquist) e.nyquist = opts.nyquist; else e.nyquist = 0.62;
   if (opts.cboxSize) e.cboxSize = opts.cboxSize; else e.cboxSize = 0.45;
   if (tee) { e.depthCm = tee.depth; e.freqMHz = 5.5; e.nearFieldCm = 0.3; e.elevFocus = 4.0; e.elevMin = 0.05; e.elevDiv = 0.015; }
@@ -100,6 +102,7 @@ export function renderDoppler(name, phase = 0, path = {}, opts = {}) {
     e.nearFieldCm = name === 'SUBCOSTAL' ? 1.6 : /^A\dC$/.test(name) ? 1.4 : 2.0;
     e.depthCm = vw.depth || 16;
   }
+  e.sectorHalf = sectorHalfOf(vw);           // (90 deg TEE sector, as main.js setView)
   const G = geometryAt(phase, path);
   let probe = { ...base };
   if (vw.track) { const o = vw.track(G.A); probe = { ...base, pos: add(base.pos, o), target: base.target && add(base.target, o) }; }

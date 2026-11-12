@@ -4,7 +4,8 @@
 //   tissue/<scene>/<VIEW>.png  tissue-label maps of each imaging plane (classify()
 //                              over the sector; legend in README.md), in the
 //                              echo display's orientation: depth down, probe.lat
-//                              to the right, 0.66 rad half-angle sector
+//                              to the right, the view's sector (0.66 rad half-angle
+//                              TTE, 90 deg TEE)
 //   echo/<scene>/<VIEW>.png    the rendered Echo Display panel (B-mode, colour,
 //                              spectral trace) for each view at a fixed phase
 //   3d/<VIEW>.png              the 3D anatomy panel with the imaging plane
@@ -23,7 +24,7 @@ import zlib from 'zlib';
 import { execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { geometryAt, classify, TISSUE } from '../js/cardiac-model.js';
-import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, teeManipulate } from '../js/views.js';
+import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, teeManipulate, sectorHalfOf } from '../js/views.js';
 import { hemoSummary } from '../js/hemodynamics.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -37,7 +38,7 @@ const PATHS = {
   asd: { asd: true }, vsd: { vsd: true }, rwma: { rwma: 'septal' }, tr: { tr: true },
 };
 const TTE_ALL = 'PLAX,PSAX,PSAX_AV,PSAX_MV,A4C,A5C,A2C,A3C,SUBCOSTAL,RVIT,SC_IVC,SSN';
-const TEE_ALL = 'ME4C,MECOMM,ME2C,MELAX,MEAVLAX,MEAVSAX,MEBICAVAL,MERVIO,MELAA,TGSAX,TG2C,TGLAX,DTG5C,DESCAO,DESCAOLAX';
+const TEE_ALL = 'ME4C,MECOMM,ME2C,MELAX,MEAVLAX,MEAVSAX,MEBICAVAL,MERVIO,MELAA,MEASCSAX,MEASCLAX,TGSAX,TGBSAX,TG2C,TGLAX,TGRVIN,DTG5C,DESCAO,DESCAOLAX,UEARCHLAX,UEARCHSAX';
 // [scene dir, pathology key, views, phase]
 let ECHO_SCENES = [
   ['normal_ED', 'normal', TTE_ALL, 0.99], ['normal_ES', 'normal', 'PLAX,PSAX,PSAX_AV,PSAX_MV,A4C,A2C,SUBCOSTAL', 0.42],
@@ -72,6 +73,15 @@ if (si > 0) {
   OMNI_SCENES = [];
   QUICK = true;
 }
+// quick omniplane sweep: --omni <TEE VIEW> <angle,angle,...> (normal heart, phase 0.99)
+const oi = process.argv.indexOf('--omni');
+if (oi > 0) {
+  const [view, angles] = process.argv.slice(oi + 1, oi + 3);
+  if (!TEE_VIEWS[view] || !angles) { console.error('usage: --omni <TEE VIEW> <angle,...>'); process.exit(2); }
+  ECHO_SCENES = []; TISSUE_SCENES = [];
+  OMNI_SCENES = [['tee_omni', view, angles.split(',').map(Number)]];
+  QUICK = true;
+}
 
 // ---- tissue maps -------------------------------------------------------------
 const COLOURS = {
@@ -102,7 +112,7 @@ function tissueMap(name, phase, flags, size = 420, omni = null) {
   if (v.track) { const o = v.track(G.A); pos = pos.map((x, i) => x + o[i]); }
   // the TEE omniplane control turns the plane about the beam, as the app does
   if (omni != null && TEE_VIEWS[name]) { p = teeManipulate({ ...p, pos }, { omni }); pos = p.pos; }
-  const depth = v.depth || 16, half = 0.66, W = size, H = size;
+  const depth = v.depth || 16, half = sectorHalfOf(v), W = size, H = size;
   const sx = (2 * depth * Math.sin(half)) / W, sy = depth / H;
   const rgb = Buffer.alloc(W * H * 3);
   for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
