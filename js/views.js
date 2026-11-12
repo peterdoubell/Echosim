@@ -297,30 +297,34 @@ export const TTE_VIEWS = {
 // RV inflow (parasternal, tilted from the PLAX toward the right hip): the RV
 // inflow in the near field, the tricuspid (anterior and posterior leaflets)
 // hinged at its annulus, and the RA in the far field with the coronary sinus and
-// the IVC (Eustachian valve) entering it. The plane holds the tricuspid inflow
-// axis, rolled about it to pass between the CS ostium and the IVC orifice (they
-// lie ~36 deg apart round that axis, so each sits ~0.55 cm off a plane that holds
-// the axis), set RVIT_CS_W of the way toward the CS ostium: the small CS mouth is
-// cut and the IVC orifice (~0.9 cm in radius, ~0.75 cm off the plane) still is.
-// (12 cm deep: the RA floor and the caval entry, not the liver beyond them.)
+// the IVC (Eustachian valve) entering it.
+// The plane was chosen by search (as for the ME LAA) over rolls about the
+// tricuspid inflow axis and tilts off it: rolled RVIT_ROLL deg from the CS
+// ostium direction, tilted RVIT_TILT deg off the axis, and set RVIT_CS_W of the
+// way from the IVC orifice to the CS ostium. It cuts no septum or LV (the old
+// plane through the septal-hugging ostia cut 13-19 % septum), keeps the CS
+// ostium within ~0.3 cm and the TV centre within ~0.2 cm, and leaves no great
+// artery in the far field. (The planes that also hold the IVC axis as a tube all
+// cut the aortic root, ~9 cm2: the IVC is aimed at the upper septum. Here the
+// IVC enters ~36 deg across the plane, its orifice cut.)
 // Within it the beam runs posteriorly from the chest wall, swung RVIT_SWING
 // toward the inflow axis (the probe angled inferomedially toward the right hip),
-// so the beam crosses the valve from the RV into the RA instead of passing beside
-// it. RV apex to the left of the screen, base (RA) to the right, as in the PLAX.
-// (rolled 20 deg: the CS ostium is cut wider and the IVC orifice beside it, and
-// the plane's lower edge passes above the gastric fundus at end-systole)
-const RVIT_ROLL = 20, RVIT_SWING = 25, RVIT_CS_W = 0.65;    // deg, deg, fraction
+// so the beam crosses the valve from the RV into the RA, meeting the tricuspid
+// inflow within ~10 deg (the default tricuspid-inflow PW trace).
+// RV apex to the left of the screen, base (RA) to the right, as in the PLAX.
+// (15.5 cm deep: the whole RA, up to its roof, inside the sector.)
+const RVIT_ROLL = 30, RVIT_TILT = 12, RVIT_SWING = 40, RVIT_CS_W = 0.7;    // deg, deg, deg, fraction
 const csOstium = (A) => A.cs[A.cs.length - 1].b;
 let _rvit = null;
 function rvInflowProbe() {
   if (!_rvit) {
     const tv = VALVE_DEFS.tricuspid, ax = tv.n, T = tv.c;
     const cs = csOstium(A0), iv = A0.ivc.a;
-    const v1 = inPlane(vsub(cs, T), ax), v2 = inPlane(vsub(iv, T), ax);
-    const u = vrot(v1, norm(vcross(v1, v2)), RVIT_ROLL * Math.PI / 180);
-    const n = norm(vcross(ax, u));
+    const u0 = inPlane(vsub(cs, T), ax), w0 = vcross(ax, u0), ph = RVIT_ROLL * Math.PI / 180;
+    const u = norm(vadd(vscale(u0, Math.cos(ph)), vscale(w0, Math.sin(ph))));
+    const n = vrot(norm(vcross(ax, u)), u, RVIT_TILT * Math.PI / 180);
     const tgt = vadd(T, vscale(n, vdot(vsub(cs, T), n) * RVIT_CS_W + vdot(vsub(iv, T), n) * (1 - RVIT_CS_W)));
-    const post = inPlane(BODY_AX.P, n), toRA = inPlane(vsub(ax, vscale(post, vdot(ax, post))), n);
+    const post = inPlane(BODY_AX.P, n), ax2 = inPlane(ax, n), toRA = inPlane(vsub(ax2, vscale(post, vdot(ax2, post))), n);
     const sw = RVIT_SWING * Math.PI / 180;
     const dir = norm(vadd(vscale(post, Math.cos(sw)), vscale(toRA, Math.sin(sw))));
     let right = vcross(n, dir);
@@ -421,7 +425,7 @@ export const EXTRA_VIEWS = {
   // orifice, ~6 deg off perpendicular to the inflow axis) — where the orifice is
   // planimetered — instead of at the leaflet bodies, which cut the dome obliquely.
   PSAX_MV: { probe: psaxMvProbe, depth: 13, track: psaxMvTrack },
-  RVIT: { probe: rvInflowProbe, depth: 12, track: rvInflowTrack },
+  RVIT: { probe: rvInflowProbe, depth: 15.5, track: rvInflowTrack },
   SC_IVC: { probe: subcostalIvcProbe, depth: 12.5 },
   SSN: { probe: suprasternalProbe, depth: 16 },
 };
