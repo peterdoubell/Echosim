@@ -196,30 +196,28 @@ function atrialKick(phase) {
   return pulse(0.86, 1.0, phase);
 }
 
-// Right-heart timing. The right ventricle is not separately lumped-modelled, so it
-// replays the left-ventricular trace on its own clock instead of sharing the
-// left-heart valve events: the tricuspid closes ~25 ms after the mitral (T1 after
-// M1), the pulmonic valve opens ~10 ms before the aortic (shorter RV isovolumic
-// contraction against the low pulmonary pressure) and closes ~30 ms after it (P2
-// after A2: the longer RV ejection into the compliant pulmonary bed), and the
-// tricuspid opens ~10 ms before the mitral (RV IVRT ~35 ms). Each row maps an LV
-// reference phase (where the right-heart event happens) onto the LV-trace phase
-// whose state the right heart shows then. At the reference 0.833 s cycle: 0.030
-// = 25 ms, 0.012 = 10 ms, 0.036 = 30 ms.
-export const RV_EVENTS = [
-  [0.026, -0.004],   // TVC  <- MVC
-  [0.060, 0.072],    // PVO  <- AVO
-  [0.457, 0.421],    // PVC (P2) <- AVC (A2)
-  [0.501, 0.513],    // TVO  <- MVO
-];
-export function rvPhase(phase) {
-  let p = ((phase % 1) + 1) % 1;
-  if (p < RV_EVENTS[0][0]) p += 1;
-  for (let i = 0; i < RV_EVENTS.length; i++) {
-    const a = RV_EVENTS[i], b = i + 1 < RV_EVENTS.length ? RV_EVENTS[i + 1] : [RV_EVENTS[0][0] + 1, RV_EVENTS[0][1] + 1];
-    if (p < b[0]) { const q = a[1] + (b[1] - a[1]) * (p - a[0]) / (b[0] - a[0]); return ((q % 1) + 1) % 1; }
-  }
-  return phase;
+// Right-heart timing. The right heart is solved in the same closed loop as the
+// left (hemodynamics.js: its own RV elastance, activated RV_TIMING.delay after
+// the LV and relaxing on its own time; RA, tricuspid, pulmonary valve and PA), so
+// its valve events (T1 after M1, P2 after A2, tricuspid opening before mitral),
+// its volume and its flows come straight from the solved Qtv, Qpa and Vrv at the
+// cycle phase. (Review 12: the earlier replay of the LEFT ventricle's trace on a
+// shifted clock is retired.) What remains is phaseRV, the phase at which the
+// atrial reservoir / conduit / booster curve, the TR-jet envelope and the hepatic
+// veins (all drawn on left-heart timing) are read for the right heart: a warp
+// that puts the left heart's AV-valve closure and opening onto the SOLVED
+// tricuspid closure and opening of this circulation (rvPhase(phase, path)).
+export function rvPhase(phase, path = null) {
+  const p = ((phase % 1) + 1) % 1;
+  if (!path) return p;
+  const w = openTrace(path).warp;
+  // anchors: [right-heart phase, left-heart phase] at AV-valve closure and opening
+  const a0 = w[0], a1 = w[1];
+  let x = p - a0[0]; x -= Math.floor(x);
+  const span1 = ((a1[0] - a0[0]) % 1 + 1) % 1, span2 = 1 - span1;
+  const l1 = ((a1[1] - a0[1]) % 1 + 1) % 1, l2 = 1 - l1;
+  const q = x < span1 ? a0[1] + x * l1 / span1 : a1[1] + (x - span1) * l2 / span2;
+  return ((q % 1) + 1) % 1;
 }
 
 // Valve opening 0..1, driven by the modelled transvalvular FLOW so the leaflets
@@ -234,7 +232,7 @@ export function rvPhase(phase) {
 // lag. Closure takes ~20-40 ms, and the leaflets cross 10 % open within a few
 // ms of the flow-defined events (AVO, AVC, MVO, MVC). Pre-computed once
 // per circulation as a periodic trace indexed by phase; the right-heart valves
-// read it on the right heart's own clock (rvPhase).
+// read their own solved flows (tricuspid Qtv, pulmonary Qpa).
 const OPEN_N = 960, OPEN_CYCLE = 0.833;                   // samples per cycle; reference cycle (s)
 const OPEN_TAU_OPEN = 0.008, OPEN_TAU_CLOSE = 0.008, OPEN_LEAD_O = 0.007, OPEN_LEAD = 0.011;   // s
 const OPEN_Q_AV = 0.2, OPEN_Q_SL = 0.12;                  // flow (x peak) for a fully open valve
@@ -243,8 +241,13 @@ function openTrace(path) {
   const sum = hemoSummary(path);
   let tr = _openCache.get(sum);
   if (tr) return tr;
-  const qmv = new Float32Array(OPEN_N), qao = new Float32Array(OPEN_N);
-  for (let i = 0; i < OPEN_N; i++) { const h = hemodynamics(i / OPEN_N, path); qmv[i] = h.Qmv; qao[i] = h.Qao; }
+  const qmv = new Float32Array(OPEN_N), qao = new Float32Array(OPEN_N), qtv = new Float32Array(OPEN_N), qpa = new Float32Array(OPEN_N);
+  let qtvMax = 0, qpaMax = 0;
+  for (let i = 0; i < OPEN_N; i++) {
+    const h = hemodynamics(i / OPEN_N, path);
+    qmv[i] = h.Qmv; qao[i] = h.Qao; qtv[i] = h.Qtv; qpa[i] = h.Qpa;
+    qtvMax = Math.max(qtvMax, h.Qtv); qpaMax = Math.max(qpaMax, h.Qpa);
+  }
   const L = Math.round(OPEN_LEAD / OPEN_CYCLE * OPEN_N), Lo = Math.round(OPEN_LEAD_O / OPEN_CYCLE * OPEN_N), dt = OPEN_CYCLE / OPEN_N;
   const build = (q, qFull) => {
     const tgt = new Float32Array(OPEN_N), out = new Float32Array(OPEN_N);
@@ -256,12 +259,27 @@ function openTrace(path) {
     }
     return out;
   };
-  tr = { av: build(qmv, OPEN_Q_AV * sum.QmvMax), sl: build(qao, OPEN_Q_SL * sum.QaoMax) };
+  tr = { av: build(qmv, OPEN_Q_AV * sum.QmvMax), sl: build(qao, OPEN_Q_SL * sum.QaoMax),
+    tv: build(qtv, OPEN_Q_AV * qtvMax), pv: build(qpa, OPEN_Q_SL * qpaMax) };
+  // AV-valve events (10 % open): closure nearest the QRS, opening nearest
+  // mid-cycle, for the mitral (left) and tricuspid (right) — rvPhase's anchors
+  const cross = (arr, closing, near) => {
+    let best = near, bd = 1;
+    for (let i = 0; i < OPEN_N; i++) {
+      const a = arr[(i + OPEN_N - 1) % OPEN_N], b = arr[i];
+      if (closing ? a > 0.1 && b <= 0.1 : a <= 0.1 && b > 0.1) {
+        const ph = i / OPEN_N; let d = Math.abs(ph - near); d = Math.min(d, 1 - d);
+        if (d < bd) { bd = d; best = ph; }
+      }
+    }
+    return best;
+  };
+  tr.warp = [[cross(tr.tv, true, 0), cross(tr.av, true, 0)], [cross(tr.tv, false, 0.5), cross(tr.av, false, 0.5)]];
   _openCache.set(sum, tr);
   return tr;
 }
 function valveOpening(name, phase, tr, path) {
-  const arr = VALVES[name].opensInDiastole ? tr.av : tr.sl;
+  const arr = name === 'tricuspid' ? tr.tv : name === 'pulmonic' ? tr.pv : VALVES[name].opensInDiastole ? tr.av : tr.sl;
   const x = (((phase % 1) + 1) % 1) * OPEN_N, i0 = Math.floor(x) % OPEN_N, f = x - Math.floor(x);
   let o = arr[i0] + (arr[(i0 + 1) % OPEN_N] - arr[i0]) * f;
   // pathology tweaks
@@ -284,6 +302,11 @@ const AVA_NORM = 3.0, AVA_AS = 0.6;   // aortic (LVOT/valve) effective orifice a
 // (MS: hemodynamics.js MS_AREA, Bernoulli): the E and A peaks, their ratio and the
 // E-wave deceleration all come straight from the modelled transmitral flow
 const MVA_NORM = 4.0;
+// right-heart effective orifice areas (cm^2) for the instantaneous velocity
+// v = Q / A, at a normal RV size (the tricuspid one grows with the dilated RV): the
+// tricuspid inflow at the leaflet tips (normal E ~0.5 m/s, A ~0.3) and the RVOT
+// just below the pulmonary valve (2.4 cm: peak ~0.85 m/s, VTI ~16 cm)
+const A_TV = 6.0, A_RVOT = 4.5;
 const ET_EJECT = 0.33, T_FILL = 0.37; // systolic ejection / diastolic filling time (s)
 const K_AO = 1.56;                    // peak/mean profile factor (peak ≈ k·mean)
 
@@ -342,13 +365,21 @@ function hemoFrame(hd, path, rvHd, phaseRV) {
   const ejAo = s.QaoMax > 0 ? clamp(hd.Qao / s.QaoMax, 0, 1) : 0;
   const ejMv = s.QmvMax > 0 ? clamp(hd.Qmv / s.QmvMax, 0, 1) : 0;
   const ejMr = hd.Qmr > 0.5 && vMRPeak > 0 ? clamp(Math.sqrt(Math.max(0, hd.Plv - hd.Pla) / 4) / vMRPeak, 0, 1) : 0;
-  // right-heart envelopes (tricuspid inflow, RV outflow) on the right heart's clock
-  const r = rvHd || hd;
-  // (tamponade, one respiratory phase: the tricuspid inflow scales with that
-  // phase's solved tricuspid E against the apnoeic one — up in inspiration)
-  const tvResp = path.tamponade && path.resp ? clamp(s.QtvE / Math.max(1, hemoSummary({ ...path, resp: undefined }).QtvE), 0.3, 1.8) : 1;
-  const ejTv = s.QmvMax > 0 ? clamp(r.Qmv / s.QmvMax, 0, 1) * tvResp : 0;
-  const ejPv = s.QaoMax > 0 ? clamp(r.Qao / s.QaoMax, 0, 1) : 0;
+  // right-heart velocities from the SOLVED right heart (review 12, MOT-4/PAT-10):
+  // tricuspid inflow v = Qtv / A_TV and RV outflow v = Qpa / A_RVOT, so the
+  // tricuspid E/A, the RVOT acceleration and ejection times, the PH mid-systolic
+  // notch and the ASD's raised Qp all come from the circulation. (Each respiratory
+  // phase of the tamponade case is its own solved circulation, so its tricuspid
+  // E rises in inspiration by itself.) ejTv / ejPv are the same flows over the
+  // case's peak, for the colour-flow and 3D streams that scale an envelope.
+  const RVD = rvDrive(path);
+  // (the tricuspid annulus dilates with the RV; the RVOT just below the valve is
+  // held at the pulmonary annulus, as drawn — so a raised Qp shows as velocity)
+  const aTv = A_TV * RVD.rvSize, aRvot = A_RVOT;
+  const vTv = Math.max(0, hd.Qtv) / (aTv * 100), vPv = Math.max(0, hd.Qpa) / (aRvot * 100);
+  const vTvPeak = (s.QtvMax || 0) / (aTv * 100);
+  const ejTv = vTvPeak > 0 ? clamp(vTv / vTvPeak, 0, 1) : 0;
+  const ejPv = RVD.QpaMax > 0 ? clamp(hd.Qpa / RVD.QpaMax, 0, 1) : 0;
   // INSTANTANEOUS regurgitant jet speeds (m/s). MR: Bernoulli on the LV-LA
   // pressure drop while the circulation carries regurgitant flow, so the CW
   // envelope is holosystolic, its upstroke follows dP/dt and the compliant LA's
@@ -365,6 +396,7 @@ function hemoFrame(hd, path, rvHd, phaseRV) {
     regurgFraction: s.regurgFraction, gradient: s.gradient,
     PlvSys: s.PlvSys, PaoSys: s.PaoSys, PaoDia: s.PaoDia,
     vAoPeak, vMitPeak, vMRPeak, vTRPeak, ejAo, ejMv, ejMr, ejTv, ejPv, ejTr, vMR, vTR,
+    vTv, vPv, Qtv: hd.Qtv, Qpa: hd.Qpa, aRvot, aTv,
     // shunt jets (m/s, + = left-to-right): Bernoulli on the modelled LA-RA / LV-RV
     // pressure difference, so the ASD signal is phasic and the VSD jet follows the
     // interventricular gradient
@@ -383,6 +415,44 @@ function hemoFrame(hd, path, rvHd, phaseRV) {
 let _edvRef = null;
 const edvRef = () => (_edvRef != null ? _edvRef : (_edvRef = hemoSummary({}).EDV));
 
+// The drawn right ventricle from the SOLVED right heart (review 12, MOT-4):
+//  - size: the RV is scaled so its drawn end-diastolic volume holds the solved
+//    RVEDV (cube root of the volume ratio to normal, the RV's dilatation);
+//  - contractility: its short-axis (FAC) share follows the solved RV ejection
+//    fraction relative to normal (rvC);
+//  - long-axis share (TAPSE, rvL): afterload hits the longitudinal fibres
+//    hardest, so above a normal RV systolic pressure it falls further (TAPSE
+//    ~1.5 cm in severe PAH with an FAC of ~30-35 %);
+//  - timing: kRV = (RVEDV - Vrv) / RV stroke volume, the solved RV volume.
+// RV_DRAW holds the calibration so the drawn RV voxel volume and EF track the
+// solved ones as the LV's track rho (verify-anatomy, 'Right-heart drive').
+const RV_DRAW = { longGain: 1, gamma: 1.55, lvExp: 0.8, lvhK: 0.36, septK: 0.55, wallK: 0.37,
+  afterloadRef: 35, afterloadK: 0.0115, lonMin: 0.3, cMin: 0.2, cMax: 1.3 };
+let _rvRef = null;
+const _rvDrive = new Map();
+function rvDrive(path) {
+  const s = hemoSummary(path);
+  let r = _rvDrive.get(s);
+  if (r) return r;
+  if (!_rvRef) _rvRef = hemoSummary({});
+  const ef = clamp(s.RVEF / _rvRef.RVEF, RV_DRAW.cMin, RV_DRAW.cMax);
+  const lon = clamp(1 - RV_DRAW.afterloadK * Math.max(0, s.RVSP - RV_DRAW.afterloadRef), RV_DRAW.lonMin, 1);
+  // (the volume-overload septum, flattened in diastole and recovering in systole,
+  // and a hypertrophied septum thickening into the RV both add to the drawn RV's
+  // ejection: the free wall's share is lowered by as much)
+  const sep = rightHeartLoad(path).septum, swing = sep ? Math.max(0, sep(0) - sep(1)) : 0;
+  const lvh = path.lvh || path.aorticStenosis ? 0.55 : 0;
+  r = {
+    rvSize: Math.cbrt(s.RVEDV / _rvRef.RVEDV),
+    rvC: Math.max(0.05, Math.pow(ef, RV_DRAW.gamma) - RV_DRAW.septK * swing - RV_DRAW.wallK * lvh),
+    rvL: RV_DRAW.longGain * Math.min(1, ef) * lon,
+    RVEDV: s.RVEDV, RVSV: Math.max(1e-6, s.RVEDV - s.RVESV), QpaMax: 0,
+  };
+  for (let i = 0; i < 240; i++) r.QpaMax = Math.max(r.QpaMax, hemodynamics(i / 240, path).Qpa);
+  _rvDrive.set(s, r);
+  return r;
+}
+
 export function geometryAt(phase, path = {}) {
   const kick = atrialKick(phase);
 
@@ -393,14 +463,13 @@ export function geometryAt(phase, path = {}) {
   // product tracks rho EXACTLY (sShort²·sLong = rho), with the long axis
   // shortening less than the short axis; hence the measured EF/LVIDs fall out of
   // the modelled volume rather than a prescribed phase curve. hd.kv (normalised)
-  // still times the wall-thickening. The right heart reads the same trace on its
-  // own clock (rvPhase); copied out first, as hemodynamics() returns a singleton.
-  const phaseRV = rvPhase(phase);
+  // still times the wall-thickening. The right ventricle follows its own solved
+  // volume (rvDrive: kRV from Vrv, size from RVEDV, contractility from RVEF).
+  const phaseRV = rvPhase(phase, path);
   const otr = openTrace(path);        // (first: it samples the hemodynamics() singleton)
-  const hdR = hemodynamics(phaseRV, path);
-  const rvHd = { Qmv: hdR.Qmv, Qao: hdR.Qao, kv: hdR.kv, sum: hdR.sum, Plv: hdR.Plv, Pla: hdR.Pla };
-  const kvR = rvHd.kv, kR = clamp(kvR, 0, 1);
+  const RVD = rvDrive(path);
   const hd = hemodynamics(phase, path);
+  const kvR = (RVD.RVEDV - hd.Vrv) / RVD.RVSV, kR = clamp(kvR, 0, 1);
   const rho = hd.rho;                 // Vlv / EDV (absolute cavity-volume ratio)
   const kv = hd.kv;                   // normalised contraction fraction (timing)
   // wall-thickening timing follows the modelled LV volume, so the walls, valves
@@ -441,16 +510,22 @@ export function geometryAt(phase, path = {}) {
   // wall thickens as the short axis shrinks (approx. muscle-volume conservation)
   const lvWall = BASE.lv.wall * lvWallMul * clamp(1 / sShort, 1, 1.7);
 
-  const rvC = rightHeartLoad(path).rvC;   // RV contractility (anatomy.js)
+  // (the drawn RV shares its septum with the LV: a larger LV bows into it and a
+  // hypertrophied septum takes up its cavity, so the RV is scaled up to hold the
+  // solved RVEDV — the volume-exact coupling the LV has through rho)
+  const rvFit = Math.cbrt(Math.pow(lvScale, -RV_DRAW.lvExp) / (1 - RV_DRAW.lvhK * Math.max(0, lvWallMul - 1)));
+  const rvC = RVD.rvC;                    // RV contractility (solved RVEF, rvDrive)
+  // (the coarse RV proxy, for flow gating, at the drawn RV's size and contraction)
   const rvR = BASE.rv.r.map((r, i) => {
     const shorten = (i === 1 ? 0.12 : 0.26) * rvC;
-    return r * (1 - kvR * shorten);
+    return r * Math.min(1, RVD.rvSize * rvFit) * (1 - kR * shorten);
   });
   const rvWall = BASE.rv.wall * (1 + kR * 0.5);
 
   // anatomical SDF bundle (built once here so the chordae apparatus below can
   // hang off the same apex-anchored papillary tips + live valve planes).
-  const A = anatomyParams(k, kick, path, { sShort, sLong, lvWall, lvScale, lvLong, laScale, kRV: kR, phaseRV, laAmp: laPhasic(path) }, phase);
+  const A = anatomyParams(k, kick, path, { sShort, sLong, lvWall, lvScale, lvLong, laScale, kRV: kR, phaseRV, laAmp: laPhasic(path),
+    rvSize: RVD.rvSize * rvFit, rvC: RVD.rvC, rvL: RVD.rvL }, phase);
 
   // atria: coarse axis-aligned proxies of the live anatomical atria (which sit on
   // their moving annuli and follow the reservoir/conduit/booster curve), so flow
@@ -459,9 +534,9 @@ export function geometryAt(phase, path = {}) {
   const raR = [A.ra.r1, A.ra.rl, A.ra.r2];
   const valves = {
     mitral: valveOpening('mitral', phase, otr, path),
-    tricuspid: valveOpening('tricuspid', phaseRV, otr, path),
+    tricuspid: valveOpening('tricuspid', phase, otr, path),
     aortic: valveOpening('aortic', phase, otr, path),
-    pulmonic: valveOpening('pulmonic', phaseRV, otr, path),
+    pulmonic: valveOpening('pulmonic', phase, otr, path),
   };
 
   // rheumatic MS: the centre of the open funnel tip (the fish-mouth orifice), where
@@ -478,7 +553,7 @@ export function geometryAt(phase, path = {}) {
     // stroke volume, EF, jet peak velocities) — read by the echo measurements,
     // the flow field and the UI PV-loop panel. A fresh snapshot (not the
     // hemodynamics() singleton) so distinct geometries never alias.
-    hemo: hemoFrame(hd, path, rvHd, phaseRV),
+    hemo: hemoFrame(hd, path, null, phaseRV),
     // Coarse per-chamber ellipsoid proxies — used by the velocity field, the
     // on-image labels and the LVIDd/EF measurements. Tissue classification and
     // the 3D surface use the anatomical SDF (G.A) below, not these.
@@ -1239,7 +1314,11 @@ const RA_MID = [LM.RA_FLOOR0[0] + LM.A_RA[0] * 2.1, LM.RA_FLOOR0[1] + LM.A_RA[1]
 const AX_MITRAL_IN = _mFlow;                    // mitral annulus -> LV apex
 const AX_TRICUSPID_IN = _tvFlow;                // tricuspid annulus -> RV apex
 const AX_LVOT = unit(_sub3(LM.A, LM.LVOT0));    // LVOT -> aorta
-const AX_RVOT = unit(_sub3(LM.PV, LM.RVOT[1])); // infundibulum -> pulmonary artery
+// RV outflow: just below the pulmonary valve the flow runs along the valve /
+// trunk axis U_PA (review 12, TTE-5/PHY-11: the infundibulum-to-valve chord,
+// PV - RVOT[1], lay ~32 deg off the trunk, so the PSAX-AV beam that is aligned with
+// the drawn main PA met it at ~24 deg and no default RVOT trace was recorded)
+const AX_RVOT = LM.U_PA;
 const AX_MR = unit(_sub3(LA_MID, LM.M));        // mitral -> into the LA
 // posterior-leaflet (P2) prolapse drives an ECCENTRIC jet away from the flail
 // leaflet: anteriorly, hugging the anterior LA wall behind the aortic root
@@ -1677,10 +1756,10 @@ export function velocityAt(px, py, pz, G, path = {}) {
     const tAlong = _axis.along;
     const tW = 1.35 * (1 - 0.5 * clamp(tAlong / 4.5, 0, 1));
     const tShape = gauss(tPerp, tW) * Math.exp(-clamp(tAlong, 0, 6) / 4.5);
-    const tSpeed = 0.55 * H.ejTv * tShape;
+    const tSpeed = (H.vTv != null ? H.vTv : 0.55 * H.ejTv) * tShape;
     considerFlow((inRV || (tAlong < 1.6 && tPerp < 1.3 && !inAo)) && tAlong > -0.05, AX_TRICUSPID_IN[0], AX_TRICUSPID_IN[1], AX_TRICUSPID_IN[2],
       tSpeed, FLOW.TRICUSPID_IN, false);
-    const vAnnT = 0.55 * H.ejTv;                      // RA-side convergence, as for the mitral
+    const vAnnT = H.vTv != null ? H.vTv : 0.55 * H.ejTv;   // RA-side convergence, as for the mitral
     if (tAlong < 0 && vAnnT > 0.02 && !inLV && !inLA && !inAo && iasSide(px, py, pz) > 0) {
       const dO = Math.hypot(px - cT[0], py - cT[1], pz - cT[2]);
       if (dO < 2.2 && dO > 1e-3) {
@@ -1724,14 +1803,15 @@ export function velocityAt(px, py, pz, G, path = {}) {
   }
   // RV ejection: on the right heart's clock it starts ~10 ms before and ends
   // ~30 ms after the aortic, so it has its own gate
-  if (H.ejPv > 0.001) {
+  if (H.ejPv > 0.001 || H.vPv > 0.005) {
     // RVOT -> pulmonary artery (centreline anchored at the pulmonic valve).
     // Tightened to the true outflow centreline: a narrow Gaussian, clipped to
     // the downstream (+along) side and to the high subpulmonary tract (py > 0.8)
     // so no stray systolic colour blob appears mid-RV near the tricuspid valve.
     const rPerp = offAxisDist(px, py, pz, G.A.valves.pulmonic.c, AX_RVOT);
     const rAlong = _axis.along;
-    const rSpeed = H.ejPv * 0.9 * gauss(rPerp, 0.55); // systolic timing from the RV ejection envelope
+    // (the solved pulmonary flow over the RVOT area: timing, AT, notch and peak)
+    const rSpeed = (H.vPv != null ? H.vPv : H.ejPv * 0.9) * gauss(rPerp, 0.55);
     considerFlow(rAlong > -2.4 && rAlong < 3.5 && rPerp < 1.3, AX_RVOT[0], AX_RVOT[1], AX_RVOT[2],
       rSpeed, FLOW.RVOT, false);
   }

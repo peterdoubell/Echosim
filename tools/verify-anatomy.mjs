@@ -3400,6 +3400,86 @@ SECTION = 'Pathology';
     assert(gT, 'plain effusion preset matches the normal circulation', ['EDV', 'SV', 'PaoSys', 'RAP', 'RVSP', 'eaFlow'].every((k) => Math.abs(sE[k] - sN[k]) < 1e-9));
   }
 
+  // ---- review 12: the RV and the right-heart Doppler from the SOLVED right heart ----
+  {
+    const gV = 'Right-heart drive (review 12)';
+    // MOT-4: the drawn RV holds the solved RV volume and ejects its ejection fraction
+    // (voxel volume of the RV lumen SDF at the solved RV end-diastole / end-systole)
+    const rvVox = (G) => {
+      const A = G.A, h = 0.2; let lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
+      const grow = (c, r) => { for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], c[k] - r); hi[k] = Math.max(hi[k], c[k] + r); } };
+      grow(A.rv.c, Math.max(...A.rv.r) * 1.5 + 1); grow(A.inflow.c, Math.max(...A.inflow.r) + 1); for (const p of A.rvot) grow(p, 2.2); grow(A.valves.tricuspid.c, 3);
+      let n = 0;
+      for (let x = lo[0]; x <= hi[0]; x += h) for (let y = lo[1]; y <= hi[1]; y += h) for (let z = lo[2]; z <= hi[2]; z += h) if (lumenDist(x, y, z, A, 'RV') < 0) n++;
+      return n * h * h * h;
+    };
+    for (const key of ['normal', 'as', 'ms', 'asd', 'phtn', 'tr']) {
+      const p = PATHS[key], sR = hemoSummary(p);
+      let pe = 0, pm = 0, vMax = -1, vMin = 1e9;
+      for (let i = 0; i < 240; i++) { const v = hemodynamics(i / 240, p).Vrv; if (v > vMax) { vMax = v; pe = i / 240; } if (v < vMin) { vMin = v; pm = i / 240; } }
+      const ved = rvVox(geometryAt(pe, p)), ves = rvVox(geometryAt(pm, p)), ef = (1 - ves / ved) * 100;
+      check(gV, `${key}: voxel RVEF minus solved RVEF`, ef - sR.RVEF, [-5, 5], 'pts', `voxel ${ef.toFixed(0)} %, solved ${sR.RVEF.toFixed(0)} %`);
+      check(gV, `${key}: voxel RVEDV / solved RVEDV`, ved / sR.RVEDV, [0.85, 1.15], '', `voxel ${ved.toFixed(0)} mL, solved ${sR.RVEDV.toFixed(0)} mL`);
+    }
+    check(gV, 'severe MS: drawn RV FAC (A4C)', measureModel({ ...PATHS.ms, grade: 'severe' }).rvfac, [15, 35], '%', `solved RVEF ${hemoSummary(PATHS.ms).RVEF.toFixed(0)} %`);
+
+    // PAT-10 / MOT-4: the displayed right-heart Doppler from the solved flows
+    const CYCLE_S = 0.833;   // reference cycle (s)
+    const trace = (V, p, site) => renderDoppler(V, 0.2, p, { color: false, site }).spec;
+    // RVOT PW (PSAX-AV): acceleration time, ejection time, mid-systolic notch, peak
+    const rvotT = (p) => {
+      const sp = trace('PSAX_AV', p, 'rvot'), n = sp.cols, v = [];
+      for (let c = 0; c < n; c++) v.push(Math.abs(sp.vs[c]));
+      let pk = 0, iPk = 0; for (let c = 0; c < n / 2; c++) if (v[c] > pk) { pk = v[c]; iPk = c; }
+      // (envelope onset and end: 2 % of the peak, the visible edge of the trace)
+      let i0 = iPk; while (i0 > 0 && v[i0 - 1] > 0.02 * pk) i0--;
+      let i1 = iPk; while (i1 < n - 1 && v[i1 + 1] > 0.02 * pk) i1++;
+      // notch: the deepest dip between the first peak and a later local maximum
+      let notch = 0;
+      for (let c = iPk + 1; c < i1; c++) if (v[c] >= v[c - 1] && v[c] >= v[c + 1] && v[c] > 0.3 * pk) {
+        let mn = 1e9; for (let j = iPk; j <= c; j++) mn = Math.min(mn, v[j]);
+        notch = Math.max(notch, 1 - mn / v[c]);
+      }
+      let vti = 0; for (let c = i0; c <= i1; c++) vti += v[c] * 100 * CYCLE_S / n;   // cm
+      return { sp, at: (iPk - i0) / n * CYCLE_S * 1000, et: (i1 - i0 + 1) / n * CYCLE_S * 1000, notch, pk, vti };
+    };
+    const rN = rvotT({}), rP = rvotT(PATHS.phtn), rA = rvotT(PATHS.asd);
+    check(gV, 'normal: RVOT PW acceleration time', rN.at, [120, 160], 'ms', `ET ${rN.et.toFixed(0)} ms, peak ${rN.pk.toFixed(2)} m/s, ${rN.sp.angleDeg.toFixed(0)} deg`);
+    check(gV, 'PH: RVOT acceleration time', rP.at, [60, 100], 'ms', `ET ${rP.et.toFixed(0)} ms`);
+    check(gV, 'PH: RVOT mid-systolic notch (dip below the late-systolic peak)', rP.notch * 100, [10, 70], '%');
+    check(gV, 'PH RV ejection time minus normal', rP.et - rN.et, [-200, -50], 'ms', `PH ${rP.et.toFixed(0)}, normal ${rN.et.toFixed(0)} ms`);
+    check(gV, 'ASD: RVOT peak velocity', rA.pk, [1.2, 1.6], 'm/s', `normal ${rN.pk.toFixed(2)} m/s`);
+    const aRv = geometryAt(0.2, PATHS.asd).hemo.aRvot, qpA = hemoSummary(PATHS.asd).Qp;
+    check(gV, 'ASD: RVOT VTI x RVOT area / Qp', rA.vti * aRv / qpA, [0.85, 1.15], '', `VTI ${rA.vti.toFixed(1)} cm x ${aRv.toFixed(2)} cm2, Qp ${qpA.toFixed(0)} mL`);
+    // tricuspid inflow at the leaflet tips (PH: impaired RV relaxation, A-dominant)
+    const tvEA = (p, V) => {
+      const sp = trace(V, p, 'tvTips'), n = sp.cols; let E = 0, A = 0;
+      for (let c = 0; c < n; c++) { const ph = c / n, v = Math.abs(sp.vs[c]); if (ph >= 0.45 && ph < 0.78) E = Math.max(E, v); else if (ph >= 0.8) A = Math.max(A, v); }
+      return { E, A };
+    };
+    const tP = tvEA(PATHS.phtn, 'A4C'), tN = tvEA({}, 'A4C');
+    // (the fixed gate sits at the tips at the E wave; the annulus rises ~1 cm toward
+    // it as the A-dominant RV fills, so the trace's A reads a little below the
+    // solved A — solved E/A in the note)
+    check(gV, 'PH: tricuspid E/A on the A4C tips trace', tP.A > 0 ? tP.E / tP.A : null, [0.4, 0.9], '', `E ${tP.E.toFixed(2)}, A ${tP.A.toFixed(2)} m/s; solved ${(hemoSummary(PATHS.phtn).QtvE / hemoSummary(PATHS.phtn).QtvA).toFixed(2)}; normal ${(tN.E / Math.max(1e-6, tN.A)).toFixed(2)}`);
+    const sP = hemoSummary(PATHS.phtn);
+
+    // TTE-5 / PHY-11: a default RVOT PW in the PSAX-AV; the A2C has no inflow PW
+    const { dopplerDefault, defaultSiteGeometry } = await import('../js/echo.js');
+    check(gV, 'normal PSAX_AV: default site is rvot, beam-flow angle', dopplerDefault('PSAX_AV', {}) === 'rvot' ? defaultSiteGeometry('PSAX_AV', 'rvot', {}).angleDeg : null, [0, 20], 'deg');
+    assert(gV, 'normal A2C: no default PW (CW only with MR / MS)', dopplerDefault('A2C', {}) === null && dopplerDefault('A2C', PATHS.mr) === 'mvCw');
+
+    // MOT-7: the right atrium and the PA pressure
+    const sTr = hemoSummary(PATHS.tr), sNo = hemoSummary({});
+    check(gV, 'severe TR: RA volume (maximum)', sTr.RAVmax, [100, 220], 'mL', `minimum ${sTr.RAVmin.toFixed(0)} mL`);
+    check(gV, 'severe TR: RA v minus a', sTr.RAPvWave - sTr.RAPaWave, [3, 20], 'mmHg', `a ${sTr.RAPaWave.toFixed(1)}, v ${sTr.RAPvWave.toFixed(1)}, mean ${sTr.RAP.toFixed(1)}`);
+    check(gV, 'normal RA: a minus v', sNo.RAPaWave - sNo.RAPvWave, [0, 3], 'mmHg', `a ${sNo.RAPaWave.toFixed(1)}, v ${sNo.RAPvWave.toFixed(1)}`);
+    check(gV, 'PH: PASP minus RVSP', sP.PASP - sP.RVSP, [-3, 1], 'mmHg', `PASP ${sP.PASP.toFixed(1)}, RVSP ${sP.RVSP.toFixed(1)}`);
+    // MOT-8: PH LV filling (ventricular interdependence, slow LV relaxation)
+    check(gV, 'PH: mitral E/A', eaRatio(PATHS.phtn), [0.5, 0.95], '');
+    check(gV, 'PH: IVRT', sP.ivrt * 1000, [90, 140], 'ms', `normal ${(sNo.ivrt * 1000).toFixed(0)} ms`);
+  }
+
   // 3D panel: the great vessels, coronaries and CS as separate, legend-coloured meshes
   SECTION = '3D';
   const g3 = '3D vessels';
