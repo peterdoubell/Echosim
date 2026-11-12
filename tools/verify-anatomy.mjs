@@ -19,7 +19,7 @@
 // commit that added it: it is printed but does not set the exit code.
 //
 // Usage: node tools/verify-anatomy.mjs [--verbose]     (exit 0 = all pass)
-import { geometryAt, classify, TISSUE, hemoSummary, hemodynamics, membSite, MEMB_T, VSD_RADIUS, shuntLabel, stenosisCw, FLOW, eaRatio, trEnvelope } from '../js/cardiac-model.js';
+import { geometryAt, classify, TISSUE, hemoSummary, hemodynamics, longitudinalStrain, regionalStrain, membSite, MEMB_T, VSD_RADIUS, shuntLabel, stenosisCw, FLOW, eaRatio, trEnvelope } from '../js/cardiac-model.js';
 import { measureModel } from '../js/report.js';
 import { LM, REF, lumenDist, mitralLift, BODY_AX, diaphragmBelow, rwmaBlend, stomachDist, rapEstimate } from '../js/anatomy.js';
 import { MS_AREA } from '../js/hemodynamics.js';
@@ -1545,6 +1545,90 @@ const worstOf = (xs) => xs.reduce((m, v) => (v.val > m.val ? v : m), { val: -1e9
   }
   check('PSAX', 'PM share of the LV cavity at ES', pEs.share, [15, 40], '%', `ED ${pEd.share.toFixed(1)} %`);
 }
+// Review 12 (TTE-9, TEE-8): papillary muscles rise from the wall on broad bases.
+// In each long-axis plane, from every papillary cell in the lower part of its
+// muscle (share `top` of the base-to-head height), step along the in-plane
+// projection of the outward radial direction: the run of LV blood before the
+// wall is the cleft between muscle and wall (0 = attached).
+{
+  const segT = (q, m) => { const ab = sub(m.b, m.a); return dot(sub(q, m.a), ab) / dot(ab, ab); };
+  const segD = (q, m) => { const t = Math.max(0, Math.min(1, segT(q, m))); return Math.hypot(...sub(q, add(m.a, mul(sub(m.b, m.a), t)))); };
+  const cleft = (S, G, top) => {
+    const A = G.A, P = S.p; let gap = 0;
+    for (let k = 0; k < S.lab.length; k++) {
+      if (S.lab[k] !== TISSUE.MYO) continue;
+      const q = ptK(S, k); if (!isPapAt(G, q)) continue;
+      const m = A.pap[segD(q, A.pap[0]) < segD(q, A.pap[1]) ? 0 : 1];
+      if (segT(q, m) > top) continue;
+      let u = [q[0] * dot([1, 0, 0], P.lat) + q[2] * dot([0, 0, 1], P.lat), q[0] * dot([1, 0, 0], P.dir) + q[2] * dot([0, 0, 1], P.dir)];
+      const n = Math.hypot(...u); if (n < 1e-6) continue; u = [u[0] / n, u[1] / n];
+      const i0 = k % S.nx, j0 = (k - i0) / S.nx;
+      let run = 0, wall = false;
+      for (let st = S.step; st < 2; st += S.step) {
+        const i = Math.round(i0 + u[0] * st / S.step), j = Math.round(j0 + u[1] * st / S.step);
+        if (i < 0 || i >= S.nx || j < 0 || j >= S.nd) break;
+        const l = S.lab[j * S.nx + i]; if (l < 0) break;
+        if (l === TISSUE.LV) { run += S.step; continue; }
+        if (l === TISSUE.MYO && isPapAt(G, S.pt(i, j))) { if (run > 0) break; continue; }
+        wall = l === TISSUE.MYO; break;
+      }
+      if (wall && run > gap) gap = run;
+    }
+    return gap;
+  };
+  for (const [G, ph] of [[GED, 'ED'], [GES, 'ES']]) {
+    for (const vn of ['A2C', 'A4C', 'A3C', 'MECOMM']) {
+      const S = planeSample(TTE_VIEWS[vn] || EXTRA_VIEWS[vn] || TEE_VIEWS[vn], G, {}, 0.05);
+      check('Papillary', `${vn} (${ph}): blood cleft between a papillary muscle and the wall over its lower 40 %`, cleft(S, G, 0.4), [0, 0.15]);
+      // KNOWN-FAIL: the acceptance asks for the lower 70 %, but the TG mid SAX
+      // cuts the muscles at ~0.57 of their height, where the TGSAX rows require a
+      // 1.5-6 mm cleft from the wall (the free body of the mid-papillary short
+      // axis); closing the cleft there (a higher fillet or a smaller inward lean)
+      // breaks those rows and the PSAX ES/ED area rows
+      KNOWN = ph === 'ED';
+      check('Papillary', `${vn} (${ph}): blood cleft between a papillary muscle and the wall over its lower 70 %`, cleft(S, G, 0.7), [0, 0.15]);
+      KNOWN = false;
+    }
+  }
+  // 3-D: the run of each muscle's axis (from its base) with no blood between the
+  // muscle and the wall radially behind it — the attached base
+  const names = ['anterolateral', 'posteromedial'];
+  for (let i = 0; i < 2; i++) {
+    const m = GED.A.pap[i], L = Math.hypot(...sub(m.b, m.a));
+    let att = 0;
+    for (let t = 0; t <= 1.0001; t += 0.05) {
+      const q = add(m.a, mul(sub(m.b, m.a), t)), u = norm([q[0], 0, q[2]]);
+      let gap = 0, out = false;
+      for (let st = 0; st < 3; st += 0.02) {
+        const r = add(q, mul(u, st));
+        if (lumenDist(r[0], r[1], r[2], GED.A, 'LV') >= 0) break;
+        if (isPapAt(GED, r)) { if (gap > 0) { out = true; break; } continue; }
+        gap += 0.02;
+      }
+      if (gap > 0.05 && !out) break;
+      att = t;
+    }
+    check('Papillary', `${names[i]}: base attachment length along the wall (ED)`, att * L, [1.2, 3]);
+    // KNOWN-FAIL (see the 70 % rows): the head is clear of the wall from ~0.4 of
+    // the height, which the TG mid SAX cleft needs
+    KNOWN = true;
+    check('Papillary', `${names[i]}: free papillary length, head clear of the wall (ED)`, (1 - att) * L + m.rt, [0.5, 1.8]);
+    KNOWN = false;
+  }
+  // ME commissural: one LV cavity, no muscle column splitting it off
+  const lvShare = (G) => {
+    const S = planeSample(TEE_VIEWS.MECOMM, G, {}, 0.05), C = components(S, (l) => l === TISSUE.LV);
+    const sz = C.comps.map((c) => c.length), tot = sz.reduce((a, b) => a + b, 0);
+    return tot ? Math.max(...sz) / tot : 0;
+  };
+  check('Papillary', 'MECOMM: LV blood pool in one piece at ED (largest component share)', lvShare(GED), [0.97, 1], '');
+  // KNOWN-FAIL: at ES a 0.5 cm2 pocket under the anterolateral chordae and the
+  // mitral leaflets is cut off (not the papillary column); the MECOMM plane is
+  // being rebuilt as ME4C + 60 deg by the TEE probe item
+  KNOWN = true;
+  check('Papillary', 'MECOMM: LV blood pool in one piece at ES (largest component share)', lvShare(GES), [0.97, 1], '');
+  KNOWN = false;
+}
 // LAA in the TTE A2C and the ME2C (ED): a finger-like pouch standing off the LA
 // body at the screen-right, beside the anterior mitral annulus. Appendage cells
 // are LA lumen inside the appendage tube and outside the LA body.
@@ -2370,6 +2454,72 @@ SECTION = 'Pathology';
   check('RWMA', 'septal: basal inferoseptum keeps thickening (share of normal)', 1 - g, [0.7, 1], '');
   check('RWMA', 'septal: apical septum akinetic (blend weight)', ring(Math.PI, yApex), [0.6, 1], '');
   check('RWMA', 'septal: basal anteroseptum akinetic (blend weight)', ring(Math.PI * 0.8, yBase), [0.6, 1], '');
+}
+{
+  // Review 12 (MOT-1): one EF per RWMA case. The circulation's contractility is
+  // set per territory and the remote walls compensate (rwmaRemoteBoost), so the
+  // drawn LV (voxel integration, and the biplane method of discs on the A4C and
+  // A2C planes with the papillary muscles inside the trace, as ASE requires)
+  // ejects what the panel, the report and the Simpson truth state.
+  const discEF = (path, sum) => {
+    // ASE biplane method of discs on the tissue-label planes (LV blood + papillary)
+    const traceOf = (vn, G) => {
+      const S = planeSample(TTE_VIEWS[vn], G, path, 0.05), Mc = G.A.valves.mitral.c, p = S.p;
+      const inPl = (q) => [dot(sub(q, p.pos), p.lat), dot(sub(q, p.pos), p.dir)];
+      const pts = [];
+      for (let k = 0; k < S.lab.length; k++) {
+        const l = S.lab[k]; if (l !== TISSUE.LV && l !== TISSUE.MYO) continue;
+        const q = ptK(S, k);
+        if (l === TISSUE.MYO && !isPapAt(G, q)) continue;
+        if (dot(sub(q, Mc), Y) > 0) continue;                      // above the mitral annular plane
+        pts.push(xd(S, k));
+      }
+      const m = inPl(Mc);
+      let apex = pts[0], far = -1;
+      for (const c of pts) { const e = Math.hypot(c[0] - m[0], c[1] - m[1]); if (e > far) { far = e; apex = c; } }
+      const ax = [(m[0] - apex[0]) / far, (m[1] - apex[1]) / far], pe = [-ax[1], ax[0]];
+      const N = 20, lo = new Array(N).fill(1e9), hi = new Array(N).fill(-1e9);
+      for (const c of pts) {
+        const u = (c[0] - apex[0]) * ax[0] + (c[1] - apex[1]) * ax[1], w = (c[0] - apex[0]) * pe[0] + (c[1] - apex[1]) * pe[1];
+        const i = Math.min(N - 1, Math.max(0, Math.floor(u / far * N)));
+        if (w < lo[i]) lo[i] = w; if (w > hi[i]) hi[i] = w;
+      }
+      return { L: far, d: lo.map((v, i) => (hi[i] > v ? hi[i] - v + S.step : 0)) };
+    };
+    const vol = (G) => {
+      const a = traceOf('A4C', G), b = traceOf('A2C', G), L = Math.max(a.L, b.L), N = a.d.length;
+      let v = 0; for (let i = 0; i < N; i++) v += Math.PI / 4 * a.d[i] * b.d[i] * L / N;
+      return v;
+    };
+    const ed = vol(geometryAt(0, path)), es = vol(geometryAt(sum.tMinVol, path));
+    return (ed - es) / ed * 100;
+  };
+  for (const r of ['septal', 'anterior', 'inferior', 'lateral']) {
+    const path = { rwma: r }, sum = hemoSummary(path);
+    const GED = geometryAt(0, path), GES = geometryAt(sum.tMinVol, path);
+    const edv = volume(GED, 'LV', LVBOX), esv = volume(GES, 'LV', LVBOX), vef = (edv - esv) / edv * 100;
+    check('RWMA', `${r}: voxel EF of the drawn LV minus circulation EF`, vef - sum.EF, [-3, 3], 'pts', `voxel ${vef.toFixed(1)} %, circulation ${sum.EF.toFixed(1)} %`);
+    const mod = discEF(path, sum);
+    check('RWMA', `${r}: biplane MoD EF (A4C + A2C, PM inside the trace) minus circulation EF`, mod - sum.EF, [-5, 5], 'pts', `MoD ${mod.toFixed(1)} %`);
+    // the Simpson accuracy check's truth: the proxy cavity (echo.js metrics.ef)
+    const pv = (G) => 4 / 3 * Math.PI * G.lv.r[0] * G.lv.r[1] * G.lv.r[2];
+    const tef = (pv(GED) - pv(GES)) / pv(GED) * 100;
+    check('RWMA', `${r}: Simpson accuracy truth minus circulation EF`, tef - sum.EF, [-0.5, 0.5], 'pts');
+  }
+  check('RWMA', 'septal: circulation EF', hemoSummary({ rwma: 'septal' }).EF, [35, 45], '%');
+  // (review 12, MOT-10) one GLS per case: the panel's long-axis GLS and the
+  // bullseye's segment mean are the same number
+  for (const [key, path] of Object.entries(PATHS)) {
+    check('Strain', `${key}: panel GLS minus bullseye GLS`, longitudinalStrain(path) - regionalStrain(path).gls, [-0.5, 0.5], '%');
+  }
+  // severe AS with concentric LVH: reduced long-axis function (GLS ~-15 %, MAPSE
+  // ~1 cm) at a normal EF — radial thickening keeps the EF
+  {
+    const m = measureModel(PATHS.as);
+    check('Strain', 'severe AS: MAPSE', m.mapse / 10, [0.8, 1.2], 'cm');
+    check('Strain', 'severe AS: GLS', longitudinalStrain(PATHS.as), [-16.5, -13], '%');
+    check('Strain', 'severe AS: EF', hemoSummary(PATHS.as).EF, [55, 70], '%');
+  }
 }
 {
   const pth = { rwma: 'posterior' };

@@ -383,7 +383,53 @@ function hemoFrame(hd, path, rvHd, phaseRV) {
 let _edvRef = null;
 const edvRef = () => (_edvRef != null ? _edvRef : (_edvRef = hemoSummary({}).EDV));
 
+// ---- RWMA: compensatory hyperkinesis of the remote walls -------------------
+// The circulation's LVEF is that of the whole ventricle; the anatomy then
+// freezes the infarcted territory at its diastolic position (rwmaBlend), so on
+// its own the drawn cavity would eject less than the PV loop says. The remote
+// (non-infarcted) myocardium is hyperkinetic after an infarct: here it shortens
+// by kappa times the global volume change, rho' = 1 - kappa (1 - rho), with
+// kappa solved once per case so that the DRAWN cavity (voxel integration of the
+// rendered LV lumen, clipped at the mitral and aortic annular planes as the
+// audit does) ejects exactly the circulation's EF. Only the anatomy sees rho';
+// the coarse proxies (lv.r: EF/LVID readouts, the Simpson truth) stay on rho,
+// so the panel, the report and the image all carry one EF.
+const _kappaCache = new Map();
+function drawnLvVolume(A, h) {
+  const M = A.valves.mitral.c, Av = A.valves.aortic.c, U = LM.U_AO;
+  let n = 0;
+  for (let x = -4; x <= 4; x += h) for (let z = -4; z <= 4; z += h) for (let y = -9; y <= 1.5; y += h) {
+    if (lumenDist(x, y, z, A, 'LV') >= 0) continue;
+    const ua = (x - Av[0]) * U[0] + (y - Av[1]) * U[1] + (z - Av[2]) * U[2];
+    if (ua > 0 && (y > M[1] + 0.02 || y - M[1] > -0.3)) continue;
+    n++;
+  }
+  return n * h * h * h;
+}
+export function rwmaRemoteBoost(path = {}) {
+  if (!path.rwma) return 1;
+  const key = JSON.stringify(path);
+  let kappa = _kappaCache.get(key);
+  if (kappa != null) return kappa;
+  const s = hemoSummary(path), h = 0.14;
+  const target = drawnLvVolume(geometryCore(0, path, 1).A, h) * s.ESV / s.EDV;
+  const vAt = (kp) => drawnLvVolume(geometryCore(s.tMinVol, path, kp).A, h);
+  // the drawn ES volume falls almost linearly with kappa: a few secant steps
+  let k0 = 1, v0 = vAt(k0), k1 = 1.4, v1 = vAt(k1);
+  for (let i = 0; i < 6 && Math.abs(v1 - target) > 0.3 && v1 !== v0; i++) {
+    const k2 = clamp(k1 + (target - v1) * (k1 - k0) / (v1 - v0), 1, 2.5);
+    k0 = k1; v0 = v1; k1 = k2; v1 = vAt(k1);
+  }
+  kappa = k1;
+  _kappaCache.set(key, kappa);
+  return kappa;
+}
+
 export function geometryAt(phase, path = {}) {
+  return geometryCore(phase, path, path.rwma ? rwmaRemoteBoost(path) : 1);
+}
+
+function geometryCore(phase, path, kappa) {
   const kick = atrialKick(phase);
 
   // PHYSICS COUPLING: the lumped-parameter circulation solves the LV pressure–
@@ -423,8 +469,13 @@ export function geometryAt(phase, path = {}) {
 
   // Long axis shortens less than the short axis. aLong = 0.24 gives, for the
   // normal EF, MAPSE ~1.55 cm, GLS ~-19 % and fractional shortening ~28 % on
-  // the 8.3 cm ventricle — all mid-normal.
-  const aLong = 0.24;
+  // the 8.3 cm ventricle — all mid-normal. Concentric LVH (severe AS, the
+  // hypertrophied heart) loses longitudinal (subendocardial) function first while
+  // EF is kept by radial thickening: aLong 0.17 gives MAPSE ~1.1 cm and GLS
+  // ~-15 % at a normal EF (reduced GLS with preserved EF in AS — a prognostic
+  // marker; e.g. Ng et al., Eur Heart J Cardiovasc Imaging 2011; Magne et al.,
+  // JACC Cardiovasc Imaging 2019).
+  const aLong = path.aorticStenosis || path.lvh ? 0.17 : 0.24;
   const sLong = Math.pow(rho, aLong);
   const sShort = Math.pow(rho, (1 - aLong) / 2); // sShort²·sLong = rho (volume-exact)
   const lvR = [
@@ -450,7 +501,13 @@ export function geometryAt(phase, path = {}) {
 
   // anatomical SDF bundle (built once here so the chordae apparatus below can
   // hang off the same apex-anchored papillary tips + live valve planes).
-  const A = anatomyParams(k, kick, path, { sShort, sLong, lvWall, lvScale, lvLong, laScale, kRV: kR, phaseRV, laAmp: laPhasic(path) }, phase);
+  // (RWMA: the anatomy's remote walls shorten by kappa x the global change; see
+  // rwmaRemoteBoost — the proxies above stay on rho)
+  const rhoA = kappa === 1 ? rho : Math.max(0.05, 1 - kappa * (1 - rho));
+  const sLongA = kappa === 1 ? sLong : Math.pow(rhoA, aLong);
+  const sShortA = kappa === 1 ? sShort : Math.pow(rhoA, (1 - aLong) / 2);
+  const lvWallA = kappa === 1 ? lvWall : BASE.lv.wall * lvWallMul * clamp(1 / sShortA, 1, 1.7);
+  const A = anatomyParams(k, kick, path, { sShort: sShortA, sLong: sLongA, lvWall: lvWallA, lvScale, lvLong, laScale, kRV: kR, phaseRV, laAmp: laPhasic(path) }, phase);
 
   // atria: coarse axis-aligned proxies of the live anatomical atria (which sit on
   // their moving annuli and follow the reservoir/conduit/booster curve), so flow
@@ -600,17 +657,17 @@ function segAffected(seg, rw) {
 let _rsPath = null, _rsVal = null;
 export function regionalStrain(path = {}) {
   if (path === _rsPath && _rsVal) return _rsVal;
-  let gf = 1;                                           // global contractility factor
-  // DCM affects every segment. Use the shortening of the same solved cavity
-  // rendered by geometryAt, so changing EF severity also changes the bullseye.
-  if (path.dilated) gf = longitudinalStrain(path) / NORMAL_SEG_STRAIN;
-  else if (path.aorticStenosis && path.lvh) gf = 0.85;
-  else if (path.lvh) gf = 0.9;
+  // One GLS per case: the territory pattern sets the segments' SHAPE, and a
+  // global factor scales them so their mean is the long-axis shortening of the
+  // same solved cavity (longitudinalStrain, the panel's GLS). DCM, LVH/AS and
+  // RWMA then show the same GLS in the panel, the bullseye and the report.
   const rw = buildRwma(path);
-  const segments = AHA_SEGMENTS.map((s) => {
-    const w = segAffected(s, rw);
-    return { name: s.name, angle: s.angle, level: s.level, strain: NORMAL_SEG_STRAIN * gf * (1 - w) };
-  });
+  const w = AHA_SEGMENTS.map((s) => segAffected(s, rw));
+  const shape = w.reduce((a, x) => a + NORMAL_SEG_STRAIN * (1 - x), 0) / w.length;
+  const ls = longitudinalStrain(path);
+  const gf = ls != null && shape < 0 ? ls / shape : 1;   // global contractility factor
+  const segments = AHA_SEGMENTS.map((s, i) => (
+    { name: s.name, angle: s.angle, level: s.level, strain: NORMAL_SEG_STRAIN * gf * (1 - w[i]) }));
   const gls = segments.reduce((a, s) => a + s.strain, 0) / segments.length;
   _rsVal = { segments, gls };
   _rsPath = path;

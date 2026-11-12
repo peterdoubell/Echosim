@@ -698,10 +698,18 @@ const PM_ROOT = { ang: -2.7, up: 0.3, rb: 0.6, rt: 0.4 };
 // alongside the lateral wall rather than an island in the mid cavity. The heads
 // move in with the wall in systole by tipK of the short-axis shortening (they
 // hang on the chordae under the commissures, which move in less than the wall).
+// Broad bases (review 12): the lower 40 % of each muscle is filleted into the
+// endocardium (fillet: blend width, cm; filTop: share of the base-to-head
+// height up to which it is full, fading over filFade), so oblique long-axis cuts (A4C, A2C, ME commissural)
+// show the base rising from the wall with no blood crevice beside it. Above
+// that the body stands free: at the mid-papillary short axis (TG mid SAX, ~0.57
+// of the height) the muscle keeps its 2-5 mm cleft from the wall, so a higher
+// fillet or a smaller inward lean closes that cleft (see the audit's TGSAX rows).
 const PAP = {
   alpm: { r: [2.1, 0.95], ang: [-0.2, 0.25], rt: 0.5 },
   pmpm: { r: [1.95, 1.15], ang: [-2.3, -1.8], rt: 0.46 },
   rb: 0.72, tipK: 0.5,
+  fillet: 0.8, filTop: 0.4, filFade: 0.08,
 };
 export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   // Remodelling: when coupled to the circulation the LV size follows the modelled
@@ -1963,11 +1971,27 @@ function dPAlumen(x, y, z, A) {
   if (d < 1.0) d = ssub(d, dAOlumen(x, y, z, A) - A.ao.wall - pa.wall, 0.1);
   return d;
 }
-function dPap(x, y, z, A) {
+function dPap(x, y, z, A, dlv = null) {
   let d = 1e9;
   for (const p of A.pap) {
-    d = smin(d, sdRoundCone(x, y, z, p.a[0], p.a[1], p.a[2], p.b[0], p.b[1], p.b[2], p.rb, p.rt), 0.35);
-    const r = p.root; if (r) d = smin(d, sdRoundCone(x, y, z, r.a[0], r.a[1], r.a[2], r.b[0], r.b[1], r.b[2], r.rb, r.rt), 0.35);
+    let dm = sdRoundCone(x, y, z, p.a[0], p.a[1], p.a[2], p.b[0], p.b[1], p.b[2], p.rb, p.rt);
+    // broad base: below PAP.filTop of its height the muscle is filleted into the
+    // endocardium (a smooth union with the wall), so it rises from the wall with
+    // no blood crevice beside or behind it; the upper body and head stay free
+    if (dm < PAP.fillet && PAP.fillet > 0) {
+      const ab = [p.b[0] - p.a[0], p.b[1] - p.a[1], p.b[2] - p.a[2]];
+      const t = ((x - p.a[0]) * ab[0] + (y - p.a[1]) * ab[1] + (z - p.a[2]) * ab[2]) / (ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]);
+      const kf = PAP.fillet * (1 - smoothstep(PAP.filTop, PAP.filTop + PAP.filFade, t));
+      if (kf > 0.02) {
+        if (dlv == null) dlv = dLVlumen(x, y, z, A);
+        if (dlv < 0) {                                          // (fills blood only: the wall stays wall)
+          const h = Math.max(kf - Math.abs(dm + dlv), 0) / kf;  // quadratic blend: fills a cleft up to ~kf / 2 wide
+          dm = Math.min(dm, -dlv) - h * h * kf * 0.25;
+        }
+      }
+    }
+    const r = p.root; if (r) dm = smin(dm, sdRoundCone(x, y, z, r.a[0], r.a[1], r.a[2], r.b[0], r.b[1], r.b[2], r.rb, r.rt), 0.35);
+    d = Math.min(d, dm);
   }
   return d;
 }
@@ -2314,7 +2338,7 @@ export function bodyClassify(x, y, z, A, periOff = 0) {
   const drv = dRVlumen(x, y, z, A);
 
   // papillary muscles & moderator band read as muscle inside the blood pool
-  if (dlv < 0.2 && dPap(x, y, z, A) < 0) return bc(BODY.PAP, 0.7);
+  if (dlv < 0.2 && dPap(x, y, z, A, dlv) < 0) return bc(BODY.PAP, 0.7);
   if (drv < 0.2 && dMod(x, y, z, A) < 0) return bc(BODY.PAP, 0.66);
 
   const dla = dLAlumen(x, y, z, A);

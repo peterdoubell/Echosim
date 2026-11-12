@@ -426,11 +426,11 @@ your own write-up.
 | Case | Model conclusion |
 |---|---|
 | Normal | Structurally normal heart. Normal biventricular size and systolic function. No significant valve disease. |
-| Aortic stenosis | 1. Severe aortic stenosis (Vmax 4.5 m/s, mean gradient 48 mmHg, AVA 0.67 cm²). 2. LV concentric hypertrophy. 3. Dilated left atrium (LAVi 55 mL/m²). |
+| Aortic stenosis | 1. Severe aortic stenosis (Vmax 4.5 m/s, mean gradient 48 mmHg, AVA 0.67 cm²). 2. LV concentric hypertrophy. 3. Dilated left atrium (LAVi 54 mL/m²). |
 | Mitral regurgitation | 1. Severe mitral regurgitation (RF 54%, RVol 66 mL). 2. Moderately dilated LV (LVEDVi 102 mL/m²). 3. Dilated left atrium (LAVi 66 mL/m²). |
 | Mitral stenosis | 1. Severe mitral stenosis (MVA 1.00 cm², mean gradient 13.8 mmHg). 2. Dilated left atrium (LAVi 85 mL/m²). 3. Intermediate echocardiographic probability of pulmonary hypertension (TR Vmax 3.4 m/s, PASP ~54 mmHg). |
 | Dilated cardiomyopathy | 1. Severely impaired LV systolic function, LVEF 27%. 2. Severely dilated LV (LVEDVi 129 mL/m²). 3. Moderate functional mitral regurgitation (RF 31%). 4. Dilated left atrium (LAVi 68 mL/m²). 5. Impaired RV systolic function (TAPSE 12 mm, FAC 31%). |
-| Regional wall motion abnormality | 1. Borderline low LV systolic function, LVEF 51%. 2. Regional wall motion abnormality: septal and apical hypokinesis (LAD territory). |
+| Regional wall motion abnormality | 1. Impaired LV systolic function, LVEF 43%. 2. Regional wall motion abnormality: septal and apical hypokinesis (LAD territory). |
 | Pericardial effusion | 1. Large pericardial effusion (2.3 cm). |
 | Cardiac tamponade | 1. Large pericardial effusion (2.4 cm) with echocardiographic features of tamponade (RA inversion, RV diastolic collapse, plethoric IVC, mitral E variation 28%, tricuspid E 47%). Tamponade is a clinical diagnosis. |
 | Tricuspid regurgitation | 1. Severe tricuspid regurgitation (TR Vmax 2.5 m/s). 2. RV dilatation (RVD1 58 mm). |

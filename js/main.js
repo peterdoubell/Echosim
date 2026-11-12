@@ -619,7 +619,7 @@ function drawBullseye() {
   bullCtx.fillText('ANT', cx, cy - R + 6); bullCtx.fillText('INF', cx, cy + R - 6);
   bullCtx.textAlign = 'left'; bullCtx.fillText('SEPT', 3, cy); bullCtx.textAlign = 'right'; bullCtx.fillText('LAT', W - 3, cy);
   // readouts
-  setText('sGls', Math.round(gls) + ' %');
+  setText('sGls', gls.toFixed(1) + ' %');            // the same value as the panel's GLS
   const worst = segments.reduce((m, s) => (s.strain > m.strain ? s : m), segments[0]);
   const abn = worst.strain > -12;
   setText('sPattern', !abn ? 'normal / uniform' : (state.path.dilated ? 'global impairment' : worst.name + ' loss'));
