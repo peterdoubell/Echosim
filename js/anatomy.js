@@ -552,11 +552,19 @@ const A_PEAK = A_MIN + A_RES;
 // `amp` (optional, from the circulation: hemodynamics laPhasic) scales the
 // conduit (c) and booster (b) emptying against the normal atrium; the reservoir
 // fill is their sum, so the curve stays periodic and peaks at A_PEAK.
-export function atrialFill(phase, amp = null) {
+// tm (optional) = { mvo, aAt }: the case's solved mitral-opening phase and LA
+// activation peak. The reservoir phase fills the atrium until the mitral valve
+// opens, the conduit phase empties it over the next 0.18 of the cycle, and the
+// booster runs from the atrial kick to the QRS. Without tm the normal timing
+// (MVO 0.51, kick 0.89) is used. (Severe AS: a long IVRT puts MVO at ~0.60, so
+// a fixed 0.51 emptied the LA through a shut mitral valve.)
+export function atrialFill(phase, amp = null, tm = null) {
   const p = phase - Math.floor(phase);          // wrap into [0,1)
-  const reservoir = smoothstep(0.00, 0.51, p);
-  const conduit   = smoothstep(0.51, 0.69, p);
-  const booster   = smoothstep(0.89, 1.00, p);
+  const mvo = tm && tm.mvo > 0.3 && tm.mvo < 0.75 ? tm.mvo : 0.51;
+  const aOn = tm && tm.aAt > 0.8 && tm.aAt < 0.97 ? Math.max(0.89, tm.aAt) : 0.89;
+  const reservoir = smoothstep(0.00, mvo, p);
+  const conduit   = smoothstep(mvo, Math.min(aOn - 0.02, mvo + 0.18), p);
+  const booster   = smoothstep(aOn, 1.00, p);
   if (amp) {
     const ac = A_COND * amp.c, ab = A_BOOST * amp.b;
     return A_PEAK - (ac + ab) * (1 - reservoir) - ac * conduit - ab * booster;
@@ -676,8 +684,8 @@ export function rightHeartLoad(path = {}) {
 // and under 0.6 cm in DCM or MS. (gain: the swing at the sino-tubular junction)
 const ROOT_SWING = { gain: 0.5 };
 const SINUS_SHEAR = 0.6;    // the root shears over its first 0.6 cm above the annulus
-export function aorticRootSwing(phase, amp = null) {
-  const lo = atrialFill(0, amp), f = atrialFill(phase, amp);
+export function aorticRootSwing(phase, amp = null, tm = null) {
+  const lo = atrialFill(0, amp, tm), f = atrialFill(phase, amp, tm);
   const fill = A_PEAK - lo > 1e-6 ? Math.max(0, Math.min(1, (f - lo) / (A_PEAK - lo))) : 0;
   const swing = amp ? (A_COND * amp.c + A_BOOST * amp.b) / A_RES : 1;
   return ROOT_SWING.gain * fill * Math.min(1, swing);
@@ -807,7 +815,7 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   const rvotR = [1.3 * (1 - kR * 0.18 * rvC) * rvpoScale, 1.1 * (1 - kR * 0.12 * rvC) * rvpoScale, PV_R * 1.02];
 
   // Atria: sit on the live annuli, fixed roofs, volume from the reservoir curve.
-  const aFill = atrialFill(phase, mech && mech.laAmp);
+  const aFill = atrialFill(phase, mech && mech.laAmp, mech && mech.laTiming);
   // the RA empties through the tricuspid, so its reservoir curve follows the
   // right heart's clock
   const aFillR = mech && mech.phaseRV != null ? atrialFill(mech.phaseRV) : aFill;

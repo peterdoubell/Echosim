@@ -3423,6 +3423,108 @@ SECTION = 'Pathology';
   }
 }
 
+// ---- review 12: venous and outflow Doppler from the solved circulation ------
+{
+  SECTION = 'Doppler';
+  const { LVOT_CSA } = await import('../js/cardiac-model.js');
+  const g = 'Venous Doppler from the solved caval / pulmonary-venous inflow';
+  // hepatic vein (SC IVC default PW): forward = toward the RA = away from the
+  // subcostal transducer (vs < 0). Per beat: S = forward peak in systole (beat
+  // phase < 0.45), D = forward peak in 0.45-0.8, reversal = retrograde peak.
+  const hvBeats = (p) => {
+    const sp = renderDoppler('SC_IVC', 0.2, p, { color: false }).spec, nb = sp.beats || 1, out = [];
+    for (let b = 0; b < nb; b++) {
+      let S = 0, D = 0, Srev = 0, Drev = 0, AR = 0;
+      for (let c = 0; c < sp.cols; c++) {
+        const u = c * nb / sp.cols; if (Math.floor(u) !== b) continue;
+        const ph = u - b, f = -sp.vs[c];
+        if (ph < 0.45) { S = Math.max(S, f); Srev = Math.max(Srev, -f); } else if (ph < 0.8) { D = Math.max(D, f); Drev = Math.max(Drev, -f); } else AR = Math.max(AR, -f);
+      }
+      out.push({ S, D, Srev, Drev, AR, diaRev: Math.max(Drev, AR) });
+    }
+    return out;
+  };
+  const hn = hvBeats({})[0];
+  check(g, 'normal HV PW: S/D forward peak ratio', hn.D > 0 ? hn.S / hn.D : null, [1.1, 2.0], '', `S ${hn.S.toFixed(2)}, D ${hn.D.toFixed(2)}, AR ${hn.AR.toFixed(2)} m/s`);
+  const ht = hvBeats({ effusion: true, tamponade: true });
+  check(g, 'tamponade HV PW (exp/insp/exp): D/S forward peak ratio (worst beat)', Math.max(...ht.map((b) => (b.S > 0 ? b.D / b.S : 9))), [0, 0.4], '', ht.map((b) => `S ${b.S.toFixed(2)} D ${b.D.toFixed(2)}`).join('; '));
+  // (the tamponade circulation is retuned by its own work item: this ratio
+  // depends on the expiratory caval reversal the pericardial constraint produces)
+  KNOWN = true;
+  check(g, 'tamponade HV: expiratory diastolic reversal peak / normal', hn.AR > 0 ? ht[0].diaRev / hn.AR : null, [2, 10], '', `exp ${ht[0].diaRev.toFixed(2)} vs normal AR ${hn.AR.toFixed(2)} m/s`);
+  // (severe TR: the giant RA c-v wave that reverses systolic caval flow comes
+  // from the TR right-atrial retune of the right-heart work item)
+  const htr = hvBeats({ tr: true })[0];
+  assert(g, 'severe TR HV: systolic flow reversed (S < 0)', htr.Srev > htr.S, `S fwd ${htr.S.toFixed(2)}, reversed ${htr.Srev.toFixed(2)} m/s`);
+  KNOWN = false;
+  // pulmonary veins: velocity along a vein's axis ~1 cm up from its ostium,
+  // sampled through the cycle (+ toward the LA)
+  const pvTrace = (p) => {
+    let S = 0, D = 0, Ar = 0, Srev = 0;
+    for (let i = 0; i < 80; i++) {
+      const ph = i / 80, G = geometryAt(ph, p), v = G.A.pv.veins[3];
+      const q = [v.w[0] - v.ax[0], v.w[1] - v.ax[1], v.w[2] - v.ax[2]];
+      const vel = velocityAt(q[0], q[1], q[2], G, p);
+      const f = vel ? vel.vx * v.ax[0] + vel.vy * v.ax[1] + vel.vz * v.ax[2] : 0;
+      if (ph < 0.45) { S = Math.max(S, f); Srev = Math.max(Srev, -f); } else if (ph < 0.8) D = Math.max(D, f); else Ar = Math.max(Ar, -f);
+    }
+    return { S, D, Ar, Srev };
+  };
+  const pn = pvTrace({}), pd = pvTrace(PATHS.dcm), pm = pvTrace(PATHS.mr);
+  // young-adult normal: S ~ D (S/D < 1 is normal under ~40 years with an
+  // E-dominant mitral inflow; ASE/EACVI 2016 diastolic guideline)
+  check(g, 'normal PV: S/D', pn.D > 0 ? pn.S / pn.D : null, [0.8, 1.6], '', `S ${pn.S.toFixed(2)}, D ${pn.D.toFixed(2)} m/s`);
+  check(g, 'severe DCM PV: S/D (raised LAP, D-dominant)', pd.D > 0 ? pd.S / pd.D : null, [0.3, 0.9], '', `S ${pd.S.toFixed(2)}, D ${pd.D.toFixed(2)} m/s`);
+  check(g, 'severe MR PV: systolic flow reversal', pm.Srev, [0.2, 1.0], 'm/s');
+  // (a prominent Ar needs the LA kick to rise above the pulmonary-venous
+  // pressure; the failing DCM atrium does not, open)
+  KNOWN = true;
+  check(g, 'severe DCM PV: Ar', pd.Ar, [0.25, 0.5], 'm/s');
+  KNOWN = false;
+
+  const go = 'Outflow Doppler from the solved flow and pressure';
+  const vti = (sp) => { let x = 0; for (let c = 0; c < sp.cols; c++) x += Math.max(0, -sp.vs[c]) * sp.rrSec / sp.cols * 100; return x; };
+  const n5 = renderDoppler('A5C', 0.3, {}, { color: false }).spec, a5 = renderDoppler('A5C', 0.3, PATHS.as, { color: false, site: 'lvot', mode: 'PW' }).spec;
+  const vN = vti(n5), vA = vti(a5), sN = hemoSummary({}), sA = hemoSummary(PATHS.as);
+  check(go, 'normal A5C LVOT PW: VTI', vN, [18, 22], 'cm');
+  check(go, 'normal LVOT VTI x CSA (2.15 cm LVOT) / circulation SV', vN * LVOT_CSA / sN.forwardSV, [0.9, 1.1], '', `${(vN * LVOT_CSA).toFixed(1)} vs ${sN.forwardSV.toFixed(1)} mL`);
+  check(go, 'normal LVOT PW peak', n5.negMax, [0.8, 1.2], 'm/s');
+  assert(go, 'severe AS LVOT VTI < normal LVOT VTI', vA < vN, `${vA.toFixed(1)} vs ${vN.toFixed(1)} cm`);
+  {
+    const cw = renderDoppler('A5C', 0.2, PATHS.as, { color: false }).spec;
+    let gs = 0, n = 0, vmax = 0;
+    for (let c = 0; c < cw.cols; c++) { const v = cw.envNeg[c]; if (v > 0.5) { gs += 4 * v * v; n++; vmax = Math.max(vmax, v); } }
+    let dp = 0, m = 0; for (let i = 0; i < 1000; i++) { const h = hemodynamics(i / 1000, PATHS.as); if (h.Qao > 1) { dp += Math.max(0, h.Plv - h.Pao); m++; } }
+    const tm = n ? gs / n : 0, cm = m ? dp / m : 0;
+    check(go, 'severe AS A5C CW: traced mean gradient / circulation mean LV-Ao gradient', cm > 0 ? tm / cm : null, [0.9, 1.1], '', `traced ${tm.toFixed(1)} vs ${cm.toFixed(1)} mmHg`);
+    check(go, 'severe AS: traced mean / peak gradient', vmax > 0 ? tm / (4 * vmax * vmax) : null, [0.55, 0.65], '', `peak ${(4 * vmax * vmax).toFixed(0)} mmHg`);
+    check(go, 'severe AS: aortic diastolic pressure', sA.PaoDia, [65, 85], 'mmHg', `${sA.PaoSys.toFixed(0)}/${sA.PaoDia.toFixed(0)}`);
+  }
+
+  // severe AS: the LA keeps filling through the long IVRT (mitral shut until
+  // the solved MVO), its maximum at mitral opening
+  SECTION = 'Pathology';
+  const gm = 'Atrial timing and chronic shunt (review 12)';
+  {
+    const mvo = sA.mvoPhase, phs = [];
+    let prev = null, drop = 0, vmx = -1, phMax = 0;
+    for (let ph = 0.40; ph <= 0.70001; ph += 0.02) {
+      const v = volume(geometryAt(ph, PATHS.as), 'LA_BODY', [-4, 6, -3, 8, -6, 4], 0.2);
+      if (ph <= mvo + 1e-9 && prev != null) drop = Math.max(drop, prev - v);
+      if (v > vmx) { vmx = v; phMax = ph; }
+      prev = v; phs.push(`${ph.toFixed(2)}:${v.toFixed(0)}`);
+    }
+    check(gm, 'severe AS: LA voxel volume from AVC to MVO, largest drop', drop, [0, 1], 'mL', `MVO ${mvo.toFixed(3)}; ${phs.join(' ')}`);
+    check(gm, 'severe AS: LA maximum phase minus MVO', phMax - mvo, [-0.02, 0.02], '');
+  }
+  {
+    const sV = hemoSummary(PATHS.vsd);
+    check(gm, 'VSD: forward SV / normal', sV.forwardSV / sN.forwardSV, [0.93, 1.07], '', `${sV.forwardSV.toFixed(1)} vs ${sN.forwardSV.toFixed(1)} mL, Qp:Qs ${sV.QpQs.toFixed(2)}`);
+    check(gm, 'VSD: LV EDV / normal', sV.EDV / sN.EDV, [1.2, 1.5], '', `${sV.EDV.toFixed(0)} vs ${sN.EDV.toFixed(0)} mL`);
+    check(gm, 'VSD: aortic systolic pressure minus normal', sV.PaoSys - sN.PaoSys, [-8, 8], 'mmHg', `${sV.PaoSys.toFixed(0)}/${sV.PaoDia.toFixed(0)}`);
+  }
+}
+
 // ---- report ------------------------------------------------------------------
 const fmt = (v) => (typeof v === 'number' ? v.toFixed(2) : String(v));
 const SECTIONS = [...new Set(rows.map((r) => r.section))];
