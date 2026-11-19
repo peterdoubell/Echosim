@@ -9,7 +9,7 @@ import { geometryAt, velocityAt, VALVE_DEFS } from './cardiac-model.js';
 import { myoDist, lumenDist, LM } from './anatomy.js';
 import { buildMesh } from './marching.js';
 import { VESSELS, VESSEL_BOX, VESSEL_CELL } from './vessels3d.js';
-import { CONTEXT, buildContext, structureLabels, cameraDir, cameraDirForPlane, declutterLabels, CAMERA_UP } from './thorax3d.js';
+import { CONTEXT, buildContext, structureLabels, cameraDir, cameraDirForPlane, declutterLabels, labelPriority, CAMERA_UP } from './thorax3d.js';
 import { teePathParam, teePathPolyline, TEE_PATH_TOP } from './views.js';
 
 const MUSCLE = 0x8a3330;
@@ -964,19 +964,21 @@ export class Heart3D {
   }
 
   // hide 3D labels that would overlap on screen from the current camera
-  // (thorax3d declutterLabels; heart labels first, then the organ labels)
+  // (thorax3d declutterLabels; heart labels first, then the organ labels; in a
+  // TEE view the oesophagus label first of all)
   _declutter() {
     if (!this.labelGroup) return;
     const d = new THREE.Vector3().subVectors(this.camera.position, this.controls.target).normalize();
-    const key = `${d.x.toFixed(2)},${d.y.toFixed(2)},${d.z.toFixed(2)}`;
+    const key = `${d.x.toFixed(2)},${d.y.toFixed(2)},${d.z.toFixed(2)},${this._teeView ? 1 : 0}`;
     if (key === this._declutterKey) return;
     this._declutterKey = key;
     const sprites = [...this.labelGroup.children, ...this.ctxLabels.children];
-    const kept = new Set(declutterLabels(sprites.map((sp) => [sp.userData.label, [sp.position.x, sp.position.y, sp.position.z]]), [d.x, d.y, d.z], CAMERA_UP));
+    const kept = new Set(declutterLabels(sprites.map((sp) => [sp.userData.label, [sp.position.x, sp.position.y, sp.position.z]]), [d.x, d.y, d.z], CAMERA_UP, 0.15, labelPriority(this._teeView)));
     sprites.forEach((sp, i) => { sp.visible = kept.has(i); });
   }
 
   setCameraForView(name, probe = null, tee = false) {
+    this._teeView = !!tee;
     // Per-view direction, but distance is derived from the heart's bounding
     // sphere so every view is framed consistently (never oversized/clipped).
     // (thorax3d CAMERA_PRESETS: patient-superior up, the SVC to the patient's

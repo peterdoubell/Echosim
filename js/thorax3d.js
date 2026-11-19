@@ -211,15 +211,22 @@ export function cameraDirForPlane(normal, tee = false, probePos = null) {
 // camera direction `dir`, `up`) and drop any whose box (about 0.62 cm per
 // character x 1.15 cm, the sprite size) overlaps one already kept; `labels` are in
 // priority order. Returns the indices kept.
-export function declutterLabels(labels, dir, up = S, pad = 0.15) {
+// (`first`: label texts placed before the rest, e.g. the oesophagus in a TEE
+// view, the probe's own landmark, so a label it collides with is the one hidden)
+export function declutterLabels(labels, dir, up = S, pad = 0.15, first = []) {
   const d = unit(dir);
   let u = up.map((v, i) => v - d[i] * dot(up, d)); u = unit(u);
   const r = [d[1] * u[2] - d[2] * u[1], d[2] * u[0] - d[0] * u[2], d[0] * u[1] - d[1] * u[0]];
   const boxes = [], kept = [];
-  labels.forEach(([text, p], k) => {
+  const order = labels.map((l, k) => k);
+  if (first.length) order.sort((a, b) => (first.includes(labels[b][0]) ? 1 : 0) - (first.includes(labels[a][0]) ? 1 : 0) || a - b);
+  for (const k of order) {
+    const [text, p] = labels[k];
     const x = dot(p, r), y = dot(p, u), w = 0.62 * (String(text).length + 0.6) / 2 + pad, h = 0.575 + pad;
-    if (boxes.some((b) => Math.abs(b.x - x) < b.w + w && Math.abs(b.y - y) < b.h + h)) return;
+    if (boxes.some((b) => Math.abs(b.x - x) < b.w + w && Math.abs(b.y - y) < b.h + h)) continue;
     boxes.push({ x, y, w, h }); kept.push(k);
-  });
+  }
   return kept;
 }
+// labels that a view's de-collision places first: in TEE views the oesophagus
+export const labelPriority = (tee) => (tee ? ['Oesophagus'] : []);

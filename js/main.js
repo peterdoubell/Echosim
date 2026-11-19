@@ -10,7 +10,7 @@ import { buildReport, reportText, fillTemplate, TEMPLATES, TEMPLATE_FOR, DEFAULT
 import { initFeedback } from './feedback.js';
 import { initPathway } from './pathway-ui.js';
 import { Heart3D } from './heart3d.js';
-import { EchoView, colourDefault, dopplerColor } from './echo.js';
+import { EchoView, colourDefault, dopplerColor, teeSiteChoices } from './echo.js';
 import { MeasureTool } from './measure.js';
 import { vadd, vsub, vscale, vdot, vcross, norm, vrot } from './mathutils.js';
 import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, makeProbe, teeManipulate, teeOmni, sectorHalfOf, nearestTeePreset } from './views.js';
@@ -695,6 +695,7 @@ function setView(name) {
     setRange('adv', 0, 'advOut', '0', '0 cm'); setRange('rot', 0, 'rotOut', '0°', '0°'); setRange('flex', 0, 'flexOut', '0°', '0°');
     const ctl = document.getElementById('teeProbeCtl');
     if (ctl) ctl.classList.toggle('hidden', !tee);
+    setTeeSites(tee ? name : null);
   }
   setRange('az', 0, 'azOut', '0°', '0°');
   setRange('tilt', 0, 'tiltOut', '0°', '0°');
@@ -984,6 +985,32 @@ document.getElementById('adv').addEventListener('input', (e) => {
 });
 bind('rot', 'rotOut', (v) => { state.tee.rot = v; updatePlaneFlag(); }, '°', '°');
 bind('flex', 'flexOut', (v) => { state.tee.flex = v; updatePlaneFlag(); }, '°', '°');
+// TEE spectral site: the view's standard trace ('' = dopplerDefault) or another
+// site this TEE view records (pulmonary-vein / LAA PW from the ME LAA, LVOT PW and
+// AV CW from the deep TG 5C), taken with the beam angled to its flow
+function setTeeSites(view) {
+  const sel = document.getElementById('teeSite'), row = document.getElementById('teeSiteRow');
+  const list = view ? teeSiteChoices(view) : [];
+  if (sel) {
+    sel.innerHTML = '';
+    const o0 = document.createElement('option'); o0.value = ''; o0.textContent = 'Standard site'; sel.appendChild(o0);
+    for (const c of list) {
+      const o = document.createElement('option'); o.value = c.key;
+      o.textContent = c.name + (/\b(PW|CW)\b/.test(c.name) || !c.mode ? '' : ' ' + c.mode);
+      sel.appendChild(o);
+    }
+    sel.value = '';
+  }
+  if (row) row.classList.toggle('hidden', !list.length);
+  pickTeeSite(null);
+}
+function pickTeeSite(k) {
+  echo.dopplerSite = k; echo.dopplerAlign = !!k;
+  const lab = document.getElementById('spLabel'), sel = document.getElementById('teeSite');
+  const name = k && sel && sel.selectedOptions[0] ? sel.selectedOptions[0].textContent : null;
+  if (lab) lab.textContent = `Spectral Doppler (${name || 'standard site for the view'} · 1 cardiac cycle)`;
+}
+document.getElementById('teeSite')?.addEventListener('change', (e) => pickTeeSite(e.target.value || null));
 bind('gain', 'gainOut', (v) => (echo.gain = v));
 bind('nyq', 'nyqOut', (v) => (echo.nyquist = v), '', ' m/s');
 bind('pers', 'persOut', (v) => (echo.persistence = v));

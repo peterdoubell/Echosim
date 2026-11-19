@@ -16,7 +16,7 @@ const stubCanvas = () => ({ width: 800, height: 800, getContext: () => stubCtx()
 if (typeof globalThis.document === 'undefined') {
   globalThis.document = { createElement: () => stubCanvas() };
 }
-const { EchoView } = await import('../js/echo.js');
+const { EchoView, sectorPxPerCm } = await import('../js/echo.js');
 const { geometryAt } = await import('../js/cardiac-model.js');
 
 const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
@@ -43,7 +43,7 @@ export function renderBmode(name, phase = 0, path = {}) {
   const SW = e.img.width, SH = e.img.height, d = e.img.data;
   const grey = new Float32Array(SW * SH);
   for (let i = 0; i < SW * SH; i++) grey[i] = d[i * 4];
-  const apexY = SH * 0.04, pxPerCm = (SH * 0.92) / e.depthCm;
+  const apexY = SH * 0.04, pxPerCm = sectorPxPerCm(e.depthCm, e.sectorHalf);
   return { SW, SH, grey, spk: e._spk, kind: e._kind, depth: e._depth, mask: e._mask, abin: e._abin, NA: e._NA,
     lungD: e._lungDepth, mirP: e._mirP, cx: SW * 0.5, apexY, pxPerCm, half: e.sectorHalf, G, probe };
 }
@@ -109,5 +109,5 @@ export function renderDoppler(name, phase = 0, path = {}, opts = {}) {
   e.render(G, path, probe, 0);
   const SW = e.img.width, SH = e.img.height;
   return { SW, SH, alpha: e._dalpha, rgb: e._dcol, kind: e._kind, depth: e._depth, cx: SW * 0.5, apexY: SH * 0.04,
-    pxPerCm: (SH * 0.92) / e.depthCm, spec: e.spectralData, gate: e._dGate, box: e._cbox, G, probe, echo: e };
+    pxPerCm: sectorPxPerCm(e.depthCm, e.sectorHalf), spec: e.spectralData, gate: e._dGate, box: e._cbox, G, probe, echo: e };
 }

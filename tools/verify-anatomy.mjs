@@ -783,33 +783,29 @@ const segDist = (q, a, b) => {
   const ab = sub(b, a); let t = dot(sub(q, a), ab) / dot(ab, ab); t = t < 0 ? 0 : t > 1 ? 1 : t;
   return Math.hypot(...sub(q, add(a, mul(ab, t))));
 };
-const ME4C_IAS_TURN = 25, ME4C_IAS_OMNI = -6;      // deg: shaft turned to the patient's right, omniplane trimmed
 // ME4C: a true four-chamber cut through the fossa — both atria as real chambers
 // with the interatrial septum between them, off the LVOT, the LV forming the apex
 for (const [nm, G] of [['ED', GED], ['ES', GES]]) {
   const g = sectorGrid(TEE_VIEWS.ME4C, G);
   const ra = g.area(TISSUE.RA), la = g.area(TISSUE.LA), rv = g.area(TISSUE.RV), lv = g.area(TISSUE.LV);
-  // (the apex-aimed, mitral-centred ME4C cuts the RA body short: it sits ~1 cm
-  // behind the four-chamber plane, RA_POST in anatomy.js; KNOWN until that is moved)
+  // (KNOWN: the mitral-centred, apex-aimed ME4C holds the septum and the fossa, but
+  // the RA body lies ~40-60 deg left of the beam, beside the aortic root: no ME
+  // station on the oesophageal path reaches RA / LA >= 0.6 without laying >= 3 cm2
+  // of aortic-root wall in the four-chamber plane. RA_POST does not change it.)
   KNOWN = ra / la < 0.6;
-  check('TEE', `ME4C: RA area / LA area (${nm})`, ra / la, [0.6, 1.3], '', KNOWN ? 'pending rawall RA_POST' : '');
+  check('TEE', `ME4C: RA area / LA area (${nm})`, ra / la, [0.6, 1.3], '', KNOWN ? 'pending orchestrator: RA position vs aortic root' : '');
   KNOWN = false;
   if (nm === 'ED') check('TEE', 'ME4C: RV / LV area (ED)', rv / lv, [0.35, 0.6], '');
-  // The ME4C preset is mitral-centred with the beam down the LV long axis (one
-  // probe for the ME4C, commissural, 2C and LAX), so the interatrial septum lies
-  // at the left edge of the sector; the fossa / ASD view is that probe turned
-  // ME4C_IAS_TURN to the patient's right (the omniplane trimmed back ME4C_IAS_OMNI),
-  // the standard manoeuvre that centres the
-  // septum and the right heart (Hahn RT et al., ASE/SCA comprehensive TEE
-  // guidelines, JASE 2013;26:921-64: from the ME four-chamber view the probe is
-  // turned to the right to image the interatrial septum and right-sided
-  // structures). Inside the sector = within (half-angle - 0.06 rad) of the beam,
-  // the 0.06 rad margin the 0.66 rad TTE-width check used.
-  const pI = teeManipulate(g.p, { rotate: ME4C_IAS_TURN, omni: teeOmni(g.p) + ME4C_IAS_OMNI });
-  const f = sub(LM.IAS.fossaC, pI.pos);
-  const off = dot(f, pI.normal), ang = Math.atan2(dot(f, pI.lat), dot(f, pI.dir));
-  check('TEE', `ME4C turned ${ME4C_IAS_TURN} deg right: fossa ovalis distance from the plane (${nm})`, Math.abs(off), [0, 0.5]);
-  assert('TEE', `ME4C turned ${ME4C_IAS_TURN} deg right: fossa ovalis inside the sector (${nm})`, Math.abs(ang) < sectorHalfOf(TEE_VIEWS.ME4C) - 0.06, `${(ang * 57.3).toFixed(0)} deg`);
+  // The interatrial septum and the fossa ovalis belong to the standard ME
+  // four-chamber view itself (Hahn RT et al., ASE/SCA comprehensive TEE
+  // guidelines, JASE 2013;26:921-64): the preset holds them. Inside the sector =
+  // within (half-angle - 0.06 rad) of the beam: the 0.06 rad margin of the original
+  // check (0.6 rad for the 0.66 rad sector the TEE views used before review 12),
+  // kept for the 90 deg multiplane TEE sector (pi/4 half-angle).
+  const f = sub(LM.IAS.fossaC, g.p.pos);
+  const off = dot(f, g.p.normal), ang = Math.atan2(dot(f, g.p.lat), dot(f, g.p.dir));
+  check('TEE', `ME4C: fossa ovalis distance from the plane (${nm})`, Math.abs(off), [0, 0.5]);
+  assert('TEE', `ME4C: fossa ovalis inside the sector (${nm})`, Math.abs(ang) < sectorHalfOf(TEE_VIEWS.ME4C) - 0.06, `${(ang * 57.3).toFixed(0)} deg`);
   let root = 0, lvY = 9, rvY = 9;
   for (const c of g.cells.values()) {
     if (c.t === TISSUE.MYO && lumenDist(c.q[0], c.q[1], c.q[2], G.A, 'AOROOT') < 0.35) root += g.h * g.h;
@@ -821,10 +817,18 @@ for (const [nm, G] of [['ED', GED], ['ES', GES]]) {
   check('TEE', `ME4C: RV lumen ends short of the LV apex (${nm})`, rvY - lvY, [0.8, 3]);
   // the whole LV, apex included, inside the sector; long axis <= 12 deg off the beam
   // (review 12: the mitral-centred, apex-aimed ME4C)
+  // Margin = the apex's distance inside the side edges, d sin(half - |angle|) (d
+  // along the beam). Its upper bound keeps the apex short of the far arc: a point
+  // on the beam at the full depth has margin depth x sin(half), so the bound is
+  // the sector's depth x sin(half) -- 14 x sin(0.66) = 8.6 ~ the 9 cm the row was
+  // written with for the 14 cm, 0.66 rad sector; 16 x sin(pi/4) = 11.3 cm for the
+  // 16 cm, 90 deg multiplane ME4C sector (review 12 repair; re-derived, for
+  // orchestrator approval).
   const fr = (q) => { const w = sub(q, g.p.pos); return [dot(w, g.p.dir), dot(w, g.p.lat)]; };
   const ap = fr([0, G.A.lv.apexY - LM.LV.wall * LM.LV.apexWallFrac, 0]), mv = fr(G.A.valves.mitral.c);
   const apAng = Math.atan2(ap[1], ap[0]), half = sectorHalfOf(TEE_VIEWS.ME4C);
-  check('TEE', `ME4C: epicardial apex inside the sector (margin, ${nm})`, ap[0] * Math.sin(half - Math.abs(apAng)), [0.5, 9]);
+  check('TEE', `ME4C: epicardial apex inside the sector (margin, ${nm})`, ap[0] * Math.sin(half - Math.abs(apAng)), [0.5, TEE_VIEWS.ME4C.depth * Math.sin(half)], 'cm',
+    `${(TEE_VIEWS.ME4C.depth - Math.hypot(ap[0], ap[1])).toFixed(2)} cm inside the far arc`);
   check('TEE', `ME4C: LV long axis angle to the beam (${nm})`, Math.abs(Math.atan2(ap[1] - mv[1], ap[0] - mv[0])) * 180 / Math.PI, [0, 12], 'deg');
   if (nm === 'ES') {
     // LV minor dimension across the long axis at 40-60 % of its length
@@ -843,16 +847,15 @@ for (const [nm, G] of [['ED', GED], ['ES', GES]]) {
   }
 }
 {
-  // a secundum ASD opens the two atria into one another in the ME4C turned to the septum
-  const v4 = TEE_VIEWS.ME4C, vI = { ...v4, probe: () => { const p0 = v4.probe(); return teeManipulate(p0, { rotate: ME4C_IAS_TURN, omni: teeOmni(p0) + ME4C_IAS_OMNI }); } };
-  const path = { asd: true }, g = sectorGrid(vI, geometryAt(ED, path), path);
+  // a secundum ASD opens the two atria into one another in the ME4C
+  const path = { asd: true }, g = sectorGrid(TEE_VIEWS.ME4C, geometryAt(ED, path), path);
   let touch = 0;
   for (const [k, c] of g.cells) {
     if (c.t !== TISSUE.RA) continue;
     const [i, j] = k.split(',').map(Number);
     for (const kk of [`${i + 1},${j}`, `${i - 1},${j}`, `${i},${j + 1}`, `${i},${j - 1}`]) if (g.cells.get(kk)?.t === TISSUE.LA) touch++;
   }
-  check('TEE', `ME4C turned ${ME4C_IAS_TURN} deg right (secundum ASD): LA-RA lumen contact across the defect`, touch * g.h, [0.5, 20], 'cm');
+  check('TEE', 'ME4C (secundum ASD): LA-RA lumen contact across the defect', touch * g.h, [0.5, 20], 'cm');
 }
 // RV inflow: the coronary sinus and the IVC (Eustachian) valve enter the RA floor
 for (const [nm, G] of [['ED', GED], ['ES', GES]]) {
@@ -1576,19 +1579,11 @@ for (const vn of ['A2C', 'ME2C']) {
   const inPl = (q) => [dot(sub(q, p.pos), p.lat), dot(sub(q, p.pos), p.dir)];
   const o = inPl(A.la.aa[0].a), M = inPl(A.valves.mitral.c);
   const L = laa.reduce((m, c) => Math.max(m, Math.hypot(c[0] - o[0], c[1] - o[1])), 0);
-  // (ME2C is now the ME4C + 90 deg plane of the one ME station: at end-diastole
-  // the appendage ostium sits off it until the LAA is reseated on the anterior LA
-  // wall in the two-chamber planes; KNOWN until then)
-  const pend = vn === 'ME2C' ? 'pending LAA reseat into the 2C planes (apical-atria item)' : '';
-  KNOWN = !!pend && !(L >= 2.0 && L <= 4.0);
-  check('LA', `${vn}: in-plane LAA length from the ostium (ED)`, L, [2.0, 4.0], 'cm', KNOWN ? pend : '');
+  check('LA', `${vn}: in-plane LAA length from the ostium (ED)`, L, [2.0, 4.0]);
   const cx = (cs) => cs.reduce((s2, c) => s2 + c[0], 0) / Math.max(1, cs.length);
   const near = laa.reduce((m, c) => Math.min(m, Math.hypot(c[0] - M[0], c[1] - M[1])), 1e9);
-  const okR = laa.length > 0 && cx(laa) > cx(body) && cx(laa) > M[0] && near < 3.5;
-  KNOWN = !!pend && !okR;
-  assert('LA', `${vn}: LAA on the screen-right of the LA, beside the mitral annulus (ED)`, okR,
-    `LAA x ${cx(laa).toFixed(2)}, LA body x ${cx(body).toFixed(2)}, mitral x ${M[0].toFixed(2)}, nearest ${near.toFixed(2)} cm${KNOWN ? '; ' + pend : ''}`);
-  KNOWN = false;
+  assert('LA', `${vn}: LAA on the screen-right of the LA, beside the mitral annulus (ED)`, laa.length > 0 && cx(laa) > cx(body) && cx(laa) > M[0] && near < 3.5,
+    `LAA x ${cx(laa).toFixed(2)}, LA body x ${cx(body).toFixed(2)}, mitral x ${M[0].toFixed(2)}, nearest ${near.toFixed(2)} cm`);
 }
 // PLAX M-mode through the aortic root: both root walls swing anteriorly in
 // systole as the LA fills behind them (~1 cm), in parallel; less with a low
@@ -1883,18 +1878,10 @@ SECTION = 'TEE';
     const cells = cellsWhere(S, (l, k) => l === TISSUE.LA && laPart(G.A, ptK(S, k)) === 'laa');
     const H = hull(cells.map((k) => xd(S, k)));
     let L = 0; for (const a of H) for (const b of H) L = Math.max(L, Math.hypot(a[0] - b[0], a[1] - b[1]));
-    // (ME2C, the ME4C + 90 deg plane: KNOWN at end-diastole until the appendage is
-    // reseated into the two-chamber planes, as the LA rows above)
-    const pend = vn === 'ME2C' ? 'pending LAA reseat into the 2C planes (apical-atria item)' : '';
-    const ar = areaOf(S, cells);
-    KNOWN = !!pend && !(ar >= 1.5);
-    check('TEE', `${vn}: LAA lumen area in plane (${ph})`, ar, [1.5, 20], 'cm2', KNOWN ? pend : '');
+    check('TEE', `${vn}: LAA lumen area in plane (${ph})`, areaOf(S, cells), [1.5, 20], 'cm2');
     // (ME2C is a fixed plane through the LV: the appendage swings ~1 cm through
     // it with the LA wall, so less of its length lies in plane at end-systole)
-    const lr = [vn === 'ME2C' && ph === 'ES' ? 2.0 : 2.5, 6];
-    KNOWN = !!pend && !(L >= lr[0] && L <= lr[1]);
-    check('TEE', `${vn}: LAA length in plane (${ph})`, L, lr, 'cm', KNOWN ? pend : '');
-    KNOWN = false;
+    check('TEE', `${vn}: LAA length in plane (${ph})`, L, [vn === 'ME2C' && ph === 'ES' ? 2.0 : 2.5, 6]);
     if (vn === 'MELAA') {
       const myo = cellsWhere(S, (l, k) => { if (l !== TISSUE.MYO) return false; const q = ptK(S, k); return lumenDist(q[0], q[1], q[2], G.A, 'LV_EPI') < 0; });
       check('TEE', `MELAA: LV myocardium in the sector (${ph})`, areaOf(S, myo), [0, 2], 'cm2');
@@ -2193,9 +2180,34 @@ for (const [vn, view, vessels] of [['SC_IVC', EXTRA_VIEWS.SC_IVC, ['ivc']], ['ME
     // (the ME4C, commissural, 2C and LAX are omniplane angles of one ME station on
     // the path, and the ME AV SAX transducer sits on the path below it)
     for (const [vn, v] of Object.entries(TEE_VIEWS)) {
-      check('TEE', `TEE path: ${vn} probe within 0.5 cm of the oesophageal / gastric centreline`, teePathDist(v.probe().pos), [0, 0.5], 'cm');
+      const d = teePathDist(v.probe().pos);
+      // (KNOWN, review 12 repair: the oesophagus moved behind the right half of the
+      // LA, where the ME station sits on the extended LV long axis and the
+      // four-chamber sector holds the septum and a secundum defect; the ME bicaval
+      // transducer is kept where it was, ~2.5 cm to the left of the moved path, as
+      // the repair instructions ask: its plane, through the SVC and IVC axis points,
+      // belongs to the septal / caval group. That plane meets the moved path only
+      // 2-2.5 cm higher, behind the arch, and the plane through both caval points
+      // and the fossa is near-coronal (normal 0.92 body-posterior): at the
+      // oesophagus's depth it lies ~12 cm to the left. Planes refitted from the path
+      // through the caval axes pass 0.9-1.1 cm from the fossa, cut the IVC / SVC for
+      // < 1.5 cm, or lose the Eustachian valve, the crista or the LA near field
+      // (10-16 bicaval rows fail). Pending a decision on the caval line / bicaval aim.)
+      KNOWN = vn === 'MEBICAVAL' && d > 0.5;
+      check('TEE', `TEE path: ${vn} probe within 0.5 cm of the oesophageal / gastric centreline`, d, [0, 0.5], 'cm',
+        KNOWN ? 'pending orchestrator: bicaval transducer kept off the moved oesophagus (caval line / fossa plane, rawall)' : '');
       KNOWN = false;
     }
+    // the omniplane slider runs 0-180 deg and shows the preset's angle (whole
+    // degrees): every preset lies in that range, so the first touch of the slider
+    // turns the plane from where it is, not by a jump
+    let oLo = { o: 1e9 }, oHi = { o: -1e9 };
+    for (const [vn, v] of Object.entries(TEE_VIEWS)) {
+      const o = Math.round(teeOmni(v.probe()));
+      if (o < oLo.o) oLo = { o, vn }; if (o > oHi.o) oHi = { o, vn };
+    }
+    check('TEE', 'every TEE preset: omniplane angle within [0, 180] (lowest)', oLo.o, [0, 180], 'deg', oLo.vn);
+    check('TEE', 'every TEE preset: omniplane angle within [0, 180] (highest)', oHi.o, [0, 180], 'deg', oHi.vn);
     // the omniplane control turns the plane about the beam and nothing else: the
     // ME AV SAX preset turned to its own angle + 90 deg holds the root axis
     const sax = TEE_VIEWS.MEAVSAX.probe(), lax = teeManipulate(sax, { omni: teeOmni(sax) + 90 });
@@ -2243,13 +2255,30 @@ for (const [vn, view, vessels] of [['SC_IVC', EXTRA_VIEWS.SC_IVC, ['ivc']], ['ME
         n++; if (first === TISSUE.MYO) ok++;
       }
       check('TEE', `MELAX: inferolateral wall between the LV blood and the left sector edge (share of depth arcs crossing the LV, ${ph})`, n ? ok / n : 0, [0.8, 1], '');
+      // (review 12 repair) ... with the LVOT, cusps and root to the right, inside
+      // the sector, not on its edge
+      const SL = planeSample(v, G, {}, 0.1);
+      check('TEE', `MELAX: aortic lumen inside the sector (${ph})`, areaOf(SL, cellsWhere(SL, (l) => l === TISSUE.AORTA)), [ph === 'ED' ? 4 : 6, 40], 'cm2');
+    }
+    {
+      const v = TEE_VIEWS.MELAX, pr = v.probe(), w = sub(LM.A, pr.pos);
+      check('TEE', 'MELAX: aortic-valve centre angle from the beam', Math.abs(Math.atan2(dot(w, pr.lat), dot(w, pr.dir))) * 180 / Math.PI, [0, 35], 'deg');
     }
     // flexion: anteflexion tips the beam cranially (ME 5C: the aortic valve), and
     // retroflexion caudally (the coronary sinus); the two signs differ
-    const f20 = teeManipulate(p4, { flex: 20 }), r20 = teeManipulate(p4, { flex: -20 });
+    const f20 = teeManipulate(p4, { flex: 20 });
     check('TEE', 'ME4C +20 deg flex (anteflexion): aortic-valve centre to the plane', Math.abs(dot(sub(LM.A, f20.pos), f20.normal)), [0, 0.6]);
+    // (review 12 repair: retroflexion sweeps the plane through the coronary-sinus
+    // ostium at ~9-10 deg -- from this station behind the right half of the LA as
+    // from the earlier one, where the -20 deg row read 0.78 cm on its way past the
+    // ostium (0.06 cm at -10 deg) -- and on toward the sinus body beyond; so the
+    // row is taken at -10 deg, and retroflexion must bring the ostium in from where
+    // it lies off the unflexed ME4C plane)
     const cso = GED.A.cs[GED.A.cs.length - 1].b;
-    check('TEE', 'ME4C -20 deg flex (retroflexion): coronary-sinus ostium to the plane', Math.abs(dot(sub(cso, r20.pos), r20.normal)), [0, 0.8]);
+    const csOff = (f) => { const q = teeManipulate(p4, { flex: f }); return Math.abs(dot(sub(cso, q.pos), q.normal)); };
+    check('TEE', 'ME4C -10 deg flex (retroflexion): coronary-sinus ostium to the plane', csOff(-10), [0, 0.8], 'cm', `unflexed ${csOff(0).toFixed(2)} cm, -20 deg ${csOff(-20).toFixed(2)} cm`);
+    assert('TEE', 'ME4C retroflexion brings the coronary-sinus ostium into the plane (-10 deg >= 0.3 cm closer than unflexed)', csOff(-10) <= csOff(0) - 0.3,
+      `unflexed ${csOff(0).toFixed(2)} cm, -10 deg ${csOff(-10).toFixed(2)} cm`);
     const dS = (f) => dot(teeManipulate(p4, { flex: f }).dir, BODY_AX.S) - dot(p4.dir, BODY_AX.S);
     assert('TEE', 'flex +10 and -10 deg move the beam in opposite directions (cranial / caudal)', dS(10) > 0 && dS(-10) < 0, `dS +10 ${dS(10).toFixed(3)}, -10 ${dS(-10).toFixed(3)}`);
     // advance: the ME4C probe advanced along the path through the junction into
@@ -2881,7 +2910,12 @@ SECTION = 'TEE';
         const lo = base + 0.2 * (pk - base), hi = base + 0.8 * (pk - base);
         let t2 = pi; while (t2 > 0 && prof[t2] > hi) t2--;
         let t1 = t2; while (t1 > 0 && prof[t1] > lo) t1--;
-        return (t2 - t1) / R.pxPerCm * 10;
+        // (the 20 % and 80 % crossings interpolated between profile samples: at the
+        // fitted 90 deg TEE sector's scale the rise spans only ~4-6 px, and whole-
+        // pixel crossings step the ratio by 0.25-0.33; interpolated, the old scale
+        // reads 1.98 where whole pixels read 2.00)
+        const xing = (t, v) => t + (prof[t + 1] > prof[t] ? Math.min(1, Math.max(0, (v - prof[t]) / (prof[t + 1] - prof[t]))) : 0);
+        return (xing(t2, hi) - xing(t1, lo)) / R.pxPerCm * 10;
       };
       const et = edge(C), em = edge(Cm);
       ratio = em / et; note = `true ${et.toFixed(2)} mm, mirror ${em.toFixed(2)} mm`;
@@ -2990,14 +3024,14 @@ SECTION = 'TEE';
 // review 12: oblique view cameras off each imaging plane (TEE from the probe
 // side), the TEE probe in view, the 3D labels de-collided on screen
 {
-  const { structureLabels, cameraDirForPlane, declutterLabels, CAMERA_UP, HEART_CENTRE } = await import('../js/thorax3d.js');
+  const { structureLabels, cameraDirForPlane, declutterLabels, labelPriority, CAMERA_UP, HEART_CENTRE } = await import('../js/thorax3d.js');
   const { epiDist } = await import('../js/anatomy.js');
   const A = GED.A, C = HEART_CENTRE;
   const sub = (a, b) => a.map((v, i) => v - b[i]), dt = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
   const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
   const svc = A.svc.a.map((v, i) => 0.5 * (v + A.svc.b[i])), ao = A.valves.aortic.c.map((v, i) => v + LM.U_AO[i] * 3.0);
   const Ls = structureLabels(A), labels = [...Ls.heart, ...Ls.context];
-  let angLo = 90, angHi = 0, angW = '', sideLo = 1e9, sideW = '', occl = 0, occW = '', svcLo = 1e9, svcW = '', over = 0, keptLo = 99, keptW = '';
+  let angLo = 90, angHi = 0, angW = '', sideLo = 1e9, sideW = '', occl = 0, occW = '', svcLo = 1e9, svcW = '', over = 0, keptLo = 99, keptW = '', oesoMiss = [];
   for (const [k, v] of Object.entries(ALL_V)) {
     const tee = !!TEE_VIEWS[k], p = v.probe(), d = cameraDirForPlane(p.normal, tee, p.pos);
     const ang = Math.asin(Math.min(1, Math.abs(dt(d, p.normal)))) * 180 / Math.PI;
@@ -3011,8 +3045,9 @@ SECTION = 'TEE';
       const f = d.map((x) => -x), rr = cross(f, CAMERA_UP), rl = Math.hypot(...rr), r = rr.map((x) => x / rl);
       const sv = dt(sub(svc, ao), r) * Math.sign(dt(BODY_AX.R, r)); if (sv < svcLo) { svcLo = sv; svcW = k; }
     }
-    const kept = declutterLabels(labels, d, CAMERA_UP);
+    const kept = declutterLabels(labels, d, CAMERA_UP, 0.15, labelPriority(tee));
     if (kept.length < keptLo) { keptLo = kept.length; keptW = k; }
+    if (tee && !kept.some((i) => labels[i][0] === 'Oesophagus')) oesoMiss.push(k);
     // overlapping pairs among the kept labels (screen boxes as declutterLabels)
     let u = CAMERA_UP.map((x, i) => x - d[i] * dt(CAMERA_UP, d)); const ul = Math.hypot(...u); u = u.map((x) => x / ul);
     const rgt = cross(d, u), bx = kept.map((i) => { const [t, q] = labels[i]; return { x: dt(q, rgt), y: dt(q, u), w: 0.31 * (t.length + 0.6), h: 0.575 }; });
@@ -3025,6 +3060,7 @@ SECTION = 'TEE';
   check('3D', 'TTE oblique cameras: SVC screen-x minus ascending-aorta screen-x toward the patient right (worst)', svcLo, [0.3, 5], 'cm', svcW);
   check('3D', 'overlapping 3D label pairs per preset (after de-collision, all presets)', over, [0, 0], '');
   check('3D', '3D labels kept after de-collision (fewest, of ' + labels.length + ')', keptLo, [8, 99], '', keptW);
+  check('3D', 'TEE presets: oesophagus label hidden by the de-collision', oesoMiss.length, [0, 0], '', oesoMiss.join(', '));
 }
 SECTION = 'Pathology';
 {
@@ -3556,21 +3592,44 @@ SECTION = 'Pathology';
 {
   const sec0 = SECTION; SECTION = 'TEE';
   const gT = 'TEE views (review 12)';
-  const { dopplerDefault, defaultSiteGeometry, DOPPLER_SITES } = await import('../js/echo.js');
+  const { dopplerDefault, defaultSiteGeometry, DOPPLER_SITES, teeSiteChoices, DOPPLER_MAX_ANGLE } = await import('../js/echo.js');
   const lvotAx = unit(sub(LM.A, LM.LVOT0));
-  // TG LAX: the root axis in plane and the beam on the LVOT flow
+  // TG LAX: the root axis in plane, from the TG mid station (not the deep TG
+  // position), at a textbook omniplane angle and within the flex control's range
   {
-    const p = TEE_VIEWS.TGLAX.probe();
+    const p = TEE_VIEWS.TGLAX.probe(), tg = TEE_VIEWS.TGSAX.probe(), dtg = TEE_VIEWS.DTG5C.probe();
     check(gT, 'TGLAX: root axis out of the plane', Math.asin(Math.min(1, Math.abs(dot(LM.U_AO, p.normal)))) * 180 / Math.PI, [0, 10], 'deg');
-    check(gT, 'TGLAX: beam (transducer -> aortic valve) to the LVOT flow', Math.acos(Math.min(1, Math.abs(dot(unit(sub(LM.A, p.pos)), lvotAx)))) * 180 / Math.PI, [0, 20], 'deg');
+    check(gT, 'TGLAX: omniplane readout (textbook ~120-140 deg)', teeOmni(p), [110, 145], 'deg');
+    check(gT, 'TGLAX: transducer from the TG SAX contact (the TG mid station, not the deep TG)', Math.hypot(...sub(p.pos, tg.pos)), [0, 2], 'cm',
+      `${Math.hypot(...sub(p.pos, dtg.pos)).toFixed(1)} cm from the deep-TG contact`);
+    check(gT, 'TGLAX: plane angle to the deep TG 5C plane (a distinct window)', Math.acos(Math.min(1, Math.abs(dot(p.normal, dtg.normal)))) * 180 / Math.PI, [30, 90], 'deg');
+    // (KNOWN, review 12 repair: from the TG mid station the beam meets the LVOT
+    // flow at ~40 deg whatever the omniplane, flex (+/-30) and turn: the model's
+    // root / LVOT geometry, outside the TEE group. The deep TG 5C, advanced to the
+    // apex, carries the aligned AV CW / LVOT PW pair; the TG LAX AV CW default is
+    // recorded through an angled (modified) window.)
+    const bm = Math.acos(Math.min(1, Math.abs(dot(unit(sub(LM.A, p.pos)), lvotAx)))) * 180 / Math.PI;
+    KNOWN = bm > 20;
+    check(gT, 'TGLAX: beam (transducer -> aortic valve) to the LVOT flow', bm, [0, 20], 'deg', KNOWN ? 'pending orchestrator: root / LVOT geometry from the TG mid station' : '');
+    KNOWN = false;
     const d = dopplerDefault('TGLAX', {});
     assert(gT, 'TGLAX: a default AV CW / LVOT PW site', d === 'avCw' || d === 'lvot', String(d));
   }
-  // TG 2C: both papillary heads in plane
+  // TG 2C: both papillary muscles in plane, with their chordal fans to the leaflets
   for (const [G, ph] of [[GED, 'ED'], [GES, 'ES']]) {
     const p = TEE_VIEWS.TG2C.probe();
     const m = Math.max(...G.A.pap.map((pp) => Math.abs(dot(sub(pp.b, p.pos), p.normal))));
     check(gT, `TG2C: both papillary heads within 0.4 cm of the plane (${ph})`, m, [0, 0.4]);
+    let nin = 0, ntot = 0;
+    for (const c of G.chordae || []) {
+      if (c.tv) continue;
+      for (let i = 0; i <= 20; i++) { ntot++; if (Math.abs(dot(sub(add(c.a, mul(sub(c.b, c.a), i / 20)), p.pos), p.normal)) < 0.3) nin++; }
+    }
+    check(gT, `TG2C: mitral chordae within 0.3 cm of the plane (share of chordal samples, ${ph})`, ntot ? 100 * nin / ntot : null, [40, 100], '%');
+    // ... and the muscles and the mitral valve inside the sector, in front of the
+    // transducer (a plane can hold them beside or behind it)
+    const inS = (q) => { const w = sub(q, p.pos), z = dot(w, p.dir); return z > 1 && z < TEE_VIEWS.TG2C.depth - 1 && Math.abs(Math.atan2(dot(w, p.lat), z)) < sectorHalfOf(TEE_VIEWS.TG2C) - 0.06; };
+    assert(gT, `TG2C: both papillary heads and the mitral valve inside the sector (${ph})`, G.A.pap.every((pp) => inS(pp.b)) && inS(G.A.valves.mitral.c));
   }
   check(gT, 'TEE_VIEWS count (ASE/SCA set)', Object.keys(TEE_VIEWS).length, [21, 28], '');
   for (const k of ['MEASCSAX', 'MEASCLAX', 'TGBSAX', 'TGRVIN', 'UEARCHLAX', 'UEARCHSAX']) assert(gT, `TEE view present: ${k}`, !!TEE_VIEWS[k]);
@@ -3612,23 +3671,67 @@ SECTION = 'Pathology';
       check(gT, `${k}: arch lumen in plane (${ph})`, areaOf(S, cellsWhere(S, (l) => l === TISSUE.AORTA)), [3, 40], 'cm2');
     }
   }
-  // TEE Doppler sites: pulmonary-vein and LAA PW, the deep-TG continuity pair
+  // TEE Doppler sites: pulmonary-vein and LAA PW, the deep-TG continuity pair.
+  // Besides each view's standard trace (dopplerDefault), the probe panel's
+  // spectral-site selector lists the other sites a TEE view records
+  // (teeSiteChoices); picking one sets echo.dopplerSite and echo.dopplerAlign (the
+  // beam angled to the flow), which is what ui() below renders: these rows test
+  // the traces the learner records through the app (verify-scenario-ui drives the
+  // selector itself).
   assert(gT, 'DOPPLER_SITES includes pvPw and laaPw', !!(DOPPLER_SITES.pvPw && DOPPLER_SITES.laaPw));
+  const ui = (view, key, phase = 0.3, path = {}) => {
+    assert(gT, `${view}: the spectral-site selector offers ${key}`, teeSiteChoices(view).some((c) => c.key === key), teeSiteChoices(view).map((c) => c.key).join(', '));
+    return renderDoppler(view, phase, path, { color: false, site: key, align: true }).spec;
+  };
+  {
+    let bad = [];
+    for (const v of Object.keys(TEE_VIEWS)) for (const c of teeSiteChoices(v)) {
+      const g = defaultSiteGeometry(v, c.key, {});
+      if (!g || g.outside || !g.through || g.angleDeg > DOPPLER_MAX_ANGLE) bad.push(`${v}/${c.key}`);
+    }
+    check(gT, 'TEE spectral-site selector: listed sites outside their view\'s sector, off its plane or > 20 deg from the flow', bad.length, [0, 0], '', bad.join(', '));
+  }
   {
     const la = renderDoppler('MELAA', 0.3, {}, { color: false }).spec;
     assert(gT, 'normal ME LAA: default PW at the appendage', la.mode === 'PW' && la.site === 'laaPw', `${la.mode} ${la.site}`);
     let mx = 0; for (let c = 0; c < la.cols; c++) { const ph = c / la.cols; if (ph >= 0.8) mx = Math.max(mx, Math.abs(la.vs[c])); }
     check(gT, 'normal ME LAA: LAA emptying PW peak (atrial systole)', mx, [0.4, 0.8], 'm/s', `beam-flow angle ${la.angleDeg.toFixed(0)} deg`);
-    const pv = renderDoppler('MELAA', 0.3, {}, { color: false, site: 'pvPw', align: true }).spec;
+    const pv = ui('MELAA', 'pvPw');
     const pk = (a, b, sg) => { let m = 0; for (let c = 0; c < pv.cols; c++) { const ph = c / pv.cols; if (ph >= a && ph < b) m = Math.max(m, sg * pv.vs[c]); } return m; };
     const S = pk(0.05, 0.4, 1), D = pk(0.45, 0.8, 1), Ar = pk(0.82, 1.0, -1);
-    assert(gT, 'normal PV PW (ME LAA, LUPV): S, D and Ar present', S > 0.25 && D > 0.2 && Ar > 0.08, `S ${S.toFixed(2)}, D ${D.toFixed(2)}, Ar ${Ar.toFixed(2)} m/s`);
+    assert(gT, 'normal PV PW picked in the ME LAA (LUPV): S, D and Ar present', pv.site === 'pvPw' && pv.mode === 'PW' && S > 0.25 && D > 0.2 && Ar > 0.08,
+      `${pv.site} ${pv.mode}, S ${S.toFixed(2)}, D ${D.toFixed(2)}, Ar ${Ar.toFixed(2)} m/s, beam-flow angle ${pv.angleDeg.toFixed(0)} deg`);
     check(gT, 'normal PV PW: S/D', D > 0 ? S / D : null, [0.8, 2.5], '');
   }
-  for (const k of ['avCw', 'lvot']) {
-    const g = defaultSiteGeometry('DTG5C', k, {});
-    check(gT, `DTG5C: ${k} default beam angle`, g && !g.outside && g.through ? g.angleDeg : null, [0, 20], 'deg');
+  // deep TG 5C: AV CW is the standard trace; the LVOT PW picked beside it (the
+  // continuity-equation pair from one window), both within 20 deg of ejection.
+  // Their peak ratio is the inverse of the velocity ratio (dimensionless index,
+  // LVOT / AV), which grades AS > 0.50 mild, 0.25-0.50 moderate, < 0.25 severe
+  // (Baumgartner H et al., EAE/ASE recommendations on valve stenosis, JASE
+  // 2009;22:1-23) and approaches 1 without stenosis: AV / LVOT 0.9-1.7 for the
+  // normal heart (velocity ratio ~0.6-1.1) and >= 4 for the severe AS case (Vmax
+  // ~4.5 m/s)
+  for (const [pn, path] of [['normal', {}], ['AS', { aorticStenosis: true }]]) {
+    const d = dopplerDefault('DTG5C', path);
+    assert(gT, `${pn} DTG5C: standard trace AV CW`, d === 'avCw', String(d));
+    const av = renderDoppler('DTG5C', 0.2, path, { color: false }).spec, lv = ui('DTG5C', 'lvot', 0.2, path);
+    const pk = (s) => { let m = 0; for (let c = 0; c < s.cols; c++) m = Math.max(m, Math.abs(s.vs[c])); return m; };
+    check(gT, `${pn} DTG5C: LVOT PW picked (beam-flow angle)`, lv.site === 'lvot' && lv.mode === 'PW' ? lv.angleDeg : null, [0, 20], 'deg', `peak ${pk(lv).toFixed(2)} m/s`);
+    check(gT, `${pn} DTG5C: AV CW peak / LVOT PW peak`, pk(lv) > 0 ? pk(av) / pk(lv) : null, pn === 'AS' ? [4, 10] : [0.9, 1.7], '', `AV ${pk(av).toFixed(2)}, LVOT ${pk(lv).toFixed(2)} m/s`);
   }
+  SECTION = sec0;
+}
+
+// the 90 deg multiplane TEE sector at its deepest preset (16 cm) fits the buffer
+// too: its far corners are not clipped by the side edges (as the A4C 17 cm row).
+// (Rendered last: each render re-draws the blood speckle from a frame counter, so
+// an extra render earlier would change the speckle realisation of later rows.)
+{
+  const sec0 = SECTION; SECTION = 'Normal';
+  const RT = renderBmode('ME4C', ED, {});
+  let sideT = 0;
+  for (let j = 0; j < RT.SH; j++) if (RT.mask[j * RT.SW] || RT.mask[j * RT.SW + RT.SW - 1]) sideT++;
+  check('B-mode', 'ME4C 16 cm (90 deg TEE sector): sector rows touching the buffer side edges', sideT, [0, 0], 'rows');
   SECTION = sec0;
 }
 

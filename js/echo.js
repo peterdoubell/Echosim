@@ -50,6 +50,12 @@ function chestWall(f, n, nn) {
 const DB = {
   blood: -60, myo: -28, valve: -15, calc: -4, peri: -24, liver: -32, fat: -36,
   vwall: -26, vein: -52, soft: -46, lung: -48, medi: -38,
+  // the posterior mediastinum round the oesophagus and descending aorta through a
+  // TEE sector (fat and loose connective tissue with fibrous septa, as the
+  // transthoracic medi, 2 dB brighter): the 90 deg sector's edge beams cross 5-8 cm
+  // of it beside the heart at 5.5 MHz, and it must read as tissue, never as a
+  // fluid-dark gap
+  mediTee: -36,
 };
 const AMP = Object.fromEntries(Object.entries(DB).map(([k, v]) => [k, Math.pow(10, v / 20)]));
 // Spontaneous echo contrast: amplitude gain (x3..x27, mean ~x10, about +20 dB) of
@@ -105,6 +111,8 @@ const PERI_K = TISSUE.PERI_LINE, PERI_GAIN = 8;      // pericardial interface: g
 // views whose extracardiac OUTSIDE tissue is all moderately echogenic mediastinal /
 // abdominal soft tissue (suprasternal and subcostal windows)
 const MEDI_VIEWS = { SSN: 1, SUBCOSTAL: 1, SC_IVC: 1 };
+// (TEE: the band above the diaphragm's dome sheet that reads as solid tissue, cm)
+const TEE_DIAPH_BAND = 3.0;
 // fluid labels (blood pools, venous blood, effusion), indexed by tissue kind
 const FLUID_K = new Uint8Array(16);
 for (const k of [TISSUE.LV, TISSUE.RV, TISSUE.LA, TISSUE.RA, TISSUE.AORTA, TISSUE.VEIN, TISSUE.PERICARDIUM]) FLUID_K[k] = 1;
@@ -150,6 +158,14 @@ const EXTRA_LABELS = [
 // fan keeps its curved bottom and is never cut off at the sides in deep views.
 const SW = 496;
 const SH = 420;
+// Display scale (px per cm): the sector's full depth fills 92 % of the buffer
+// height, unless the sector is then too wide for the buffer (the 90 deg TEE
+// sector: half-width depth x sin 45 deg = 273 px against 248), when the fan's far
+// corners (it runs 2 % past the displayed depth) are fitted inside the width
+// (4 px margin) instead. The TTE sectors (+/-0.66 rad) keep the height scale.
+export function sectorPxPerCm(depthCm, half) {
+  return Math.min((SH * 0.92) / depthCm, (SW / 2 - 4) / (depthCm * (0.94 / 0.92) * Math.sin(Math.min(half, Math.PI / 2))));
+}
 const WALL_FILTER = 0.06; // m/s colour dead-zone (suppresses near-zero flow)
 
 // Elevational (out-of-plane) beam geometry. A cardiac phased array focuses the
@@ -358,6 +374,23 @@ export function dopplerDefault(view, path = {}) {
   }
   return null;
 }
+// The spectral sites a TEE operator can put the PW gate or CW line on from each
+// TEE view (the probe panel's site selector), besides the view's standard site:
+// e.g. the pulmonary-vein S/D/Ar and the LAA emptying velocity from the ME LAA,
+// and the LVOT PW / AV CW continuity pair from the deep TG 5C. Each lies in that
+// view's sector, near its plane, and is met within DOPPLER_MAX_ANGLE of its flow
+// (once angled, for an `align` site): the RVOT from the ME RV inflow-outflow /
+// AV SAX and the LVOT from the TG LAX cross the beam at ~45 deg, so they are not
+// offered there. The list is the same in every case, so it never gives a hidden
+// diagnosis away. A picked site is recorded with the beam angled to its flow
+// (dopplerAlign) where the site allows it, as the standard site is.
+const TEE_SITE_CHOICES = {
+  ME4C: ['mvTips', 'mvCw', 'tvCw'], MECOMM: ['mvTips', 'mvCw'], ME2C: ['mvTips', 'mvCw'], MELAX: ['mvTips', 'mvCw'],
+  MERVIO: ['tvCw'], MELAA: ['laaPw', 'pvPw'], DTG5C: ['avCw', 'lvot'],
+};
+export function teeSiteChoices(view) {
+  return (TEE_SITE_CHOICES[view] || []).map((key) => { const s = DOPPLER_SITES[key]; return { key, name: s.name, mode: typeof s.mode === 'string' ? s.mode : '' }; });
+}
 // Phase a site is placed in: peak mitral inflow ('E') or peak ejection ('S').
 const _refPhaseCache = new WeakMap();
 function refPhases(path) {
@@ -479,6 +512,7 @@ export class EchoView {
     // time axis. spectralData exposes the last sweep (per-column velocities,
     // mode, scale, aliasing) for the UI and the audits.
     this.dopplerSite = null;
+    this.dopplerAlign = false;          // (a picked site angled to its flow, as the standard site)
     this.dopplerMode = 'auto';
     this.pwNyquist = null;
     this.rrSec = 60 / 72;
@@ -670,7 +704,7 @@ export class EchoView {
     const data = this.img.data;
     const cx = SW * 0.5;
     const apexY = SH * 0.04;
-    const pxPerCm = (SH * 0.92) / this.depthCm;
+    const pxPerCm = sectorPxPerCm(this.depthCm, this.sectorHalf);
     const half = this.sectorHalf;
     const P = probe.pos;
     // subtle live speckle shimmer: rotate the noise lookup slowly over time
@@ -713,7 +747,9 @@ export class EchoView {
     // into the reflectivity + context buffers. The B-mode grey is NOT formed here:
     // reflectivity is first PSF-convolved, then display-processed (TGC, artifacts,
     // log compression) and finally composited with the crisp Doppler overlay.
-    const rMax = SH * 0.94;
+    // (the fan runs 2 % past the displayed depth: SH x 0.94 px when the depth fills
+    // 92 % of the height, proportionally less when a wide sector is fitted to the width)
+    const rMax = this.depthCm * pxPerCm * (0.94 / 0.92);
     const inFan = (x, y) => {
       const dy = y - apexY;
       if (dy <= 0) return false;
@@ -888,20 +924,25 @@ export class EchoView {
         else {
           // mediastinal / thoracic soft tissue: fat and loose connective tissue,
           // moderately echogenic, never fluid-dark. All of it in a TEE sector (the
-          // mediastinum around the oesophagus), and directly under a transthoracic
+          // mediastinum around the oesophagus: mediTee), and directly under a transthoracic
           // window (anterior mediastinal fat, the arch's concavity from the notch,
           // the abdominal wall over the liver), easing deeper to the darker
           // soft-tissue background beside and behind the heart. Below the diaphragm
           // (subcostal windows) it is abdominal wall / retroperitoneal tissue, and
           // from the notch the superior mediastinum round the arch, and through the
           // liver window the posterior mediastinum behind the heart: medi throughout.
-          // Through a TEE sector, the left hemidiaphragm (muscle) and the soft
-          // tissue below it (gastric fundus wall, spleen) read as solid muscle /
-          // abdominal viscera, as echogenic as liver, not as mediastinal fat: the
-          // 90 deg ME long-axis sector reaches them beyond the LV inferolateral wall.
+          // Through a TEE sector, the left hemidiaphragm and the soft tissue below
+          // it (gastric fundus wall, spleen) read as solid muscle / abdominal
+          // viscera, as echogenic as muscle, not as mediastinal fat: the 90 deg ME
+          // sector reaches them beyond the LV inferolateral wall and apex. So does
+          // the band TEE_DIAPH_BAND cm above the dome sheet behind and below the
+          // heart, where the muscular posterior slope of the hemidiaphragm and its
+          // crura rise behind the inferior pericardium: the far field beyond the
+          // heart is solid tissue all the way down, never a fluid-dark gap.
           const db = diaphragmBelow(wx, wy, wz);
-          if (this.nearFieldCm < 0.5 && db > -0.3) e = AMP.liver;
-          else if (this.nearFieldCm < 0.5 || MEDI_VIEWS[this.viewName] || db > 0.5) e = AMP.medi;
+          if (this.nearFieldCm < 0.5 && db > -TEE_DIAPH_BAND) e = AMP.myo;
+          else if (this.nearFieldCm < 0.5) e = AMP.mediTee;
+          else if (MEDI_VIEWS[this.viewName] || db > 0.5) e = AMP.medi;
           else {
             const u = clamp((depth - this.nearFieldCm - 2.5) / 2.5, 0, 1);
             e = AMP.medi + (AMP.soft - AMP.medi) * u;
@@ -1299,7 +1340,7 @@ export class EchoView {
   _psfBlur() {
     const w = SW, h = SH, refl = this._refl, tmp = this._tmp, depthBuf = this._depth;
     const mask = this._mask, kern = this._kern;
-    const pxPerCm = (SH * 0.92) / this.depthCm;
+    const pxPerCm = sectorPxPerCm(this.depthCm, this.sectorHalf);
     // Resolve the stochastic slice-thickness estimate locally first: a
     // [1,2,1] x [1,2,1] average exactly cancels the 2x2 elevation dither, so no
     // periodic hatch survives even where the PSF is narrow (the TEE near field).

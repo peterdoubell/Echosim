@@ -88,7 +88,7 @@
         </div>
       </div>
       <div class="spectral-wrap">
-        <span class="sp-label">Spectral Doppler (standard site for the view · 1 cardiac cycle)</span>
+        <span class="sp-label" id="spLabel">Spectral Doppler (standard site for the view · 1 cardiac cycle)</span>
         <canvas id="spectral" width="440" height="120"></canvas>
       </div>
     </section>
@@ -297,6 +297,10 @@
         <label title="Flex the tip: + anteflexion (beam tips cranially: from the ME4C up to the LVOT and aortic valve; in the stomach up into the heart), − retroflexion (caudally, toward the coronary sinus)">Flex <output id="flexOut" for="flex" aria-live="polite">0°</output>
           <input type="range" id="flex" min="-30" max="30" value="0" aria-label="Flex the probe tip (degrees)" aria-valuetext="0°" />
         </label>
+        <div id="teeSiteRow" class="hidden">
+          <label for="teeSite" title="Spectral Doppler site: the view's standard trace, or another site this TEE view records (the beam angled to its flow), e.g. pulmonary-vein or LAA PW from the ME LAA, LVOT PW and AV CW from the deep TG">Spectral site</label>
+          <select id="teeSite" aria-label="TEE spectral Doppler site"><option value="">Standard site</option></select>
+        </div>
       </div>
 
       <div class="ctl-group">

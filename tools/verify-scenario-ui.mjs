@@ -186,7 +186,20 @@ try {
       const t = await tag();
       check(`TEE: ${id.slice(1)} -> "modified" flag and live omniplane angle in the view tag`, /modified/.test(t.flag) && /omni \d+/.test(t.tag), `${t.flag} | ${t.tag}`);
     }
+    // the TEE spectral-site selector: the pulmonary-vein PW from the ME LAA and the
+    // LVOT PW / AV CW continuity pair from the deep TG 5C are traces the learner records
+    const spec = () => page.evaluate(() => { const s = window.echosim.echo.spectralData; return { site: s && s.site, mode: s && s.mode, cols: s ? s.cols : 0, label: document.getElementById('spLabel').textContent }; });
+    for (const [view, key, re] of [['MELAA', 'pvPw', /Pulmonary vein/], ['DTG5C', 'lvot', /LVOT/], ['DTG5C', 'avCw', /Aortic valve CW/]]) {
+      await page.evaluate((v) => window.echosim.setView(v), view);
+      const opts = await page.$$eval('#teeSite option', (os) => os.map((o) => o.value));
+      check(`TEE ${view}: spectral-site selector offers ${key}`, opts.includes(key) && await page.locator('#teeSite').isVisible(), opts.join(','));
+      await page.selectOption('#teeSite', key);
+      await page.waitForFunction((k) => { const s = window.echosim.echo.spectralData; return !!(s && s.site === k && s.cols > 0); }, key, { timeout: 20000 }).catch(() => null);
+      const s = await spec();
+      check(`TEE ${view}: picking ${key} records its trace (spectral site, mode, label)`, s.site === key && s.cols > 0 && re.test(s.label), `${s.site} ${s.mode} ${s.cols} cols | ${s.label}`);
+    }
     await page.evaluate(() => window.echosim.setView('PLAX'));
+    check('TTE view: no TEE spectral-site selector, standard-site label', !(await page.locator('#teeSite').isVisible()) && /standard site/.test((await spec()).label));
   }
   check('no browser runtime errors', errors.length === 0, errors.slice(0, 4).join(' | '));
 } catch (error) {
