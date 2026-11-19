@@ -123,20 +123,25 @@ function circParams(path) {
     // AS overrides Rao explicitly per grade below, so this only affects normals.
     Rao: 0.006,
     // (aortic-valve resistance, ∝ 1/AVA)
-    // Ejection shape (LVOT PW, review 12): with a stiff aorta (Cao 1.5), a small
-    // characteristic impedance (0.08) and a large LVOT inertance (0.0015) the
-    // aortic flow shot up to a sharp early peak (~530 mL/s, peak/mean 2.2) and
-    // trailed off in a long inertial tail, so the LVOT PW peak (Q/CSA) was ~1.5
-    // m/s with a VTI of 19 cm, or (scaled to a 1 m/s peak) a VTI of 14 cm. A
-    // more compliant Windkessel (3.0) behind a larger characteristic impedance
-    // (0.12) and a short inertance (0.0002) gives the rounder flow of the normal
-    // LVOT (peak ~430 mL/s, peak/mean ~1.75: ~1.2 m/s and a VTI of ~19 cm
-    // through a 2.15 cm LVOT) at the same SV, EF, ejection time (aortic closure
-    // at the end of the T wave) and a diastolic pressure of ~74 mmHg.
+    // Ejection shape (LVOT PW, review 12): with a small characteristic
+    // impedance (0.08) and a large LVOT inertance (0.0015) the aortic flow shot
+    // up to a sharp early peak (~530 mL/s, peak/mean 2.2) and trailed off in a
+    // long inertial tail, so the LVOT PW peak (Q/CSA) was ~1.5 m/s with a VTI of
+    // 19 cm, or (scaled to a 1 m/s peak) a VTI of 14 cm. A larger characteristic
+    // impedance (0.12) and a short inertance (0.0002) give the rounder flow of the
+    // normal LVOT (peak ~425 mL/s, peak/mean ~1.7: ~1.17 m/s and a VTI of ~19 cm
+    // through a 2.15 cm LVOT) at the same SV, EF and ejection time, ~131/69 mmHg.
+    // The total arterial compliance is near the adult's ~1.5-2 mL/mmHg: a more
+    // compliant Windkessel (3.0) lowered the late-systolic aortic pressure, so
+    // ejection ran on (aortic closure ~2 ms later, A2 ~28 ms after the end of the
+    // T wave) at a higher peak (1.19 m/s). (Zc sets both the peak and the closure:
+    // 0.13 gives ~1.12 m/s but puts A2 30 ms past the end of the T wave,
+    // verify-timing; a larger inertance lengthens the cusp closure but sharpens
+    // the peak, 1.2-1.3 m/s at 0.0005-0.003.)
     Lao: 0.0002, // LVOT / proximal-aortic inertance (mmHg·s²/mL)
     Zc: 0.12,    // aortic characteristic impedance (mmHg·s/mL)
     Rsys: 0.92,  // systemic vascular resistance
-    Cao: 3.0,    // arterial (Windkessel) compliance (sets pulse pressure)
+    Cao: 2.0,    // arterial (Windkessel) compliance (sets pulse pressure)
     Pven: 4,     // downstream systemic venous pressure
     Rmr: Infinity, // mitral regurgitant-orifice resistance (∞ = competent)
     TR: TR,      // LV relaxation time (activation decay, s/cycle): slower = impaired relaxation
@@ -161,7 +166,7 @@ function circParams(path) {
     Era: 0.13,   // passive RA elastance
     aRa: 1.0,    // RA booster (activation raises Era by aRa x Era, ~30 ms before the LA)
     V0ra: 8,     // RA unstressed volume
-    Rsv: 0.012,  // systemic vein -> RA resistance (phasic caval S / D inflow)
+    Rsv: 0.018,  // systemic vein -> RA resistance (phasic caval S / D inflow)
     // Tricuspid annular descent: as the RV long axis shortens in systole the
     // tricuspid annulus is pulled toward the apex (TAPSE ~2-2.5 cm over a ~9 cm2
     // annulus) and the RA gains capacity, as the LA does (laDesc). Its pressure
@@ -169,6 +174,7 @@ function circParams(path) {
     // inflow peaks in systole: the S wave that dominates the normal hepatic-vein
     // trace (S > D). Follows the RV volume ratio, rho_RV^0.24, as laDesc does the LV's.
     raDesc: 42,
+    kLv: 0, Vk: 0, // restrictive LV: extra passive stiffness kLv (mmHg/mL2) above volume Vk (mL)
     Atr: 0,      // effective TR orifice (cm2), Bernoulli
     Ppc: 0,      // pericardial pressure (mmHg), added to every chamber (tamponade)
     // pericardial stiffness (mmHg/mL): a tense, fluid-filled sac holds the total
@@ -180,6 +186,19 @@ function circParams(path) {
     Vref: null,  // total heart volume the pericardial pressure is referred to (null: own mean)
     qvrRef: null, // mean venous return (mL/s) the factor vr scales (null: this circulation's own systemic flow)
     vr: 1,       // venous-return factor (respiration in tamponade)
+    // Compliant central veins (review 12): the caval / hepatic-vein segment next
+    // to the RA is a capacitance (Csv, mL/mmHg) between the venous reservoir and
+    // the atrium, filled through Rsv x (1 - svLink) and drained into the RA through
+    // the short junction, Rsv x svLink (the mean pressure drop stays Rsv x the
+    // venous return). Slow RA pressure changes (the x and y descents) still draw the
+    // S and D waves through the whole Rsv; a brisk atrial kick pushes blood back into
+    // the soft veins (the hepatic AR wave). Veins are compliant only while partly
+    // collapsed: once the RA pressure distends them (the plethoric IVC that barely
+    // collapses, ASE 2010: RAP >= 8-15 mmHg; the anatomy's ivcOfRap distends the
+    // drawn IVC over 4.6-9 mmHg) they are stiff (CsvMin), and a tall a or c-v wave
+    // meets the whole Rsv instead of driving a fast backward jet through the
+    // junction alone (hepatic reversal ~0.5 m/s in severe TR or PH, not 1.5).
+    Csv: 6, CsvMin: 0.3, svLink: 0.3,
   };
   // graded severity (mild/moderate/severe) for valve lesions; default severe so
   // presets that set only the flag keep their original "severe by design" behaviour.
@@ -229,7 +248,14 @@ function circParams(path) {
     Object.assign(p, {
       borderline: { Emax: 2.00, Emin: 0.065, V0: 24, Rsys: 1.10, Cao: 1.45, Pla0: 10 },
       impaired: { Emax: 1.21, Emin: 0.068, V0: 27, Rsys: 1.20, Cao: 1.4, Pla0: 14, ElaMin: 0.28, V0la: 25, aWave: 0.6, laDesc: 14 },
-      severe: { Emax: 0.60, Emin: 0.075, V0: 30, Rsys: 1.30, Cao: 1.4, Pla0: 18, ElaMin: 0.35, V0la: 40, aWave: 0.2, laDesc: 8 },
+      // severe (review 12): the restrictive LV is stiff at the top of its
+      // pressure-volume curve (kLv above Vk mL): the atrial kick meets a steeply
+      // rising LV pressure, so little blood crosses the mitral valve (a small A,
+      // E/A > 2) and the rest is pushed back up the pulmonary veins: the
+      // prominent Ar of a raised LVEDP (Ar >= 0.35 m/s; ASE/EACVI 2016). The LA
+      // keeps a weak booster (aWave 0.9 of a stiff, dilated atrium); a lower vein
+      // resistance (Rpv) lets the kick reach the veins.
+      severe: { Emax: 0.60, Emin: 0.075, V0: 30, Rsys: 1.30, Cao: 1.4, Pla0: 18, ElaMin: 0.35, V0la: 40, aWave: 0.9, laDesc: 8, Rpv: 0.035, kLv: 0.45, Vk: 222 },
     }[dcmSeverityOf(path)]);
   }
   // DCM: annular dilatation and leaflet tethering leave a central FUNCTIONAL MR
@@ -391,6 +417,14 @@ export function gradeOf(path = {}) {
 // shunt-jet velocity (m/s, signed) from the pressure difference across it (Bernoulli)
 const shuntV = (dP) => (dP >= 0 ? 1 : -1) * Math.sqrt(Math.abs(dP) / 4);
 
+// Compliance of the central veins (mL/mmHg) at a mean RA pressure P: Csv while
+// they are partly collapsed (P <= 4.6 mmHg), CsvMin once fully distended (P >= 9),
+// a smooth step between (the IVC's distension range in anatomy.js ivcOfRap)
+function veinCompliance(p, P) {
+  const t = clamp((P - 4.6) / (9 - 4.6), 0, 1), s = t * t * (3 - 2 * t);
+  return p.Csv + (p.CsvMin - p.Csv) * s;
+}
+
 // Integrate the closed loop to its limit cycle and return a sampled trace of one
 // cycle plus scalar summary (EDV/ESV/SV/EF/pressures/gradients/regurg fraction).
 function simulate(path) {
@@ -407,6 +441,10 @@ function simulate(path) {
   let Vrv = 140, Vra = 45, Ppa = 14, Qtv = 0, Qpa = 0;
   let rvEdvPrev = 140, rvEdvRun = 0;  // last cycle's RV EDV (tricuspid annular-descent reference)
   let qsysSum = 0, qvrTarget = 85 * p.vr, praSum = 0, Psv = 4 + p.Ppc + p.Rsv * qvrTarget;
+  // compliant central veins (see circParams): junction / upstream resistances,
+  // the vein pressure and its compliance (set each cycle from the mean RAP)
+  const RsvJ = p.Rsv * p.svLink, RsvU = p.Rsv - RsvJ;
+  let Pcv = Psv - RsvU * qvrTarget, Ccv = p.Csv;
   let ppaSum = 0, ppaMean = Ppa, pulseSum = 0, pulseMean = 0;
   let vtotSum = 0, vtotMean = Vlv + Vla + Vrv + Vra;
 
@@ -433,6 +471,7 @@ function simulate(path) {
       // respiratory factor); the RA pressure is whatever the RV needs to pump it
       qvrTarget = p.vr * (p.qvrRef != null ? p.qvrRef : qsysSum / STEPS);
       Psv = praSum / STEPS + p.Rsv * qvrTarget;
+      Ccv = veinCompliance(p, praSum / STEPS);
       ppaMean = ppaSum / STEPS; pulseMean = pulseSum / STEPS; vtotMean = vtotSum / STEPS;
     }
     edvRun = 0; rvEdvRun = 0; qpvSum = 0; qsysSum = 0; praSum = 0; ppaSum = 0; pulseSum = 0; vtotSum = 0;
@@ -443,7 +482,8 @@ function simulate(path) {
       const vtot = Vlv + Vla + Vrv + Vra;
       vtotSum += vtot;
       const Ppc = p.Ppc + p.Kpc * (vtot - (p.Vref != null ? p.Vref : vtotMean));   // pericardial pressure
-      const Plv = E * (Vlv - p.V0) + Ppc;
+      // (kLv: the steep end of a restrictive LV's passive pressure-volume curve)
+      const Plv = E * (Vlv - p.V0) + (p.kLv ? (1 - a) * p.kLv * Math.max(0, Vlv - p.Vk) ** 2 : 0) + Ppc;
       if (Vlv > edvRun) edvRun = Vlv;
       const desc = p.laDesc * Math.max(0, 1 - Math.pow(Math.min(1, Vlv / edvPrev), 0.24)) / descNorm;
       const xla = Math.max(0, Vla - p.V0la - desc);
@@ -491,7 +531,12 @@ function simulate(path) {
       const Qtr = Prv > Pra ? orifice(p.Atr, Prv - Pra) : 0;
       const Qsys = (Pao - p.Pven) / p.Rsys;
       qsysSum += Qsys;
-      const Qvr = (Psv - Pra) / p.Rsv;                    // caval inflow (phasic)
+      // caval inflow (phasic) through the compliant central veins: the vein
+      // pressure is updated semi-implicitly (stable at any compliance; a stiff
+      // vein, Ccv -> 0, is the plain resistance Rsv)
+      const kcv = dt / Ccv;
+      Pcv = (Pcv + kcv * (Psv / RsvU + Pra / RsvJ)) / (1 + kcv * (1 / RsvU + 1 / RsvJ));
+      const Qvr = (Pcv - Pra) / RsvJ;
       praSum += Pra; ppaSum += Ppa;
       const Qlung = (Ppa - Pla) / p.Rpvr;                 // through the pulmonary bed
       const dPasd = p.asdA ? Pla - Pra : 0, dPvsd = p.vsdA ? Plv - Prv : 0;

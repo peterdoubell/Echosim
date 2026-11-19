@@ -15,7 +15,7 @@
 // blood-flow field, and couples everything to the lumped-parameter circulation.
 
 import { clamp, smoothstep, pulse, unit } from './mathutils.js';
-import { anatomyParams, rightHeartLoad, hepaticVeinSegs, atrialFill, bodyClassify, visceralDist, lumenDist, mitralLift, tricuspidLift, buildRwma, rwmaWeight, BODY, CFG, LM, BODY_AX } from './anatomy.js';
+import { anatomyParams, rightHeartLoad, hepaticVeinSegs, ivcOfRap, atrialFill, bodyClassify, visceralDist, lumenDist, mitralLift, tricuspidLift, buildRwma, rwmaWeight, BODY, CFG, LM, BODY_AX } from './anatomy.js';
 import { hemodynamics, hemoSummary, pvLoop, gradeOf, eaRatio, MS_AREA, laPhasic } from './hemodynamics.js';
 import { DCM_SEVERITIES, dcmSeverityOf } from './scenarios.js';
 
@@ -237,7 +237,12 @@ export function rvPhase(phase) {
 // read it on the right heart's own clock (rvPhase).
 const OPEN_N = 960, OPEN_CYCLE = 0.833;                   // samples per cycle; reference cycle (s)
 const OPEN_TAU_OPEN = 0.008, OPEN_TAU_CLOSE = 0.008, OPEN_LEAD_O = 0.007, OPEN_LEAD = 0.011;   // s
-const OPEN_Q_AV = 0.2, OPEN_Q_SL = 0.12;                  // flow (x peak) for a fully open valve
+// (OPEN_Q_AO, the aortic cusps on the aortic flow: 0.2 of peak. Review 12 rounded
+// the aortic ejection, whose deceleration now ends steeply: at 0.12 the cusps
+// shut in ~20 ms, at the bottom of the 20-40 ms range, and only after the flow
+// had stopped. Floating toward closure a little earlier in the deceleration,
+// as the sinus vortices push them, they shut over ~27 ms as the flow ends.)
+const OPEN_Q_AV = 0.2, OPEN_Q_SL = 0.12, OPEN_Q_AO = 0.2;   // flow (x peak) for a fully open valve
 const _openCache = new WeakMap();
 function openTrace(path) {
   const sum = hemoSummary(path);
@@ -256,7 +261,7 @@ function openTrace(path) {
     }
     return out;
   };
-  tr = { av: build(qmv, OPEN_Q_AV * sum.QmvMax), sl: build(qao, OPEN_Q_SL * sum.QaoMax) };
+  tr = { av: build(qmv, OPEN_Q_AV * sum.QmvMax), sl: build(qao, OPEN_Q_AO * sum.QaoMax) };
   _openCache.set(sum, tr);
   return tr;
 }
@@ -1220,14 +1225,22 @@ function pvFlowSpeed(H) {
 // area. The S wave is the RA's fall in pressure as the tricuspid annulus descends
 // (x descent), the D wave its emptying once the tricuspid opens (y descent), and
 // a reversal wherever the RA pressure rises above the systemic venous pressure:
-// the atrial kick (AR), the regurgitant volume of severe TR (systolic reversal),
+// the atrial kick (AR, pushed back into the soft central veins of a normal RAP:
+// hemodynamics.js Csv), the regurgitant volume of severe TR (systolic reversal),
 // a stiff RA's tall a wave (pulmonary hypertension), and in tamponade the loss of
 // the y descent (blunted D) with expiratory diastolic reversal, each respiratory
 // beat read from its own solved circulation. HV_AREA (cm2) puts the normal S
-// peak at ~0.4 m/s.
-const HV_AREA = 3.9;
+// peak at ~0.37 m/s. The veins are distensible: with a raised RA pressure the
+// IVC is plethoric and the hepatic veins dilated (ASE 2010 RA-pressure
+// estimation), so the area scales with the square of the IVC radius the anatomy
+// draws for the case's RAP (ivcOfRap: 0.9 cm at RAP <= 4.6, 1.25 cm at >= 9):
+// the same backward volume of a tall RA wave reads ~half as fast in the
+// plethoric veins of TR, PH, DCM or tamponade.
+const HV_AREA = 4.0;
 function hvFlowSpeed(H) {
-  return H && H.Qvr ? H.Qvr / (HV_AREA * 100) : 0;
+  if (!H || !H.Qvr) return 0;
+  const r = ivcOfRap(H.RAP || 0).r / 0.9;
+  return H.Qvr / (HV_AREA * r * r * 100);
 }
 const _hvCache = new WeakMap();
 
@@ -1726,8 +1739,15 @@ export function velocityAt(px, py, pz, G, path = {}) {
     // LVOT/aortic-valve jet peak from continuity (v = SV / (AVA·ET)): with the
     // SAME stroke volume forced through a reduced AVA, AS auto-scales to ~4 m/s
     // and normal sits ~1 m/s — severity now follows physiology, not a constant.
-    // (AS: the jet's speed in time, vAS(t), times its spatial profile)
-    const lSpeed = (path.aorticStenosis ? H.vAS : H.vAoPeak * H.ejAo) * gauss(lPerp, 0.7);
+    // (AS: the jet's speed in time, vAS(t), times its spatial profile. On the
+    // ventricular side of the orifice the flow converges on it (proximal
+    // acceleration, v ~ v_orifice (r0 / (r0 + d))^2 with r0 the radius of the
+    // ~0.6 cm2 orifice), so the jet speed is reached only at the valve and an
+    // LVOT PW gate the annulus swings toward late in systole reads the LVOT flow,
+    // not the jet)
+    const AS_R0 = 0.45;
+    const asConv = lAlong < 0 ? (AS_R0 / (AS_R0 - lAlong)) ** 2 : 1;
+    const lSpeed = (path.aorticStenosis ? H.vAS * asConv : H.vAoPeak * H.ejAo) * gauss(lPerp, 0.7);
     considerFlow(((inLV && py > G.lv.c[1]) || inAo) && lAlong > -0.25,
       AX_LVOT[0], AX_LVOT[1], AX_LVOT[2],
       lSpeed, path.aorticStenosis ? FLOW.AS_JET : FLOW.LVOT,
