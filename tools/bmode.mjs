@@ -20,12 +20,14 @@ const { EchoView } = await import('../js/echo.js');
 const { geometryAt } = await import('../js/cardiac-model.js');
 
 const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
-let EV = null;
+const EVS = {};   // one renderer per sampling stride, so a coarse render leaves the stride-1 renderer's frame sequence (speckle) untouched
 // Render one standard view (name as in views.js) at `phase` for pathology `path`
-// with the same per-view settings main.js applies; colour Doppler off.
-export function renderBmode(name, phase = 0, path = {}) {
-  if (!EV) { EV = new EchoView(stubCanvas(), null); EV._pinStride = 1; EV._stride = 1; }
-  const e = EV;
+// with the same per-view settings main.js applies; colour Doppler off. `stride`
+// pins the sampling stride (1 = every pixel; the app's FPS-adaptive sampler goes
+// up to 3 on slow hardware, one sample per 3 x 3 pixel block).
+export function renderBmode(name, phase = 0, path = {}, stride = 1) {
+  if (!EVS[stride]) { EVS[stride] = new EchoView(stubCanvas(), null); EVS[stride]._pinStride = stride; EVS[stride]._stride = stride; }
+  const e = EVS[stride];
   const tee = TEE_VIEWS[name], vw = tee || TTE_VIEWS[name] || EXTRA_VIEWS[name];
   const base = tee ? tee.probe() : (TTE_VIEWS[name] ? TTE_VIEWS[name].probe() : EXTRA_VIEWS[name].probe());
   e.viewName = name; e.colorOn = false; e.showLabels = false; e.showColorBox = false;

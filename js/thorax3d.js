@@ -152,7 +152,7 @@ export function structureLabels(A) {
   const out = [];
   const aa = A.la.aa; if (aa && aa.length) out.push(['LAA', aa[aa.length - 1].b]);
   for (const v of (A.pv && A.pv.veins) || []) out.push([v.name, v.b]);
-  out.push(['SVC', A.svc.b.map((v, i) => v + 0.6 * ((A.svc.c || A.svc.b)[i] - v))]);   // on its upper centreline, clear of the aorta
+  out.push(['SVC', A.svc.c || A.svc.b]);   // at its top (the brachiocephalic confluence), clear of the aorta and its label
   const ivcTop = dot(A.ivc.a, S) > dot(A.ivc.b, S) ? A.ivc.a : A.ivc.b;      // its RA end
   out.push(['IVC', mad(ivcTop, S, -3.5)]);
   out.push(['Ao', mad(A.valves.aortic.c, LM.U_AO, 4.5)]);

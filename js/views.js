@@ -722,12 +722,17 @@ function meRvioProbe() {
   return teeClear(probeFrom(tgt, dir, right, vdot(vsub(tgt, ESO), dir)));
 }
 // the tricuspid annulus descends ~1-2 cm in systole and this plane's normal runs
-// largely along the LV axis, so the plane follows the annulus centre along its
-// normal (the small advance / flex that holds the TV and RV inflow in view)
+// largely along the LV axis, so the plane follows the cardiac base along its
+// normal (the small advance / flex that holds the TV and RV inflow in view): the
+// tricuspid annulus mostly, the aortic root (which descends about half as far)
+// for the rest — so at end-systole the root is still cut near its annulus, not
+// through the LVOT below it
 let _rvioN = null;
+const RVIO_TV_W = 0.7;
 function meRvioTrack(A) {
   if (!_rvioN) _rvioN = meRvioProbe().normal;
-  return vscale(_rvioN, vdot(vsub(A.valves.tricuspid.c, A0.valves.tricuspid.c), _rvioN));
+  const d = vadd(vscale(vsub(A.valves.tricuspid.c, A0.valves.tricuspid.c), RVIO_TV_W), vscale(vsub(A.valves.aortic.c, A0.valves.aortic.c), 1 - RVIO_TV_W));
+  return vscale(_rvioN, vdot(d, _rvioN));
 }
 // Descending thoracic aorta short axis: the probe turned to face posteriorly;
 // the round aorta lies immediately behind the oesophagus.

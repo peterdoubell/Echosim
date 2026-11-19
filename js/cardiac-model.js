@@ -1016,10 +1016,17 @@ function avTipWorld(name, G, sgn, q) {
 const SL_COAPT = 0.28, SL_SAG = 0.13, SL_COAPT_H = 0.55, SL_N = 16;
 const AS_OPEN = 0.28;                                     // AS: restricted opening (valveOpening)
 // aortic cusps: nodulus of Arantius (cm) and the half-width of the shut cusps'
-// coaptation seams (cm); calcific AS: the nodule threshold of the calcium lattice,
-// and the half-width of the open cusps' commissural slits (cm)
+// coaptation seams (cm: two apposed lunulae, ~0.5 mm — finer than the renderer's
+// coarsest sampling block, so its coarse sampler looks for valve tissue inside
+// each block, see valveAt); calcific AS: the nodule threshold of the calcium
+// lattice, and the half-width of the open cusps' commissural slits (cm)
 const AO_NODULE = 0.05, AO_COAPT_W = 0.025, AS_NODULE = 0.06, AS_SLIT = 0.06, AS_SLIT_T = 0.3;
 const _slA = new Float64Array(SL_N + 1), _slR = new Float64Array(SL_N + 1);
+// Valve tissue alone at a point (classify() tests the valves before any other
+// tissue, so a hit here is what classify returns there): the renderer's coarse
+// sampler uses it to look for sub-block cusps cheaply. Returns the shared result
+// object (tissue / echo / calc) or null.
+export function valveAt(px, py, pz, G, path = {}) { return valveTissue(px, py, pz, G, path); }
 function valveTissue(px, py, pz, G, path) {
   // apex-anchored contraction descends the AV valve planes with the annulus: a
   // valve at end-diastolic height y maps to apexY + (y−apexY)·lsy (same material
