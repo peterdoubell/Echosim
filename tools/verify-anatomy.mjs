@@ -1819,6 +1819,105 @@ const laPart = (A, q) => {
     const big = la.reduce((m, c) => (c.length > m.length ? c : m), []), xs = big.map((k) => xd(S, k)[0]);
     check('PSAX-AV', 'LA width behind the aortic valve', xs.length ? Math.max(...xs) - Math.min(...xs) : 0, [3, 5]);
   }
+  // ---- review 12: the aortic-root frame on the body axes, the PLAX RVOT, and the
+  // RVOT, PA trunk and tricuspid inflow held in the base-level planes all cycle ----
+  {
+    // PLAX: 2-3 cm of RVOT between the chest wall and the anterior aortic wall on
+    // the beam through the aortic valve (the ASE RVOT-PLAX line, and the AV-level
+    // M-mode: RVOT, anterior root wall, cusps, posterior wall, LA)
+    for (const [tag, G, lim, lim2] of [['ED', GED, [1.8, 3.2], [6, 14]], ['ES', GES, [1.0, 3.0], [3.5, 10]]]) {
+      const p = TTE_VIEWS.PLAX.probe(), av = G.A.valves.aortic.c;
+      const b = unit(sub(sub(av, mul(p.normal, dot(sub(av, p.pos), p.normal))), p.pos));
+      let rv = 0;
+      for (let t = 0; t < 14; t += 0.01) {
+        const q = add(p.pos, mul(b, t)), l = classify(q[0], q[1], q[2], G, {}).tissue;
+        if (l === T.AORTA || l === T.VALVE) break;
+        if (l === T.RV) rv += 0.01;
+      }
+      check(PL, `PLAX: RVOT lumen on the beam through the AV centre, in front of the anterior aortic wall (${tag})`, rv, lim);
+      const S = planeSample(TTE_VIEWS.PLAX, G, {}, 0.08);
+      check(PL, `PLAX: RV area in the sector (${tag})`, areaOf(S, cellsWhere(S, (l) => l === T.RV)), lim2, 'cm2');
+    }
+    {
+      // the root rises toward the near field at <= 30 deg on screen (aorta to the
+      // right, the LV long axis sloping down toward the apex), not at ~40 deg
+      const p = TTE_VIEWS.PLAX.probe(), u = LM.U_AO;
+      check(PL, 'PLAX: root axis screen angle (rise toward the transducer)', Math.atan2(-dot(u, p.dir), dot(u, p.lat)) * 180 / Math.PI, [0, 30], 'deg',
+        `LV long axis ${(Math.atan2(-p.dir[1], p.lat[1]) * 180 / Math.PI).toFixed(1)} deg`);
+    }
+    {
+      // PSAX-AV: the shut valve's 'Y' with its commissures at ~2 (R/L, toward the
+      // PV), ~10 (R/N, toward the TV) and ~6 o'clock (N/L, toward the LA), measured
+      // on the image: the three arms of the cusp tissue round the valve centre
+      const v = TTE_VIEWS.PSAX_AV; let p = v.probe(); p = { ...p, pos: add(p.pos, v.track(GED.A)) };
+      const av = GED.A.valves.aortic.c, cd = dot(sub(av, p.pos), p.dir), cl = dot(sub(av, p.pos), p.lat), R = LM.AO.annR;
+      const H = new Array(72).fill(0);
+      for (let i = -80; i <= 80; i++) for (let j = -80; j <= 80; j++) {
+        const dx = i * 0.02, dy = -j * 0.02, r = Math.hypot(dx, dy);
+        if (r < 0.3 * R || r > 0.75 * R) continue;
+        const q = add(add(p.pos, mul(p.dir, cd + j * 0.02)), mul(p.lat, cl + i * 0.02));
+        if (classify(q[0], q[1], q[2], GED, {}).tissue === T.VALVE) H[Math.floor(((Math.atan2(dy, dx) + 2 * Math.PI) % (2 * Math.PI)) / (2 * Math.PI) * 72) % 72]++;
+      }
+      const pk = H.map((h, k) => [H[(k + 71) % 72] + h + H[(k + 1) % 72], k]).sort((a, b) => b[0] - a[0]), arms = [];
+      for (const [, k] of pk) { if (arms.every((a) => Math.min(Math.abs(a - k), 72 - Math.abs(a - k)) > 12)) arms.push(k); if (arms.length === 3) break; }
+      const clock = arms.map((k) => (((3 - ((k + 0.5) * 5) / 30) % 12) + 12) % 12);
+      const dev = Math.max(...clock.map((c) => Math.min(...[2, 10, 6].map((t) => { const d = Math.abs(c - t) % 12; return Math.min(d, 12 - d); }))));
+      check('PSAX-AV', "closed-cusp commissures, max deviation from 2 / 10 / 6 o'clock", arms.length === 3 ? dev : null, [0, 0.5], 'h',
+        clock.map((c) => c.toFixed(1)).join(' / ') + " o'clock");
+    }
+    {
+      // PSAX-AV through the cycle (the plane follows the root): the PA trunk with
+      // its branch origins, and the RVOT on the central beam in front of the root
+      let paMin = { val: 1e9 }, rvbMin = { val: 1e9 }, rvED = null, rvES = null;
+      for (let i = 0; i < 20; i++) {
+        const ph = i * 0.05, G = geo(ph), A = G.A, S = planeSample(TTE_VIEWS.PSAX_AV, G, {}, 0.1);
+        const pa = areaOf(S, cellsWhere(S, (l, k) => l === T.AORTA && lumenDist(...ptK(S, k), A, 'PA') < 0));
+        if (pa < paMin.val) paMin = { val: pa, tag: ph.toFixed(2) };
+        let rvb = 0;
+        for (let t = 0; t < 12; t += 0.01) {
+          const q = add(S.p.pos, mul(S.p.dir, t)), l = classify(q[0], q[1], q[2], G, {}).tissue;
+          if (l === T.AORTA || l === T.VALVE) break;
+          if (l === T.RV) rvb += 0.01;
+        }
+        if (rvb < rvbMin.val) rvbMin = { val: rvb, tag: ph.toFixed(2) };
+        if (i === 0) rvED = areaOf(S, cellsWhere(S, (l) => l === T.RV));
+      }
+      { const S = planeSample(TTE_VIEWS.PSAX_AV, GES, {}, 0.1); rvES = areaOf(S, cellsWhere(S, (l) => l === T.RV)); }
+      check('PSAX-AV', 'PA trunk lumen in plane, with its branch origins (min over the cycle)', paMin.val, [8, 16], 'cm2', `phase ${paMin.tag}`);
+      check('PSAX-AV', 'RVOT lumen on the central beam anterior to the root (min over the cycle)', rvbMin.val, [1.0, 3.5], 'cm', `phase ${rvbMin.tag}`);
+      // KNOWN-FAIL: 0.44. The RVOT band itself keeps ~0.6 of its area (its
+      // diameter shortens ~20 %); what leaves the plane is the RV inflow under the
+      // tricuspid annulus, which descends ~1.6 cm in systole while the plane holds
+      // the aortic valve (~0.7 cm) — a real feature of the base-level loop. Swinging
+      // the infundibulum's centre with the root by more than ~0.6x moves its
+      // anterior (free) wall toward the chest wall in systole, and carries the
+      // proximal infundibulum into the TG mid short axis (RV FAC there < 38 %).
+      KNOWN = true;
+      check('PSAX-AV', 'RV(OT) area ES / ED', rvES / rvED, [0.5, 0.9], '', `${rvED.toFixed(1)} -> ${rvES.toFixed(1)} cm2`);
+      KNOWN = false;
+    }
+    {
+      // ME RV inflow-outflow through the cycle (the plane follows the tricuspid
+      // annulus): one RV wrapping from the tricuspid round the aortic valve to the
+      // pulmonary valve, the inflow and the leaflets in view at every phase
+      const sec0 = SECTION; SECTION = 'TEE';
+      let rvMin = { val: 1e9 }, tvMin = { val: 1e9 };
+      for (let i = 0; i < 20; i++) {
+        const ph = i * 0.05, G = geo(ph), A = G.A, S = planeSample(TEE_VIEWS.MERVIO, G, {}, 0.1);
+        const rv = areaOf(S, cellsWhere(S, (l) => l === T.RV));
+        const tv = areaOf(S, cellsWhere(S, (l, k) => l === T.VALVE && Math.hypot(...sub(ptK(S, k), A.valves.tricuspid.c)) < 2.5));
+        if (rv < rvMin.val) rvMin = { val: rv, tag: ph.toFixed(2) };
+        if (tv < tvMin.val) tvMin = { val: tv, tag: ph.toFixed(2) };
+        if (i === 0) {
+          const c = components(S, (l) => l === T.RV).comps.map((x) => x.length);
+          check('TEE', 'MERVIO: RV blood pool in one piece at ED (largest component share)', c.length ? Math.max(...c) / c.reduce((s, x) => s + x, 0) : 0, [0.95, 1], '');
+        }
+      }
+      check('TEE', 'MERVIO: RV lumen area (min over the cycle)', rvMin.val, [8, 25], 'cm2', `phase ${rvMin.tag}`);
+      check('TEE', 'MERVIO: tricuspid leaflets in plane (min over the cycle)', tvMin.val, [0.3, 3], 'cm2', `phase ${tvMin.tag}`);
+      SECTION = sec0;
+    }
+  }
   {
     // subcostal four-chamber: a full RV chamber under the liver, still clear at ES,
     // its free wall on the liver (capsule -> RV myocardium gap along the beams)
@@ -2356,7 +2455,16 @@ SECTION = 'Pathology';
     return a == null ? null : b - a + 0.01;
   };
   check('Membranous septum', 'septal thickness at the membranous segment', septum(ms.c, {}), [0.05, 0.25], 'cm', `membrane ${MEMB_T} cm`);
-  for (const s of [-1.3, 1.3]) check('Membranous septum', `muscular septum ${Math.abs(s)} cm to the side (${s < 0 ? '-' : '+'})`, septum(add(ms.c, mul(ms.tan, s)), {}), [0.7, 3.0], 'cm');
+  // muscle borders the membranous septum anteriorly (the outlet septum under the
+  // RCC: +tan) and inferiorly (the inlet / trabecular septum below it). Posterior
+  // to it (-tan, under the NCC) lie the atrioventricular membranous septum and the
+  // aortic-mitral fibrous continuity, not muscle (Anderson RH, Spicer DE et al.,
+  // the anatomy of the membranous septum / perimembranous defects), so that side
+  // is not checked for muscle: with the root frame on the body axes (review 12)
+  // the site sits under the R/N commissure at ~10 o'clock and 1.3 cm posterior
+  // of it lies the LA above the anterior mitral hinge.
+  check('Membranous septum', 'muscular septum 1.3 cm to the side (+, outlet septum)', septum(add(ms.c, mul(ms.tan, 1.3)), {}), [0.7, 3.0], 'cm');
+  check('Membranous septum', 'muscular septum 1.3 cm below (inlet septum)', septum(add(ms.c, mul(LM.U_AO, -1.3)), {}), [0.7, 3.0], 'cm');
   const hole = () => { const p = ms.c; const q = add(p, mul(ms.rad, -2.0)); let inLV = 0; for (let t = 0; t < 4.4; t += 0.02) { const r = add(q, mul(ms.rad, t)); if (classify(r[0], r[1], r[2], Gm, { vsd: 'perimembranous' }).tissue === TISSUE.LV && t > 2.0) inLV++; } return inLV; };
   assert('Membranous septum', 'perimembranous VSD opens the membrane (LV blood crosses the septum line)', hole() > 5);
 }
@@ -2873,6 +2981,128 @@ SECTION = 'TEE';
       res ? `arms ${res.map((v) => v.toFixed(2)).join(' / ')} mm` : 'no cusp Y found');
   }
 }
+// ---- review 12: aortic root and cusp morphology ------------------------------
+{
+  const sec0 = SECTION; SECTION = 'TEE';
+  // ME AV LAX: the 'tulip' root — sinuses ~15-25 % wider than the sino-tubular
+  // waist (normal adults: sinuses ~3.1-3.3 cm against an STJ of ~2.6-2.8 cm, e.g.
+  // Roman et al., Am J Cardiol 1989; Vriz et al., Am J Cardiol 2013). Root lumen
+  // width across the root axis (projected into the plane), the widest over the
+  // sinuses (0.3-1.5 cm above the valve) against the narrowest at the STJ
+  // (1.5-2.6 cm)
+  {
+    const v = TEE_VIEWS.MEAVLAX; let p = v.probe(); if (v.track) p = { ...p, pos: add(p.pos, v.track(GED.A)) };
+    const av = GED.A.valves.aortic.c, u = unit(sub(LM.U_AO, mul(p.normal, dot(LM.U_AO, p.normal)))), w = unit(cross(u, p.normal));
+    const c0 = sub(av, mul(p.normal, dot(sub(av, p.pos), p.normal))), wid = [];
+    for (let h = 0; h <= 3.0001; h += 0.05) {
+      let a = null, b = null;
+      for (let t = -2.5; t <= 2.5; t += 0.01) {
+        const q = add(add(c0, mul(u, h)), mul(w, t)), l = classify(q[0], q[1], q[2], GED, {}).tissue;
+        if ((l === TISSUE.AORTA || l === TISSUE.VALVE) && lumenDist(q[0], q[1], q[2], GED.A, 'AOROOT') < 0) { if (a == null) a = t; b = t; }
+      }
+      wid.push([h, a == null ? 0 : b - a]);
+    }
+    const sin = Math.max(...wid.filter(([h]) => h >= 0.3 && h <= 1.5).map(([, x]) => x));
+    const stj = Math.min(...wid.filter(([h]) => h >= 1.5 && h <= 2.6).map(([, x]) => x));
+    check('TEE', 'MEAVLAX ED: sinus diameter / STJ diameter', sin / stj, [1.15, 1.3], '', `sinus ${sin.toFixed(2)} cm, STJ ${stj.toFixed(2)} cm`);
+  }
+  // ME AV LAX: the shut cusps read as fine lines, not a 3-4 mm bar — the grey
+  // FWHM across each cusp (its own principal axis), at 25-75 % of its length
+  {
+    const R = renderBmode('MEAVLAX', ED, {}), W = R.SW, k = R.pxPerCm, p = R.probe, av = R.G.A.valves.aortic.c;
+    const rel = sub(av, p.pos), C = [R.cx + dot(rel, p.lat) * k, R.apexY + dot(rel, p.dir) * k];
+    const pts = [];
+    for (let q = 0; q < W * R.SH; q++) if (R.mask[q] && R.kind[q] === TISSUE.VALVE && Math.hypot(q % W - C[0], ((q / W) | 0) - C[1]) < 1.3 * k) pts.push([q % W, (q / W) | 0]);
+    const pca = (P) => {
+      const m = [P.reduce((s, q) => s + q[0], 0) / P.length, P.reduce((s, q) => s + q[1], 0) / P.length];
+      let sxx = 0, syy = 0, sxy = 0; for (const [a, b] of P) { sxx += (a - m[0]) ** 2; syy += (b - m[1]) ** 2; sxy += (a - m[0]) * (b - m[1]); }
+      const tr = sxx + syy, l1 = tr / 2 + Math.sqrt(Math.max(0, tr * tr / 4 - (sxx * syy - sxy * sxy)));
+      let e = Math.abs(sxy) < 1e-9 ? (sxx >= syy ? [1, 0] : [0, 1]) : [sxy, l1 - sxx]; const el = Math.hypot(...e); e = [e[0] / el, e[1] / el];
+      return { m, e };
+    };
+    const bil = (x, y) => { const i = Math.floor(x), j = Math.floor(y), fx = x - i, fy = y - j, g = (a, b) => R.grey[b * W + a]; return g(i, j) * (1 - fx) * (1 - fy) + g(i + 1, j) * fx * (1 - fy) + g(i, j + 1) * (1 - fx) * fy + g(i + 1, j + 1) * fx * fy; };
+    const fw = [];
+    if (pts.length > 40) {
+      const all = pca(pts);
+      for (const sg of [-1, 1]) {
+        const half = pts.filter(([a, b]) => sg * ((a - C[0]) * all.e[0] + (b - C[1]) * all.e[1]) > 0.15 * k);
+        if (half.length < 20) continue;
+        const { m, e } = pca(half), n = [-e[1], e[0]];
+        let lo = 1e9, hi = -1e9; for (const [a, b] of half) { const s = (a - m[0]) * e[0] + (b - m[1]) * e[1]; lo = Math.min(lo, s); hi = Math.max(hi, s); }
+        for (let f = 0.25; f <= 0.751; f += 0.125) {
+          const s = lo + f * (hi - lo), o = [m[0] + e[0] * s, m[1] + e[1] * s], prof = [];
+          for (let t = -0.5 * k; t <= 0.5 * k; t += 0.25) { let g = 0; for (const a of [-1, 0, 1]) g += bil(o[0] + t * n[0] + a * e[0], o[1] + t * n[1] + a * e[1]); prof.push([t, g / 3]); }
+          const pk = Math.max(...prof.map(([, g]) => g)), hv = (pk + Math.min(...prof.map(([, g]) => g))) / 2;
+          const ip = prof.findIndex(([, g]) => g === pk); let a = ip, b = ip;
+          while (a > 0 && prof[a - 1][1] >= hv) a--; while (b < prof.length - 1 && prof[b + 1][1] >= hv) b++;
+          fw.push((prof[b][0] - prof[a][0]) / k);
+        }
+      }
+    }
+    fw.sort((a, b) => a - b);
+    check('TEE', 'MEAVLAX: closed-cusp thickness on the TEE image (FWHM, median across both cusps)', fw.length ? fw[fw.length >> 1] : null, [0, 0.25], 'cm',
+      fw.length ? `${fw.length} profiles, ${fw[0].toFixed(2)}-${fw[fw.length - 1].toFixed(2)} cm` : 'no cusps found');
+  }
+  // calcific AS: three thickened nodular cusps round a small stellate systolic
+  // orifice (partial commissural fusion) in PSAX-AV; near-white calcium nodules
+  // with a distal acoustic shadow in PLAX
+  SECTION = 'Pathology';
+  const AS = { aorticStenosis: true, lvh: true };
+  {
+    const G = geometryAt(0.2, AS), v = TTE_VIEWS.PSAX_AV; let p = v.probe(); p = { ...p, pos: add(p.pos, v.track(G.A)) };
+    const av = G.A.valves.aortic.c, cd = dot(sub(av, p.pos), p.dir), cl = dot(sub(av, p.pos), p.lat), st = 0.02, N = 80, NW = 2 * N + 1;
+    const lab = new Int8Array(NW * NW).fill(-1), at = (i, j) => (j + N) * NW + (i + N);
+    for (let j = -N; j <= N; j++) for (let i = -N; i <= N; i++) {
+      if (Math.hypot(i, j) * st > LM.AO.annR + 0.1) continue;
+      const q = add(add(p.pos, mul(p.dir, cd + j * st)), mul(p.lat, cl + i * st));
+      lab[at(i, j)] = classify(q[0], q[1], q[2], G, AS).tissue;
+    }
+    const seen = new Uint8Array(lab.length), masses = [];
+    for (let j = -N; j <= N; j++) for (let i = -N; i <= N; i++) {
+      if (seen[at(i, j)] || lab[at(i, j)] !== TISSUE.VALVE) continue;
+      const c = [[i, j]]; seen[at(i, j)] = 1;
+      for (let h = 0; h < c.length; h++) for (let da = -1; da <= 1; da++) for (let db = -1; db <= 1; db++) {
+        const a = c[h][0] + da, b = c[h][1] + db;
+        if (Math.abs(a) <= N && Math.abs(b) <= N && !seen[at(a, b)] && lab[at(a, b)] === TISSUE.VALVE) { seen[at(a, b)] = 1; c.push([a, b]); }
+      }
+      if (c.length * st * st >= 0.03) masses.push(c);
+    }
+    check('Pathology', 'AS PSAX-AV (0.2): separate cusp masses', masses.length, [3, 3], '', masses.map((c) => (c.length * st * st).toFixed(2)).join(' / ') + ' cm2');
+    // the orifice: blood inside the cusps' convex hull
+    const H = hull(masses.flat().map(([i, j]) => [i * st, j * st]));
+    let orif = 0;
+    for (let j = -N; j <= N; j++) for (let i = -N; i <= N; i++) { const l = lab[at(i, j)]; if ((l === TISSUE.AORTA || l === TISSUE.LV) && inHull(H, [i * st, j * st])) orif++; }
+    check('Pathology', 'AS systolic orifice area (PSAX-AV, 0.2)', orif * st * st, [0.4, 0.8], 'cm2', 'circulation AVA 0.6 cm2');
+  }
+  {
+    const R = renderBmode('PLAX', 0.2, AS), W = R.SW, k = R.pxPerCm, p = R.probe, av = R.G.A.valves.aortic.c;
+    const g = []; for (let q = 0; q < W * R.SH; q++) if (R.mask[q] && R.kind[q] === TISSUE.VALVE) g.push(R.grey[q]);
+    g.sort((a, b) => a - b);
+    check('Pathology', 'AS PLAX: valve p90 grey (0.2)', g.length ? g[Math.floor(0.9 * g.length)] : null, [220, 255], 'grey', g.length ? `median ${g[g.length >> 1].toFixed(0)}` : '');
+    // shadow: the tissue beyond the root on beams through a calcium nodule against
+    // the beams through the root that cross none
+    const soft = new Set([TISSUE.LV, TISSUE.RV, TISSUE.LA, TISSUE.RA, TISSUE.AORTA, TISSUE.VALVE, TISSUE.OUTSIDE]);
+    const nod = [], clear = [];
+    for (let th = -R.half * 0.95; th <= R.half * 0.95; th += 0.003) {
+      const bd = add(mul(p.dir, Math.cos(th)), mul(p.lat, Math.sin(th))), rel = sub(av, p.pos), tav = dot(rel, bd);
+      if (Math.hypot(...sub(rel, mul(bd, tav))) > 1.0) continue;
+      let hasNod = false;
+      for (let d = tav - 1.6; d < tav + 1.6 && !hasNod; d += 0.02) { const c = classify(...add(p.pos, mul(bd, d)), R.G, AS); if (c.tissue === TISSUE.VALVE && c.calc === 2) hasNod = true; }
+      let s = 0, n = 0, started = false;
+      for (let d = tav + 1.2; d < tav + 4 && n <= 25; d += 0.02) {
+        const x = Math.round(R.cx + Math.sin(th) * d * k), y = Math.round(R.apexY + Math.cos(th) * d * k);
+        if (x < 0 || y < 0 || x >= W || y >= R.SH || !R.mask[y * W + x]) break;
+        if (!soft.has(R.kind[y * W + x])) { started = true; s += R.grey[y * W + x]; n++; } else if (started) break;
+      }
+      if (n > 5) (hasNod ? nod : clear).push(s / n);
+    }
+    const mean = (a) => a.reduce((x, y) => x + y, 0) / Math.max(1, a.length);
+    // (grey to dB: the display's ~55 dB dynamic range over 255 grey levels)
+    check('Pathology', 'AS: grey drop behind calcium nodules (PLAX, 0.2; tissue beyond the root)', nod.length && clear.length ? (mean(clear) - mean(nod)) * 55 / 255 : null, [6, 60], 'dB',
+      `${nod.length} beams through nodules, ${clear.length} without`);
+  }
+  SECTION = sec0;
+}
 // 3D panel: the thoracic context (lungs, diaphragm, liver, oesophagus, stomach,
 // pericardium, chest wall) meshes, the LAA and pulmonary-vein labels, and every
 // camera preset (patient-superior up) shows the SVC to the patient's right of
@@ -2887,6 +3117,31 @@ SECTION = 'TEE';
     ['lungs', 'diaphragm', 'liver', 'oesophagus', 'stomach', 'pericardium', 'chestWall'].every((k) => tri[k] > 200), JSON.stringify(tri));
   const Lb = structureLabels(A).heart.map(([t]) => t);
   assert('3D', 'labels for the LAA and the four pulmonary veins', ['LAA', 'LSPV', 'LIPV', 'RSPV', 'RIPV'].every((t) => Lb.includes(t)), Lb.join(' '));
+  {
+    // review 12: the SVC beside the ascending aorta at the same height. At the
+    // SVC's upper end (the brachiocephalic confluence) its centre lies 2-3.5 cm to
+    // the patient's right of the ascending aorta, and on the anterior presets it
+    // projects 2-4 cm to the right of the aortic centreline at that height, clear
+    // of the aorta (radius ~1.5 cm) — the right upper mediastinal border. (The row
+    // below compares the lower SVC with a point 3 cm up the root, ~1 cm lower.)
+    const d3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2], df = (a, b) => a.map((v, i) => v - b[i]);
+    const top = A.svc.c || A.svc.b, S3 = BODY_AX.S, pl = [A.ao.ascSegs[0].a, ...A.ao.ascSegs.map((s) => s.b)];
+    check('3D', 'SVC top to ascending-aorta top along the patient right (body axes)', d3(df(top, pl[pl.length - 1]), BODY_AX.R), [2.0, 3.5]);
+    const h = Math.min(d3(top, S3), d3(pl[pl.length - 1], S3));
+    let ao = null;
+    for (let i = 0; i + 1 < pl.length && !ao; i++) {
+      const s0 = d3(pl[i], S3), s1 = d3(pl[i + 1], S3);
+      if ((h - s0) * (h - s1) <= 0) ao = pl[i].map((v, k) => v + (h - s0) / (s1 - s0) * (pl[i + 1][k] - v));
+    }
+    const sv = top.map((v, k) => v + (h - d3(top, S3)) * S3[k]);
+    let worst = 1e9, where = '';
+    for (const k of ['A4C', 'PSAX', 'PLAX']) {
+      const f = cameraDir(k).map((v) => -v), u = CAMERA_UP, rr = [f[1] * u[2] - f[2] * u[1], f[2] * u[0] - f[0] * u[2], f[0] * u[1] - f[1] * u[0]];
+      const v = ao ? d3(df(sv, ao), rr) / Math.hypot(...rr) * Math.sign(d3(BODY_AX.R, rr)) : null;
+      if (v != null && v < worst) { worst = v; where = k; }
+    }
+    check('3D', 'SVC top screen-x minus ascending-aorta screen-x at the same height, toward the patient right (A4C / PSAX / PLAX presets, worst)', ao ? worst : null, [2.0, 4.0], 'cm', where);
+  }
   const sub = (a, b) => a.map((v, i) => v - b[i]), dt = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
   const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
   const svc = A.svc.a.map((v, i) => 0.5 * (v + A.svc.b[i])), ao = A.valves.aortic.c.map((v, i) => v + LM.U_AO[i] * 3.0);

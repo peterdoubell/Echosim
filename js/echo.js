@@ -51,6 +51,13 @@ const DB = {
   vwall: -26, vein: -52, soft: -46, lung: -48, medi: -38,
 };
 const AMP = Object.fromEntries(Object.entries(DB).map(([k, v]) => [k, Math.pow(10, v / 20)]));
+// distal shadow behind a calcific-AS nodule (per cm of calcium crossed; the
+// generic calcified-valve value is 2.4)
+const CALC_NODULE_ATT = 5.0;
+// amplitude gain of a calcific-AS nodule over the calcified-leaflet value (+6 dB:
+// the brightest reflector in the image) and of the sclerotic, thickened cusp
+// between the nodules over a normal cusp (+3 dB)
+const CALC_NODULE_GAIN = 2.0, SCLEROTIC_GAIN = 1.4;
 // Spontaneous echo contrast: amplitude gain (x3..x27, mean ~x10, about +20 dB) of
 // LA blood in a smooth cloud pattern that swirls about the LA centre with the
 // cardiac phase, so the smoke drifts rather than flickering like the speckle.
@@ -811,7 +818,7 @@ export class EchoView {
         // Mean backscatter AMPLITUDE of the sampled tissue (see DB). No speckle
         // here: fully developed speckle multiplies the field AFTER the PSF, as
         // the interference of sub-resolution scatterers does on a real scanner.
-        const calc = t.calc === 1;
+        const calc = t.calc >= 1;
         let e;
         if (kind === TISSUE.MYO) {
           e = AMP.myo * Math.pow(10, 0.6 * (tissue - 0.55)); // papillaries/crista a touch brighter
@@ -839,7 +846,7 @@ export class EchoView {
             if (g > 0.05) e *= 1 + Math.min(1, g);
           }
         }
-        else if (kind === TISSUE.VALVE) e = calc ? AMP.calc : AMP.valve;
+        else if (kind === TISSUE.VALVE) e = calc ? AMP.calc * (t.calc === 2 ? CALC_NODULE_GAIN : 1) : AMP.valve * (tissue >= 1 ? SCLEROTIC_GAIN : 1);
         else if (kind === TISSUE.LV || kind === TISSUE.RV ||
                  kind === TISSUE.LA || kind === TISSUE.RA ||
                  kind === TISSUE.AORTA) {
@@ -1158,6 +1165,7 @@ export class EchoView {
       const bd = this.beamDir(probe, theta);
       const bx = bd[0], by = bd[1], bz = bd[2];
       let sh = 1;            // persistent distal shadow behind calcium
+      let shN = 1;           // (a calcific-AS nodule's shadow, applied once the beam leaves it)
       let att = 0;           // accumulated attenuation (dB)
       let lastFluid = -1e9;  // depth of the last blood / effusion sample on this beam
       let runStart = -1e9, runLen = 0, runPeri = false;   // that fluid run: start, length, effusion?
@@ -1168,7 +1176,13 @@ export class EchoView {
         const t = classify(P[0] + depth * bx, P[1] + depth * by, P[2] + depth * bz, G, path);
         const kind = t.tissue;
         // strong reflector: calcified valve (AS/MS) casts a distal shadow
-        if (kind === TISSUE.VALVE && t.calc === 1) sh *= Math.exp(-2.4 * dStep);
+        // (calc 2: a dense calcium nodule of calcific AS — its leading echo stays
+        // bright, and everything beyond it lies in a deeper shadow)
+        if (kind === TISSUE.VALVE && t.calc === 2) shN *= Math.exp(-CALC_NODULE_ATT * dStep);
+        else {
+          sh *= shN; shN = 1;
+          if (kind === TISSUE.VALVE && t.calc === 1) sh *= Math.exp(-2.4 * dStep);
+        }
         if (sh < 0.16) sh = 0.16; // shadow, not pure black
         // (the chest wall's near field is not lung, and a pleural surface must be a
         // real air interface: the lung continues at least 0.4 cm deeper)
