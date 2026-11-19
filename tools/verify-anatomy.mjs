@@ -3463,11 +3463,59 @@ SECTION = 'Pathology';
     // solved A — solved E/A in the note)
     check(gV, 'PH: tricuspid E/A on the A4C tips trace', tP.A > 0 ? tP.E / tP.A : null, [0.4, 0.9], '', `E ${tP.E.toFixed(2)}, A ${tP.A.toFixed(2)} m/s; solved ${(hemoSummary(PATHS.phtn).QtvE / hemoSummary(PATHS.phtn).QtvA).toFixed(2)}; normal ${(tN.E / Math.max(1e-6, tN.A)).toFixed(2)}`);
     const sP = hemoSummary(PATHS.phtn);
+    // PHY-11 (review 12 repair): the tamponade breath-to-breath tricuspid E
+    // variation on a placed tips trace is the solved one — every breath is read
+    // through the case's tricuspid orifice (a breath does not resize the annulus)
+    {
+      const TPt = { effusion: true, tamponade: true }, sTt = hemoSummary(TPt);
+      const sp = trace('A4C', TPt, 'tvTips'), n = sp.cols, nb = sp.beats || 1, E = [];
+      for (let b = 0; b < nb; b++) {
+        let m = 0;
+        for (let c = Math.floor(b * n / nb); c < Math.floor((b + 1) * n / nb); c++) {
+          const ph = (c - b * n / nb) / (n / nb);
+          if (ph > 0.45 && ph < 0.8) m = Math.max(m, Math.abs(sp.vs[c]));
+        }
+        E.push(m);
+      }
+      const eMax = Math.max(...E), varT = nb > 1 && eMax > 0 ? (eMax - Math.min(...E)) / eMax * 100 : null;
+      check(gV, 'tamponade: tricuspid E respiratory variation on the A4C tvTips trace minus tvEResp', varT != null ? varT - sTt.tvEResp : null, [-5, 5], 'pts',
+        `trace ${varT != null ? varT.toFixed(1) : '-'} % (E per beat ${E.map((x) => x.toFixed(2)).join(', ')} m/s), solved ${sTt.tvEResp.toFixed(1)} %`);
+    }
 
     // TTE-5 / PHY-11: a default RVOT PW in the PSAX-AV; the A2C has no inflow PW
     const { dopplerDefault, defaultSiteGeometry } = await import('../js/echo.js');
     check(gV, 'normal PSAX_AV: default site is rvot, beam-flow angle', dopplerDefault('PSAX_AV', {}) === 'rvot' ? defaultSiteGeometry('PSAX_AV', 'rvot', {}).angleDeg : null, [0, 20], 'deg');
     assert(gV, 'normal A2C: no default PW (CW only with MR / MS)', dopplerDefault('A2C', {}) === null && dopplerDefault('A2C', PATHS.mr) === 'mvCw');
+    // PAT-10 / TTE-5 colour (review 12 repair): at peak RV ejection the PSAX-AV
+    // shows the outflow stream in colour round the RVOT gate, in the RV / PA lumen
+    // only — never in the aortic root beside it, the atria or the LV. In-plane
+    // grid (0.1 cm) within 3 cm of the pulmonary valve, as the renderer's colour
+    // gate sees it: blood, RVOT flow, line-of-sight speed above 0.06 m/s.
+    const rvotColour = (key) => {
+      const p = PATHS[key]; let phPk = 0, qPk = -1;
+      for (let i = 0; i < 240; i++) { const q = hemodynamics(i / 240, p).Qpa; if (q > qPk) { qPk = q; phPk = i / 240; } }
+      const G = geometryAt(phPk, p), V = TTE_VIEWS.PSAX_AV;
+      let pr = V.probe(); if (V.track) pr = { ...pr, pos: add(pr.pos, V.track(G.A)) };
+      const rel = sub(G.A.valves.pulmonic.c, pr.pos), al = dot(rel, pr.dir), la = dot(rel, pr.lat), h = 0.1;
+      const blood = [TISSUE.RV, TISSUE.AORTA, TISSUE.LA, TISSUE.LV, TISSUE.RA];
+      let nIn = 0, nAway = 0, nOut = 0;
+      for (let i = -30; i <= 30; i++) for (let j = -30; j <= 30; j++) {
+        const q = add(pr.pos, add(mul(pr.dir, al + i * h), mul(pr.lat, la + j * h)));
+        const t = classify(q[0], q[1], q[2], G, p).tissue;
+        if (!blood.includes(t)) continue;
+        const v = velocityAt(q[0], q[1], q[2], G, p);
+        if (!v || v.flow !== FLOW.RVOT) continue;
+        const vb = dot([v.vx, v.vy, v.vz], unit(sub(q, pr.pos)));
+        if (Math.abs(vb) <= 0.06) continue;
+        if (t === TISSUE.RV || (t === TISSUE.AORTA && lumenDist(q[0], q[1], q[2], G.A, 'PA') < 0)) { nIn++; if (vb > 0) nAway++; } else nOut++;
+      }
+      return { area: nIn * h * h, away: nIn ? nAway / nIn : 0, nOut, phPk };
+    };
+    const cN = rvotColour('normal'), cA = rvotColour('asd'), cP = rvotColour('phtn');
+    check(gV, 'normal PSAX_AV at peak ejection: in-plane RVOT/PA colour area (|v.beam| > 0.06 m/s, RV or PA lumen within 3 cm of the PV)', cN.area, [2, 36], 'cm2',
+      `phase ${cN.phPk.toFixed(3)}; ASD ${cA.area.toFixed(1)}, PH ${cP.area.toFixed(1)} cm2`);
+    check(gV, 'PSAX_AV at peak ejection: share of the RVOT/PA colour flowing away from the transducer (normal)', cN.away, [0.8, 1], '', `ASD ${cA.away.toFixed(2)}, PH ${cP.away.toFixed(2)}`);
+    check(gV, 'PSAX_AV at peak ejection: RVOT colour outside the RV / PA lumen (normal, ASD, PH)', cN.nOut + cA.nOut + cP.nOut, [0, 0], 'px');
 
     // MOT-7: the right atrium and the PA pressure
     const sTr = hemoSummary(PATHS.tr), sNo = hemoSummary({});

@@ -663,10 +663,14 @@ export function rightHeartLoad(path = {}) {
   // hardest — TAPSE falls to ~1.4 cm (the septal hinge still follows the LV)
   const rvL = path.rvpo ? 0.22 : rvC;
   // volume-overload septal pattern: severe TR, secundum ASD
+  // (severe TR 0.46: RV volume overload flattens the septum in diastole only —
+  // the LV eccentricity index is raised at end-diastole, ~1.2-1.3, and near 1 at
+  // end-systole (Ryan et al., JACC 1985;5:918-27); review 12: the RV drawn at its
+  // solved size needs 0.46 for an end-diastolic index of ~1.2)
   const vol = path.asd ? 1 : trVol;
   const septum = path.rvpo ? (kR) => 0.34 + 0.22 * kR   // (review 12: 0.34 at ED — the RV drawn at its solved size is a little smaller than the old fixed 1.3x)
     : msPH ? (kR) => 0.06 + 0.12 * kR
-    : vol ? (kR) => (path.asd ? 0.55 : 0.36) * vol * (1 - kR) : null;   // (the ASD's larger diastolic RV load)
+    : vol ? (kR) => (path.asd ? 0.55 : 0.46) * vol * (1 - kR) : null;   // (the ASD's larger diastolic RV load)
   return { rvC, rvL, septum, msPH, trVol };
 }
 // Anterior systolic swing of the aortic root above its annulus (cm): gain x the LA reservoir filling

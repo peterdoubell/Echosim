@@ -468,7 +468,7 @@ A few reporting points from these cases:
   follow from the same right heart. In severe DCM the failing RV raises RAP to
   ~13 mmHg (plethoric IVC). The drawn RV holds the solved RV volume and ejects
   its ejection fraction, so its size, TAPSE and FAC, the tricuspid inflow and the
-  RVOT envelope (acceleration time ~120 ms normally; a raised velocity with the
+  RVOT envelope (acceleration time ~130 ms normally; a raised velocity with the
   ASD's increased Qp) all come from that solved right heart.
 
 `node tools/verify-report.mjs` checks that every case's conclusion names its

@@ -305,7 +305,7 @@ const MVA_NORM = 4.0;
 // right-heart effective orifice areas (cm^2) for the instantaneous velocity
 // v = Q / A, at a normal RV size (the tricuspid one grows with the dilated RV): the
 // tricuspid inflow at the leaflet tips (normal E ~0.5 m/s, A ~0.3) and the RVOT
-// just below the pulmonary valve (2.4 cm: peak ~0.85 m/s, VTI ~16 cm)
+// just below the pulmonary valve (2.4 cm: peak ~0.95 m/s, VTI ~16 cm)
 const A_TV = 6.0, A_RVOT = 4.5;
 const ET_EJECT = 0.33, T_FILL = 0.37; // systolic ejection / diastolic filling time (s)
 const K_AO = 1.56;                    // peak/mean profile factor (peak ≈ k·mean)
@@ -337,7 +337,7 @@ export function trEnvelope(phaseRV, path = {}) {
 // Build the per-frame haemodynamic snapshot the flow field reads. Returns a
 // FRESH object (never the hemodynamics() singleton) so two geometryAt() results
 // — e.g. echo's end-diastolic and end-systolic geometries — never alias.
-function hemoFrame(hd, path, rvHd, phaseRV) {
+function hemoFrame(hd, path, rvd0, phaseRV) {
   const s = hd.sum;
   // effective orifice area follows the severity grade (continuity: same SV through
   // a smaller area → higher velocity), so the Doppler peak and BSE band both track it.
@@ -373,9 +373,11 @@ function hemoFrame(hd, path, rvHd, phaseRV) {
   // E rises in inspiration by itself.) ejTv / ejPv are the same flows over the
   // case's peak, for the colour-flow and 3D streams that scale an envelope.
   const RVD = rvDrive(path);
-  // (the tricuspid annulus dilates with the RV; the RVOT just below the valve is
-  // held at the pulmonary annulus, as drawn — so a raised Qp shows as velocity)
-  const aTv = A_TV * RVD.rvSize, aRvot = A_RVOT;
+  // (the tricuspid annulus dilates with the RV — the case's RV, not one breath's:
+  // rvd0, the apnoeic drive of a tamponade breath, from geometryAt; the RVOT just
+  // below the valve is held at the pulmonary annulus, as drawn — so a raised Qp
+  // shows as velocity)
+  const aTv = A_TV * (rvd0 || RVD).rvSize, aRvot = A_RVOT;
   const vTv = Math.max(0, hd.Qtv) / (aTv * 100), vPv = Math.max(0, hd.Qpa) / (aRvot * 100);
   const vTvPeak = (s.QtvMax || 0) / (aTv * 100);
   const ejTv = vTvPeak > 0 ? clamp(vTv / vTvPeak, 0, 1) : 0;
@@ -468,6 +470,11 @@ export function geometryAt(phase, path = {}) {
   const phaseRV = rvPhase(phase, path);
   const otr = openTrace(path);        // (first: it samples the hemodynamics() singleton)
   const RVD = rvDrive(path);
+  // (tamponade: each respiratory phase is its own solved circulation, so the RV
+  // fills more in inspiration; the tricuspid orifice the inflow velocity is read
+  // through is the apnoeic case's — a breath does not resize the annulus. Before
+  // hemodynamics(), as rvDrive samples its singleton.)
+  const RVD0 = path.resp ? rvDrive({ ...path, resp: undefined }) : RVD;
   const hd = hemodynamics(phase, path);
   const kvR = (RVD.RVEDV - hd.Vrv) / RVD.RVSV, kR = clamp(kvR, 0, 1);
   const rho = hd.rho;                 // Vlv / EDV (absolute cavity-volume ratio)
@@ -553,7 +560,7 @@ export function geometryAt(phase, path = {}) {
     // stroke volume, EF, jet peak velocities) — read by the echo measurements,
     // the flow field and the UI PV-loop panel. A fresh snapshot (not the
     // hemodynamics() singleton) so distinct geometries never alias.
-    hemo: hemoFrame(hd, path, null, phaseRV),
+    hemo: hemoFrame(hd, path, RVD0, phaseRV),
     // Coarse per-chamber ellipsoid proxies — used by the velocity field, the
     // on-image labels and the LVIDd/EF measurements. Tissue classification and
     // the 3D surface use the anatomical SDF (G.A) below, not these.
@@ -1296,6 +1303,31 @@ function gauss(d, w) {
 // with UNIT direction `u`. The signed distance travelled along the axis is
 // stashed in _axis.along (module scope) to avoid allocating a return tuple.
 const _axis = { along: 0 };
+// The upper infundibulum's axis (A.rvot[1] -> A.rvot[2], just below the pulmonary
+// valve) of the anatomy frame last asked for: its unit direction in _infU, its
+// length returned. (velocityAt asks once per sample; the frame changes per phase.)
+const _infU = [0, 0, 0];
+let _infA = null, _infLen = 1;
+function infundibulumAxis(A) {
+  if (A !== _infA) {
+    const a = A.rvot[1], b = A.rvot[2];
+    const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+    _infLen = Math.hypot(ux, uy, uz) || 1;
+    _infU[0] = ux / _infLen; _infU[1] = uy / _infLen; _infU[2] = uz / _infLen;
+    _infA = A;
+  }
+  return _infLen;
+}
+// Is a point at the edge of the RVOT -> PA stream in that lumen? Below the
+// pulmonary valve (along < 0, cm along the trunk axis from the valve) the RV's
+// outflow tract, above it the PA trunk — but not where the left PA runs over the
+// left atrium (beyond ~2 cm, near the bifurcation). Exact lumen SDFs, tried in
+// the order the point is most likely to be in.
+function inRvotLumen(px, py, pz, A, along) {
+  if (along < 0) return lumenDist(px, py, pz, A, 'RV') < 0 || lumenDist(px, py, pz, A, 'PA') < 0;
+  if (lumenDist(px, py, pz, A, 'PA') < 0) return along < 2 || lumenDist(px, py, pz, A, 'LA') > 0;
+  return lumenDist(px, py, pz, A, 'RV') < 0;
+}
 function offAxisDist(px, py, pz, a, u) {
   const dx = px - a[0], dy = py - a[1], dz = pz - a[2];
   const along = dx * u[0] + dy * u[1] + dz * u[2];
@@ -1804,16 +1836,38 @@ export function velocityAt(px, py, pz, G, path = {}) {
   // RV ejection: on the right heart's clock it starts ~10 ms before and ends
   // ~30 ms after the aortic, so it has its own gate
   if (H.ejPv > 0.001 || H.vPv > 0.005) {
-    // RVOT -> pulmonary artery (centreline anchored at the pulmonic valve).
-    // Tightened to the true outflow centreline: a narrow Gaussian, clipped to
-    // the downstream (+along) side and to the high subpulmonary tract (py > 0.8)
-    // so no stray systolic colour blob appears mid-RV near the tricuspid valve.
+    // RVOT -> pulmonary artery (centreline anchored at the pulmonic valve, on the
+    // valve / trunk axis), reaching 2.4 cm down the subpulmonary tract and 3.5 cm
+    // up the trunk, so no stray systolic colour appears mid-RV near the tricuspid valve.
     const rPerp = offAxisDist(px, py, pz, G.A.valves.pulmonic.c, AX_RVOT);
     const rAlong = _axis.along;
     // (the solved pulmonary flow over the RVOT area: timing, AT, notch and peak)
-    const rSpeed = (H.vPv != null ? H.vPv : H.ejPv * 0.9) * gauss(rPerp, 0.55);
-    considerFlow(rAlong > -2.4 && rAlong < 3.5 && rPerp < 1.3, AX_RVOT[0], AX_RVOT[1], AX_RVOT[2],
-      rSpeed, FLOW.RVOT, false);
+    const vRvot = H.vPv != null ? H.vPv : H.ejPv * 0.9;
+    // The outflow profile is blunt (plug flow across the ~2.2 cm subpulmonary
+    // tract and trunk): flat over the central 0.45 cm, tapering toward the walls,
+    // so the stream fills the lumen and still crosses a plane that misses the
+    // valve centre by ~1 cm (the PSAX-AV; review 12 repair). Never into the
+    // aortic root beside it; at the stream's edge only inside the RV / PA lumen
+    // (and not where the left PA runs over the left atrium).
+    const rSpeed = vRvot * gauss(Math.max(0, rPerp - 0.45), 0.55);
+    if (rAlong > -2.4 && rAlong < 3.5 && rPerp < 1.3 && !inAo && rSpeed > 0.01 &&
+        (!_velHasBest || rSpeed > _velResult.speed) && (rPerp < 0.7 || inRvotLumen(px, py, pz, G.A, rAlong))) {
+      considerFlow(true, AX_RVOT[0], AX_RVOT[1], AX_RVOT[2], rSpeed, FLOW.RVOT, false);
+    }
+    // The infundibulum: blood converges up the subpulmonary tract onto the valve
+    // along the tract's own axis (upper infundibulum -> just below the valve),
+    // a little slower than at the valve and broader. considerFlow keeps the
+    // faster stream, so the PW gate below the valve still reads the trunk-axis
+    // stream above.
+    const iLen = infundibulumAxis(G.A);
+    const iPerp = offAxisDist(px, py, pz, G.A.rvot[2], _infU);
+    const iAlong = _axis.along;
+    if (iAlong > -iLen - 0.5 && iAlong < 0.3 && iPerp < 1.4) {
+      const iSpeed = 0.85 * vRvot * gauss(iPerp, 0.9);
+      if (iSpeed > 0.01 && (!_velHasBest || iSpeed > _velResult.speed) && lumenDist(px, py, pz, G.A, 'RV') < 0) {
+        considerFlow(true, _infU[0], _infU[1], _infU[2], iSpeed, FLOW.RVOT, false);
+      }
+    }
   }
 
   // --- pathological jets: a fast vena-contracta core tapering laterally and
