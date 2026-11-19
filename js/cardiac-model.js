@@ -393,7 +393,10 @@ const edvRef = () => (_edvRef != null ? _edvRef : (_edvRef = hemoSummary({}).EDV
 // rendered LV lumen, clipped at the mitral and aortic annular planes as the
 // audit does) ejects exactly the circulation's EF. Only the anatomy sees rho';
 // the coarse proxies (lv.r: EF/LVID readouts, the Simpson truth) stay on rho,
-// so the panel, the report and the image all carry one EF.
+// so the panel, the report and the image all carry one EF. Note: most of that
+// agreement comes from the per-territory Emax cut in the circulation (the
+// solved EF fell to what the drawn LV already ejected), not from visible remote
+// hyperkinesis: the A4C end-systolic LV area moved by only ~2 % (review 12).
 const _kappaCache = new Map();
 function drawnLvVolume(A, h) {
   const M = A.valves.mitral.c, Av = A.valves.aortic.c, U = LM.U_AO;

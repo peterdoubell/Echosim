@@ -1580,12 +1580,23 @@ const worstOf = (xs) => xs.reduce((m, v) => (v.val > m.val ? v : m), { val: -1e9
     for (const vn of ['A2C', 'A4C', 'A3C', 'MECOMM']) {
       const S = planeSample(TTE_VIEWS[vn] || EXTRA_VIEWS[vn] || TEE_VIEWS[vn], G, {}, 0.05);
       check('Papillary', `${vn} (${ph}): blood cleft between a papillary muscle and the wall over its lower 40 %`, cleft(S, G, 0.4), [0, 0.15]);
-      // KNOWN-FAIL: the acceptance asks for the lower 70 %, but the TG mid SAX
-      // cuts the muscles at ~0.57 of their height, where the TGSAX rows require a
-      // 1.5-6 mm cleft from the wall (the free body of the mid-papillary short
-      // axis); closing the cleft there (a higher fillet or a smaller inward lean)
-      // breaks those rows and the PSAX ES/ED area rows
-      KNOWN = ph === 'ED';
+      // KNOWN-FAIL at ED in A2C and ME commissural (A4C and A3C pass): the TG
+      // mid SAX (a short-axis plane 3.6 cm below the annulus) cuts both muscles
+      // at ~0.57 of their base-to-head height, where the TGSAX rows require a
+      // 1.5-6 mm blood gap all round each muscle (the free body of the
+      // mid-papillary short axis). A long-axis plane through a muscle at that
+      // height shows that gap, so the lower 70 % cannot be solid while those
+      // rows hold. Tried: a fillet to 0.5 or 0.6 of the height, or a fillet on
+      // the wall-facing side up to 0.7, closes both TGSAX gaps (0.00 cm) and
+      // leaves these rows almost unchanged (the planes cut the muscles' flanks);
+      // pulling the bases toward the heads (0.12 / -1.9 rad) puts the PSAX clock
+      // rows at 2.8 / 6.6 h and the TGSAX posteromedial gap at 0.11 cm. The A4C
+      // passes because the anterolateral body runs anterior of that plane above
+      // its fillet (anatomy.js PAP). The posteromedial muscle lies along both ME
+      // commissural planes (0.70 cm here, 0.40 in the ME4C + 60 deg rebuild)
+      // and the A2C cuts its upper body (0.40). At ES all four pass (systolic
+      // fillet rise).
+      KNOWN = ph === 'ED' && (vn === 'A2C' || vn === 'MECOMM');
       check('Papillary', `${vn} (${ph}): blood cleft between a papillary muscle and the wall over its lower 70 %`, cleft(S, G, 0.7), [0, 0.15]);
       KNOWN = false;
     }
@@ -1609,8 +1620,9 @@ const worstOf = (xs) => xs.reduce((m, v) => (v.val > m.val ? v : m), { val: -1e9
       att = t;
     }
     check('Papillary', `${names[i]}: base attachment length along the wall (ED)`, att * L, [1.2, 3]);
-    // KNOWN-FAIL (see the 70 % rows): the head is clear of the wall from ~0.4 of
-    // the height, which the TG mid SAX cleft needs
+    // KNOWN-FAIL (see the 70 % rows): the TG mid SAX gap at ~0.57 of the height
+    // keeps each body clear of the wall from ~0.5 of the height at ED, so the
+    // free length is ~2.0-2.2 cm (head radius included)
     KNOWN = true;
     check('Papillary', `${names[i]}: free papillary length, head clear of the wall (ED)`, (1 - att) * L + m.rt, [0.5, 1.8]);
     KNOWN = false;
@@ -1622,11 +1634,67 @@ const worstOf = (xs) => xs.reduce((m, v) => (v.val > m.val ? v : m), { val: -1e9
     return tot ? Math.max(...sz) / tot : 0;
   };
   check('Papillary', 'MECOMM: LV blood pool in one piece at ED (largest component share)', lvShare(GED), [0.97, 1], '');
-  // KNOWN-FAIL: at ES a 0.5 cm2 pocket under the anterolateral chordae and the
-  // mitral leaflets is cut off (not the papillary column); the MECOMM plane is
-  // being rebuilt as ME4C + 60 deg by the TEE probe item
+  // KNOWN-FAIL: at ES the closed leaflets sit below the LA/LV label boundary
+  // (normal systolic tenting), so the LV-labelled blood on their atrial side,
+  // between the annulus and the leaflet bodies, is a separate 0.5-0.7 cm2
+  // component (share 0.953). No papillary tissue bounds it, and the ME4C +
+  // 60 deg plane of the TEE probe rebuild cuts the same pocket (share 0.953),
+  // so that rebuild does not fix it: it is a mitral tenting / label-boundary
+  // issue, not the papillary column.
   KNOWN = true;
   check('Papillary', 'MECOMM: LV blood pool in one piece at ES (largest component share)', lvShare(GES), [0.97, 1], '');
+  KNOWN = false;
+  // The one-piece share misses a papillary column that stands free along the
+  // wall, because the channel behind it opens into the main cavity at its top,
+  // and a head the plane cuts as an island. Along each scan line (constant
+  // depth), a double barrel is a papillary run with LV blood on both sides, the
+  // blood on one side a channel wider than the 0.15 cm cleft allowance (and
+  // under 0.8 cm, not the main cavity) that ends on the wall; the row is the
+  // longest unbroken stretch of such lines (cm of depth). The island row is
+  // the area of papillary sections with no contact with the wall.
+  const mecommS = planeSample(TEE_VIEWS.MECOMM, GED, {}, 0.05);
+  const papMask = (S, G) => { const P = new Uint8Array(S.lab.length); for (let k = 0; k < S.lab.length; k++) if (S.lab[k] === TISSUE.MYO && isPapAt(G, ptK(S, k))) P[k] = 1; return P; };
+  const barrel = (S, G) => {
+    const P = papMask(S, G), nx = S.nx, cls = (k) => (S.lab[k] === TISSUE.LV ? 'L' : S.lab[k] === TISSUE.MYO ? (P[k] ? 'P' : 'W') : 'X');
+    let run = 0, best = 0;
+    for (let j = 0; j < S.nd; j++) {
+      const seg = [];
+      for (let i = 0; i < nx;) { const c = cls(j * nx + i); let i1 = i; while (i1 < nx && cls(j * nx + i1) === c) i1++; seg.push({ c, w: (i1 - i) * S.step }); i = i1; }
+      let found = false;
+      for (let s = 1; s + 1 < seg.length; s++) {
+        if (seg[s].c !== 'P' || seg[s - 1].c !== 'L' || seg[s + 1].c !== 'L') continue;
+        for (const [ch, far] of [[seg[s - 1], seg[s - 2]], [seg[s + 1], seg[s + 2]]]) if (far && far.c === 'W' && ch.w > 0.15 && ch.w < 0.8) found = true;
+      }
+      run = found ? run + S.step : 0; if (run > best) best = run;
+    }
+    return best;
+  };
+  const islandArea = (S, G) => {
+    const P = papMask(S, G), seen = new Uint8Array(P.length); let area = 0;
+    for (let k0 = 0; k0 < P.length; k0++) {
+      if (!P[k0] || seen[k0]) continue;
+      const st = [k0]; seen[k0] = 1; let n = 0, wall = false;
+      while (st.length) {
+        const k = st.pop(), i = k % S.nx; n++;
+        for (const kk of [i + 1 < S.nx ? k + 1 : -1, i > 0 ? k - 1 : -1, k + S.nx, k - S.nx]) {
+          if (kk < 0 || kk >= P.length) continue;
+          if (P[kk]) { if (!seen[kk]) { seen[kk] = 1; st.push(kk); } } else if (S.lab[kk] === TISSUE.MYO) wall = true;
+        }
+      }
+      if (!wall) area += n * S.step * S.step;
+    }
+    return area;
+  };
+  // KNOWN-FAIL (TEE-8): the posteromedial muscle stands free along both ME
+  // commissural planes above its fillet (1.0 cm here, 1.6 cm in the ME4C +
+  // 60 deg rebuild; see the 70 % rows), and the anterolateral head, which sits
+  // under its commissure, is cut as an island (1.1 / 1.4 cm2): those planes
+  // pass through the commissures but meet the anterolateral wall at ~1-2
+  // o'clock at the papillary base level, while the PSAX clock row puts the
+  // anterolateral base at 3 o'clock or later
+  KNOWN = true;
+  check('Papillary', 'MECOMM (ED): papillary column standing free with an LV channel behind it (double barrel), length', barrel(mecommS, GED), [0, 0.5]);
+  check('Papillary', 'MECOMM (ED): papillary section floating free of the wall (island), area', islandArea(mecommS, GED), [0, 0.1], 'cm2');
   KNOWN = false;
 }
 // LAA in the TTE A2C and the ME2C (ED): a finger-like pouch standing off the LA

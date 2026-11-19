@@ -691,25 +691,43 @@ const PM_ROOT = { ang: -2.7, up: 0.3, rb: 0.6, rt: 0.4 };
 // (rad, as papAt), base radius rb and head radius rt (cm). Above the base the
 // muscle stands free in the cavity, ~1-1.4 cm across with a 2-5 mm blood gap
 // from the free wall: the landmark of the mid-papillary short axis (TTE PSAX,
-// TEE TG mid SAX). The anterolateral muscle rises from ~3.4 o'clock in PSAX and
-// leans forward so its head lies at ~3 o'clock in TG SAX; the posteromedial one
+// TEE TG mid SAX). The anterolateral muscle rises from ~3 o'clock in PSAX and
+// leans forward so its head lies under its commissure; the posteromedial one
 // rises from ~7.4 o'clock and leans toward the inferior wall, its head clear of
 // the (posteriorly tilted) A4C plane, which shows the anterolateral muscle
 // alongside the lateral wall rather than an island in the mid cavity. The heads
 // move in with the wall in systole by tipK of the short-axis shortening (they
 // hang on the chordae under the commissures, which move in less than the wall).
-// Broad bases (review 12): the lower 40 % of each muscle is filleted into the
+// Broad bases (review 12): the lower 40-45 % of each muscle is filleted into the
 // endocardium (fillet: blend width, cm; filTop: share of the base-to-head
 // height up to which it is full, fading over filFade), so oblique long-axis cuts (A4C, A2C, ME commissural)
 // show the base rising from the wall with no blood crevice beside it. Above
 // that the body stands free: at the mid-papillary short axis (TG mid SAX, ~0.57
 // of the height) the muscle keeps its 2-5 mm cleft from the wall, so a higher
 // fillet or a smaller inward lean closes that cleft (see the audit's TGSAX rows).
+// Anterolateral muscle (review 12 repair): its head sits under the anterolateral
+// commissure (~2.6 o'clock, 1.4 cm off the axis; the head is also shifted by
+// 0.3 x M0, so the nominal 0.45 rad lands at ~0.2 rad) and the body leans in by
+// only ~0.3 cm from a base at ~3.1 o'clock, 1.7 cm out (it ran from 2.1 to
+// 0.97 cm). The A4C plane passes through the base and, tilting posteriorly
+// toward the base of the heart, runs behind the muscle above it, so it cuts only
+// the filleted lower part (free body >= 0.12 cm clear of the plane): the A4C
+// shows a broad mound on the apical lateral wall instead of a finger with a
+// wedge of blood lateral to it. Each muscle keeps its own fillet height (filTop).
+// The posteromedial muscle is unchanged: the ME commissural planes (this one
+// and the ME4C + 60 deg rebuild) run within 0.6 cm of its axis along its whole
+// length, so the mid-body gap the TG mid SAX needs shows there as a channel;
+// moving the muscle trades that channel for a head island, closes the TG mid
+// SAX gap, shifts its 7 o'clock PSAX section (read by the TR eccentricity
+// index) or leaves the PSAX clock range (see the audit's papillary rows).
+// In systole the thickening bodies abut the wall: the fillet rises by filSys of
+// the height at full contraction (the TG mid SAX gap is an end-diastolic
+// landmark), so no systolic plane shows a cleft beside a muscle.
 const PAP = {
-  alpm: { r: [2.1, 0.95], ang: [-0.2, 0.25], rt: 0.5 },
-  pmpm: { r: [1.95, 1.15], ang: [-2.3, -1.8], rt: 0.46 },
+  alpm: { r: [1.7, 1.4], ang: [-0.05, 0.45], rt: 0.5, filTop: 0.45 },
+  pmpm: { r: [1.95, 1.15], ang: [-2.3, -1.8], rt: 0.46, filTop: 0.4 },
   rb: 0.72, tipK: 0.5,
-  fillet: 0.8, filTop: 0.4, filFade: 0.08,
+  fillet: 0.8, filTop: 0.4, filFade: 0.08, filSys: 0.4,
 };
 export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   // Remodelling: when coupled to the circulation the LV size follows the modelled
@@ -860,6 +878,7 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   const papBase = 1 + (papThick - 1) * 0.15;
   const out = (papBase - 1) * 0.62;                        // added base radius
   const sT = 1 - (1 - sS) * PAP.tipK;                    // (heads move in less than the wall)
+  const papSys = PAP.filSys * Math.min(1, Math.max(0, (1 - sS) / 0.28));   // systolic fillet rise
   const papAt = (ang, rb, rt, angT = ang) => {
     const c = Math.cos(ang), s = Math.sin(ang), ct = Math.cos(angT), st = Math.sin(angT);
     // the tip descends with the annular sector above it (mvWeight at its angle)
@@ -991,8 +1010,8 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
       mitral: { c: Mlive }, aortic: { c: Alive }, tricuspid: { c: Tlive, n: tvN, lat: tvLat }, pulmonic: { c: PVlive },
     },
     pap: [
-      { a: alpm.a, b: alpm.b, r: 0.5, rb: PAP.rb * papBase, rt: PAP.alpm.rt * papThick, drop: alpm.drop },
-      { a: pmpm.a, b: pmpm.b, r: 0.5, rb: PAP.rb * papBase, rt: PAP.pmpm.rt * papThick, root: pmRoot, drop: pmpm.drop },
+      { a: alpm.a, b: alpm.b, r: 0.5, rb: PAP.rb * papBase, rt: PAP.alpm.rt * papThick, drop: alpm.drop, filTop: PAP.alpm.filTop + papSys },
+      { a: pmpm.a, b: pmpm.b, r: 0.5, rb: PAP.rb * papBase, rt: PAP.pmpm.rt * papThick, root: pmRoot, drop: pmpm.drop, filTop: PAP.pmpm.filTop + papSys },
     ],
     // moderator band: crosses the lower third of the RV from the septum to the
     // base of the anterior papillary muscle on the free wall.
@@ -1981,7 +2000,8 @@ function dPap(x, y, z, A, dlv = null) {
     if (dm < PAP.fillet && PAP.fillet > 0) {
       const ab = [p.b[0] - p.a[0], p.b[1] - p.a[1], p.b[2] - p.a[2]];
       const t = ((x - p.a[0]) * ab[0] + (y - p.a[1]) * ab[1] + (z - p.a[2]) * ab[2]) / (ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]);
-      const kf = PAP.fillet * (1 - smoothstep(PAP.filTop, PAP.filTop + PAP.filFade, t));
+      const ft = p.filTop ?? PAP.filTop;
+      const kf = PAP.fillet * (1 - smoothstep(ft, ft + PAP.filFade, t));
       if (kf > 0.02) {
         if (dlv == null) dlv = dLVlumen(x, y, z, A);
         if (dlv < 0) {                                          // (fills blood only: the wall stays wall)
