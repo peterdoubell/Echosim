@@ -426,7 +426,7 @@ your own write-up.
 | Case | Model conclusion |
 |---|---|
 | Normal | Structurally normal heart. Normal biventricular size and systolic function. No significant valve disease. |
-| Aortic stenosis | 1. Severe aortic stenosis (Vmax 4.5 m/s, mean gradient 48 mmHg, AVA 0.67 cm²). 2. LV concentric hypertrophy. 3. Dilated left atrium (LAVi 55 mL/m²). |
+| Aortic stenosis | 1. Severe aortic stenosis (Vmax 4.5 m/s, mean gradient 48 mmHg, AVA 0.67 cm²). 2. LV concentric hypertrophy. 3. Dilated left atrium (LAVi 54 mL/m²). |
 | Mitral regurgitation | 1. Severe mitral regurgitation (RF 54%, RVol 66 mL). 2. Moderately dilated LV (LVEDVi 102 mL/m²). 3. Dilated left atrium (LAVi 65 mL/m²). |
 | Mitral stenosis | 1. Severe mitral stenosis (MVA 1.00 cm², mean gradient 13.8 mmHg). 2. Dilated left atrium (LAVi 84 mL/m²). 3. Intermediate echocardiographic probability of pulmonary hypertension (TR Vmax 3.4 m/s, PASP ~54 mmHg). |
 | Dilated cardiomyopathy | 1. Severely impaired LV systolic function, LVEF 27%. 2. Severely dilated LV (LVEDVi 129 mL/m²). 3. Moderate functional mitral regurgitation (RF 31%). 4. Dilated left atrium (LAVi 67 mL/m²). 5. Impaired RV systolic function (TAPSE 12 mm, FAC 31%). |

@@ -1007,6 +1007,7 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   params.eustachianRim = buildEustachianRim(params);
   params.eustachian = params.eustachianRim[EUST_RIM.n >> 1];
   params.crista = buildCrista(params);
+  seatRidge(params);
   return params;
 }
 
@@ -1128,11 +1129,11 @@ function buildPV(la) {
   const uL = unit(sub(veins[0].w, o)), uA = unit(sub(aa[0].w, o));
   const ridge = { a: laWall(la, o, unit(lerp3(uL, uA, 0.45))), b: laWall(la, o, unit(lerp3(uL, uA, 0.6))), r: 0.18 };
   // The ridge is an infolding of the lateral wall, so it is carved out of the
-  // lumen (dRidge) rather than drawn as a free body: a thin blade rooted on the
-  // wall junction between the two ostia, standing RIDGE.len into the cavity
-  // toward the chamber's middle and ending in a bulbous tip ("Q-tip", RIDGE.rb),
-  // running RIDGE.run along the wall between the ostia. In any plane that holds
-  // both ostia (ME LAA, ME2C) it is a stalk with a knob, continuous with the wall.
+  // lumen (dRidge) rather than drawn as a free body: a thin blade rising from the
+  // crotch where the LAA and LSPV lumens part, RIDGE.len long, to a bulbous tip
+  // ("Q-tip", RIDGE.rb) at about the level of the atrial wall, running RIDGE.run
+  // along the wall between the ostia (seatRidge). In any plane that holds both
+  // ostia (ME LAA, ME2C) it is a stalk with a knob, continuous with the wall.
   const root = laWall(la, o, unit(lerp3(uL, uA, 0.5)));
   const n = unit(sub(o, root));
   const e = unit(sub(sub(aa[0].w, veins[0].w), mul(n, dot(sub(aa[0].w, veins[0].w), n))));
@@ -1226,7 +1227,15 @@ function buildCrista(A) {
 // the RA lumen (dRAlumen), so it is never a free bar in the cavity. (The flap
 // is the one seen at the IVC-RA junction in the ME bicaval, RV inflow and subcostal
 // IVC views.)
-const EUST_RIM = { span: 70, n: 11, len: 0.5, r: 0.075, rBase: 0.15, into: 0.1 };
+// Medially the valve does not stop at the IVC rim: its horn runs on as the
+// Eustachian ridge (the sinus septum between the IVC and the coronary sinus,
+// carrying the tendon of Todaro) past the CS ostium on its fossa side — the
+// posterior border of the triangle of Koch — as a low fold (EUST_RIM.horn: n
+// bands along the RA floor from the medial end of the crescent to a point `off`
+// beyond the CS ostium centre toward the fossa, `len` tall at the crescent
+// tapering to `len1`). That is the part the parasternal RV inflow view, which
+// passes between the IVC and the CS ostium, cuts.
+const EUST_RIM = { span: 70, n: 11, len: 0.5, r: 0.075, rBase: 0.15, into: 0.1, horn: { n: 10, off: 0.6, reach: 0.65, len: 0.3, len1: 0.15 } };
 // (built on the live RA lumen once the chamber exists: each band's base is the
 // RA wall found outward from the IVC axis at the orifice, so the flap is rooted
 // on the wall at the IVC's anterior rim; the bands shorten toward the ends of
@@ -1247,6 +1256,19 @@ function buildEustachianRim(A) {
     const p = mad(c, dir, hi + 0.05);                       // (its root just inside the wall)
     const len = EUST_RIM.len * Math.sqrt(Math.max(0, 1 - f * f * 0.85)) + 0.05;
     segs.push({ a: p, b: mad(p, unit(sub(IAS.fossaC, p)), len), r: EUST_RIM.r, ra: EUST_RIM.rBase });
+  }
+  // the medial horn along the Eustachian ridge, past the CS ostium: each band's
+  // root is the fold-free RA wall on the ray from the RA centre through a point
+  // on the line from the crescent's medial end to the end of the ridge
+  const H = EUST_RIM.horn, p0 = segs[0].a, cs = A.cs[A.cs.length - 1].b, rc = A.ra.c;
+  const end = mad(cs, unit(sub(IAS.fossaC, cs)), H.off);
+  for (let k = 1; k <= H.n; k++) {
+    const f = k / H.n, q = lerp3(p0, end, f * H.reach), dir = unit(sub(q, rc));
+    let lo = 0, hi = 0.1;
+    for (; hi < 5.0; lo = hi, hi += 0.1) { const r = mad(rc, dir, hi); if (dRAlumen(r[0], r[1], r[2], A, false) >= 0) break; }
+    for (let i = 0; i < 12; i++) { const m = 0.5 * (lo + hi), r = mad(rc, dir, m); if (dRAlumen(r[0], r[1], r[2], A, false) < 0) lo = m; else hi = m; }
+    const p = mad(rc, dir, hi + 0.05);
+    segs.push({ a: p, b: mad(p, unit(sub(IAS.fossaC, p)), H.len + (H.len1 - H.len) * f), r: EUST_RIM.r, ra: EUST_RIM.rBase });
   }
   segs.c = c; segs.R2 = 0;
   for (const g of segs) segs.R2 = Math.max(segs.R2, (Math.hypot(...sub(g.a, c)) + EUST_RIM.len + 0.3) ** 2);
@@ -1818,7 +1840,7 @@ function laInflow(x, y, z, A) {
 // body = true: the chamber body alone, without the appendage and the vein
 // tubes — what the ASE LA volume measures (biplane / 3D LAV excludes the LAA and
 // the pulmonary veins)
-function dLAlumen(x, y, z, A, body = false) {
+function dLAlumen(x, y, z, A, body = false, folds = true) {
   const e0 = sdAtrium(x, y, z, A.la, 0);
   const e = A.ias.lf && e0 > 0.5 ? Math.min(e0, laSeptFace(x, y, z, A.ias) + 0.3) : e0;   // (far test only)
   if (body) {
@@ -1831,13 +1853,15 @@ function dLAlumen(x, y, z, A, body = false) {
   if (A.ias.lf) d = Math.min(d, laSeptFace(x, y, z, A.ias));         // (septal face along the caval axis)
   if (A.ias.hc) d = smin(d, asdFace(x, y, z, A.ias), 0.3);           // (secundum ASD: LA side of its rims)
   if (!body) {
+    const dB = d;                                                    // (the body alone: the ridge's height datum)
     d = smin(d, dAppendage(x, y, z, A.la.aa, 0.22) + laaPectinate(x, y, z, A.la.aa), 0.14);   // NARROW neck
     d = smin(d, dPV(x, y, z, A), 0.4);                               // veins flare in
-    d = smax(d, -dRidge(x, y, z, A), 0.08);                          // the coumadin ridge folds in from the wall
+    // the coumadin ridge folds in from the wall (once seated; filleted into it)
+    if (folds && A.pv.ridge.top0 !== undefined) d = smax(d, -dRidge(x, y, z, A, dB), RIDGE.k);
   }
   const M = A.lv.M;                                                  // mitral orifice
   const ym = y - mitralLift(x, y, z, A);                             // (saddle deepens in systole)
-  d = smin(d, laInflow(x, ym, z, A), 0.75);
+  d = smin(d, laInflow(x, ym, z, A), 0.6);
   d = clipAtAnnulus(d, x, ym, z, M, MV_N, MV_R + 0.6);               // LA ends at the mitral annulus
   const s = iasAt(x, y, z, A);
   d = smax(d, s.s + s.t, 0.12);                                      // cut by the septum
@@ -1896,7 +1920,9 @@ function dRAlumen(x, y, z, A, folds = true) {
   // the crista terminalis and the Eustachian valve are folds of the RA wall: carved
   // from the lumen, so they stay continuous with the wall in every plane
   if (folds && A.crista && d > -0.9) d = smax(d, -dCrista(x, y, z, A), 0.1);
-  if (folds && A.eustachianRim && d > -0.9) d = smax(d, -dEustachian(x, y, z, A), 0.04);
+  // (the valve is filleted into the wall at its base: thin as it is, a plane that
+  // cuts it near its root then still shows it rising from the wall)
+  if (folds && A.eustachianRim && d > -0.9) d = smax(d, -dEustachian(x, y, z, A), 0.12);
   return d;
 }
 // Vertical offset of the live mitral annulus (and everything hinged on it) from
@@ -1961,28 +1987,53 @@ function dCrista(x, y, z, A) {
   }
   return d;
 }
-// Coumadin (warfarin) ridge, carved from the LA lumen: s along the inward
-// normal from the wall root, a across the blade (LSPV -> LAA), t along the ridge.
-// In any section across it the ridge is a stalk RIDGE.r0 thick, rising from
-// inside the wall (s = -RIDGE.back) to a bulb of radius RIDGE.rb (the "Q-tip").
-// Along t it is a crescent: it follows the curvature of the atrial wall
-// (RIDGE.R, so it never spans a chord of the cavity) and its height above the
-// wall falls from RIDGE.len at its middle to nothing at the ends of RIDGE.run,
-// where it merges with the wall — so an oblique cut through it always reaches
-// the wall in the plane.
-export const RIDGE = { len: 0.7, r0: 0.13, rb: 0.28, run: [-0.8, 1.9], back: 0.8, R: 2.2 };
-function dRidge(x, y, z, A) {
+// Coumadin (warfarin) ridge, carved from the LA lumen. It is the wall between
+// the LAA and LSPV mouths: it rises from the crotch where their lumens part and
+// ends in a bulbous tip (the "Q-tip") at about the level of the atrial wall, so
+// that its length from the crotch is RIDGE.len (~0.8-1 cm) while it stands only
+// a little proud of the body wall (~1-5 mm, more as the LA fills and the crotch
+// shallows). (Standing 0.6-0.7 cm into the cavity it was cut as a free bar, or a
+// 2 cm shelf, by every plane that runs near the lateral LA wall: ME AV LAX, A5C.)
+// Coordinates: s, the height above the LA body wall (the body lumen's own
+// distance, so the blade follows the real wall, never a chord across the
+// cavity); a, across the blade (LSPV -> LAA); t, along the ridge, which spans the
+// posterior rim of the LAA ostium (RIDGE.run) and merges with the wall at its
+// ends. In any section across it the ridge is a stalk RIDGE.r0 thick, rising
+// from inside the wall (s = -RIDGE.back) to a bulb of radius RIDGE.rb; RIDGE.k
+// fillets it into the wall. reach: how far along the inward normal it may lie.
+export const RIDGE = { len: 0.83, r0: 0.13, rb: 0.28, run: [-1.0, 1.1], back: 0.8, reach: 0.9, k: 0.22 };
+function dRidge(x, y, z, A, dB) {
   const g = A.pv.ridge, dx = x - g.root[0], dy = y - g.root[1], dz = z - g.root[2];
   const t = dx * g.t[0] + dy * g.t[1] + dz * g.t[2];
   const tm = 0.5 * (RIDGE.run[0] + RIDGE.run[1]), th = 0.5 * (RIDGE.run[1] - RIDGE.run[0]);
-  const u = (t - tm) / th;
-  if (u <= -1 || u >= 1) return Math.max(0.05, (Math.abs(t - tm) - th));
-  const s = dx * g.n[0] + dy * g.n[1] + dz * g.n[2] - t * t / (2 * RIDGE.R);
+  const over = Math.abs(t - tm) - th;                              // (beyond the ends of the run)
+  if (over > 0.6) return over;
+  const sn = dx * g.n[0] + dy * g.n[1] + dz * g.n[2];
+  if (sn > RIDGE.reach + 0.6) return sn - RIDGE.reach;             // (only at the lateral wall)
   const a = dx * g.e[0] + dy * g.e[1] + dz * g.e[2];
-  const top = RIDGE.len * Math.sqrt(1 - u * u);
+  if (Math.abs(a) > 1.2) return Math.abs(a) - RIDGE.rb;
+  const s = -(dB === undefined ? dLAlumen(x, y, z, A, true) : dB);
+  const u = Math.max(-1, Math.min(1, (t - tm) / th));
+  const top = g.top0 * Math.sqrt(1 - u * u);
   const sb = top - RIDGE.rb;
   const sc = s < -RIDGE.back ? -RIDGE.back : s > sb ? sb : s;
-  return Math.min(Math.hypot(s - sc, a) - RIDGE.r0, Math.hypot(s - sb, a) - RIDGE.rb);
+  let d = Math.min(Math.hypot(s - sc, a) - RIDGE.r0, Math.hypot(s - sb, a) - RIDGE.rb);
+  // (a true distance off the ends of the run and beyond the reach, so the fillet
+  // blend only ever acts round the ridge itself)
+  if (over > 0) d = d > 0 ? Math.hypot(d, over) : over;
+  return Math.max(d, sn - RIDGE.reach);
+}
+// The ridge's height on the live atrium: the crotch is found from its root along
+// the inward normal (the first point without LA blood on both sides of the blade,
+// 0.4 cm out; as the audit measures it), and the tip set RIDGE.len above it.
+function seatRidge(A) {
+  const g = A.pv.ridge, inLA = (q) => dLAlumen(q[0], q[1], q[2], A) < 0;
+  const both = (h) => { const c = mad(g.root, g.n, h); return inLA(mad(c, g.e, 0.4)) && inLA(mad(c, g.e, -0.4)); };
+  let lo = 0, hi = 0;                                    // march down from the root, then bisect
+  for (; hi > -2.5; lo = hi, hi -= 0.1) if (!both(hi)) break;
+  for (let i = 0; i < 10; i++) { const m = 0.5 * (lo + hi); if (both(m)) lo = m; else hi = m; }
+  g.crotch = lo;
+  g.top0 = Math.max(0, RIDGE.len + lo);
 }
 function dEustachian(x, y, z, A) {
   const segs = A.eustachianRim, c = segs.c;
@@ -2153,6 +2204,7 @@ export function lumenDist(x, y, z, A, which) {
     case 'RV': return dRVlumen(x, y, z, A);
     case 'LA': return dLAlumen(x, y, z, A);
     case 'LA_BODY': return dLAlumen(x, y, z, A, true);
+    case 'LA_NOFOLD': return dLAlumen(x, y, z, A, false, false);     // (without the coumadin ridge)
     case 'LAA': return dAppendage(x, y, z, A.la.aa, 0.22);            // the appendage tube alone
     case 'PV': return dPV(x, y, z, A);                                 // the four vein tubes alone
     case 'LV_EPI': return lvEpi(x, y, z, A);                           // LV epicardium (wall + cavity)

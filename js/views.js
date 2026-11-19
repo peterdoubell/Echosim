@@ -302,18 +302,21 @@ export const TTE_VIEWS = {
 // tricuspid inflow axis and tilts off it: rolled RVIT_ROLL deg from the CS
 // ostium direction, tilted RVIT_TILT deg off the axis, and set RVIT_CS_W of the
 // way from the IVC orifice to the CS ostium. It cuts no septum or LV (the old
-// plane through the septal-hugging ostia cut 13-19 % septum), keeps the CS
-// ostium within ~0.3 cm and the TV centre within ~0.2 cm, and leaves no great
-// artery in the far field. (The planes that also hold the IVC axis as a tube all
-// cut the aortic root, ~9 cm2: the IVC is aimed at the upper septum. Here the
-// IVC enters ~36 deg across the plane, its orifice cut.)
+// plane through the septal-hugging ostia cut 13-19 % septum) and stays >= 0.15 cm
+// off the convex septum through the cycle (rolled 30 / tilted 12 / CS weight 0.7
+// it lay tangent to it at end-diastole, and the grazed septum and the anterior
+// papillary muscle read as a free 3 cm2 RV mass); it keeps the CS ostium within
+// ~0.4 cm, cuts the Eustachian ridge between the CS and the IVC, and leaves no
+// great artery in the far field (rolled 35 / tilted 15 it cuts ~9 cm2 of the
+// aortic root). The IVC, near vertical, crosses this tilted long-axis plane at
+// ~40 deg (as it crosses the PLAX): its mouth is cut, not a length of tube.
 // Within it the beam runs posteriorly from the chest wall, swung RVIT_SWING
 // toward the inflow axis (the probe angled inferomedially toward the right hip),
 // so the beam crosses the valve from the RV into the RA, meeting the tricuspid
-// inflow within ~10 deg (the default tricuspid-inflow PW trace).
+// inflow within ~14 deg (the default tricuspid-inflow PW trace).
 // RV apex to the left of the screen, base (RA) to the right, as in the PLAX.
 // (15.5 cm deep: the whole RA, up to its roof, inside the sector.)
-const RVIT_ROLL = 30, RVIT_TILT = 12, RVIT_SWING = 40, RVIT_CS_W = 0.7;    // deg, deg, deg, fraction
+const RVIT_ROLL = 26, RVIT_TILT = 14, RVIT_SWING = 40, RVIT_CS_W = 0.6;    // deg, deg, deg, fraction
 const csOstium = (A) => A.cs[A.cs.length - 1].b;
 let _rvit = null;
 function rvInflowProbe() {
