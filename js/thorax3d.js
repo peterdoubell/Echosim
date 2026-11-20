@@ -46,7 +46,7 @@ export const CONTEXT_BOX = (() => {
 // Oesophagus: the tube the TEE probe travels in, through the mid-oesophageal
 // and descending-aorta probe stations, down through the hiatus to the cardia
 // (and the transgastric probe station in the stomach); radius ~0.8 cm.
-function oesophagusPath() {
+export function oesophagusPath() {
   const me = TEE_VIEWS.ME4C.probe().pos, da = TEE_VIEWS.DESCAO.probe().pos, tg = TEE_VIEWS.TGSAX.probe().pos;
   const top = mad(me, S, 13);
   const hiatus = mad(mad(da, S, -4.2), L, 0.6);

@@ -393,7 +393,11 @@ function subcostalIvcProbe() {
 }
 // Suprasternal notch: the aortic arch in long axis, the ascending aorta on the
 // left of the screen and the descending aorta on the right, with the right
-// pulmonary artery in cross-section beneath the arch.
+// pulmonary artery in cross-section beneath the arch. The arch is planar (ARCH
+// in anatomy.js), so the plane through the top of the ascending aorta, the arch
+// and DTA_TOP is the arch's own plane: the candy cane opens below the summit,
+// and beyond the descending limb lies the left lung, which wraps the descending
+// aorta posterolaterally (edge-on to the beam, so it shows no pleural line).
 function suprasternalProbe() {
   const asc = LM.AO_ASC_TOP, arch = LM.AO_ARCH_MID, desc = LM.DTA_TOP;
   const n = norm(vcross(vsub(asc, arch), vsub(desc, arch)));
