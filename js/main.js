@@ -17,6 +17,8 @@ import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, makeProbe, teeManipulate, teeOmni } 
 import { Heartbeat, vcgToLeads, LEAD_NAMES, PH_AVO, PH_AVC, PH_MVO, PH_ATR } from './electrophysiology.js';
 import { RWMA_SCENARIOS, DCM_SEVERITIES } from './scenarios.js';
 import { PlaybackClock } from './playback-clock.js';
+// (a case's own heart rate, the tamponade breath and swinging heart)
+import { hemodynamics, heartRate, breathPath, swingOffset, TAMPONADE_HR } from './cardiac-model.js';
 
 // ---------------------------------------------------------------------------
 // Standard echocardiographic windows: derived from the anatomy landmarks in
@@ -55,8 +57,9 @@ const PATHOLOGY = {
     text: 'After a myocardial infarction one territory stops contracting. <span class="cue">Watch the <b>septal</b> wall fail to thicken and move inward in systole while the other walls contract normally — regional, not global, dysfunction. Overall EF is reduced.</span>' },
   effusion: { flags: { effusion: true }, view: 'PLAX', name: 'Pericardial effusion',
     text: 'Fluid collects in the pericardial sac. <span class="cue">An echo-free (black) space surrounding the heart, typically first seen posteriorly/inferiorly.</span>' },
-  tamponade: { flags: { effusion: true, tamponade: true }, view: 'A4C', name: 'Cardiac tamponade',
-    text: 'The effusion is under pressure: the pericardial pressure exceeds the right heart\'s filling pressure. <span class="cue">The RA free wall <b>inverts</b> from late diastole into systole and the RV free wall is pushed in in early diastole; the IVC is plethoric; mitral and tricuspid inflow swing in opposite directions with respiration (PW shows several breaths).</span>' },
+  // (hr: the sinus tachycardia its circulation is solved at; loading the case sets the rate)
+  tamponade: { flags: { effusion: true, tamponade: true, hr: TAMPONADE_HR }, view: 'A4C', name: 'Cardiac tamponade',
+    text: 'The effusion is under pressure: the pericardial pressure exceeds the right heart\'s filling pressure. <span class="cue">Sinus tachycardia. The RA free wall <b>inverts</b> from the end of atrial contraction into systole and the RV free wall is pushed in in early diastole; the IVC is plethoric. With each breath the septum swings toward the LV in inspiration and back in expiration, and mitral and tricuspid inflow swing in opposite directions (PW shows a breath of three beats); the heart swings in the fluid, with alternating QRS voltage (electrical alternans).</span>' },
   vsd: { flags: { vsd: true }, view: 'A4C', name: 'Ventricular septal defect',
     text: 'A hole in the interventricular septum shunts blood LV → RV. <span class="cue">A turbulent systolic jet crossing the septum at high velocity (left-to-right shunt).</span>' },
   asd: { flags: { asd: true }, view: 'SUBCOSTAL', name: 'Atrial septal defect',
@@ -76,7 +79,7 @@ const CHECKS = {
   dcm:      { look: ['Enlarged rounded LV', 'Little wall thickening', 'Low EF'], hint: 'Compare LVIDd and EF in Measurements against a normal heart.' },
   rwma:     { look: ['One akinetic wall segment', 'Thinned, bright scar', 'Normal thickening elsewhere', 'Reduced global EF'], hint: 'Pause in systole and watch the septum fail to thicken while the lateral wall does.' },
   effusion: { look: ['Echo-free rim around the heart', 'Largest posteriorly', 'Anterior to the descending aorta'], hint: 'Look behind the LV posterior wall for the dependent black crescent.' },
-  tamponade: { look: ['RA free-wall inversion (> 1/3 of the cycle)', 'RV early-diastolic collapse', 'Plethoric IVC', 'Mitral E falls > 25% in inspiration, tricuspid E rises > 40%'], hint: 'A4C: scrub through late diastole and early systole to catch the RA wall folding in; then PW the mitral and tricuspid inflow over several breaths.' },
+  tamponade: { look: ['Sinus tachycardia', 'RA free-wall inversion (> 1/3 of the cycle)', 'RV early-diastolic collapse', 'Plethoric IVC', 'Inspiratory septal shift toward the LV', 'Mitral E falls > 25% in inspiration, tricuspid E rises > 40%', 'Swinging heart with electrical alternans'], hint: 'A4C: scrub through late diastole and early systole to catch the RA wall folding in; watch the septum and the RV across a breath; then PW the mitral and tricuspid inflow over several breaths.' },
   vsd:      { look: ['Interventricular septum', 'Systolic jet LV→RV', 'Turbulent mosaic'], hint: 'Centre the septum and pause in systole to catch the trans-septal jet.' },
   asd:      { look: ['Interatrial septum', 'Flow LA→RA', 'Dilated right heart'], hint: 'Use the subcostal window where the atrial septum lies across the beam.' },
   tr:       { look: ['Tricuspid valve', 'Systolic jet into the RA', 'Peak jet velocity → PA pressure'], hint: 'Peak TR velocity estimates pulmonary pressures — read it off the trace.' },
@@ -101,6 +104,8 @@ const state = {
   phase: 0,
   playing: true,
   hr: 72,
+  beat: 0,         // the playing beat's number (the rhythm engine's count)
+  caseHr: null,    // the heart rate a loaded case brought with it (tamponade)
   az: 0, tilt: 0, slide: 0,
   // TEE probe manipulation (views.js teeManipulate): omniplane angle (null = the
   // view's own), advance (+) / withdraw (cm), shaft turn and tip flexion (deg)
@@ -329,6 +334,23 @@ function drawTwelveLead() {
 }
 
 // ---------------------------------------------------------------------------
+// The beat's geometry. Tamponade (review 12, MOT-2 / PAT-9): the B-mode breathes
+// on the spectral display's schedule — a breath of three beats, expiration,
+// inspiration, expiration, counted from playback — each beat drawn from its
+// respiratory phase's solved circulation, blended into the next across diastole
+// (breathPath), and the heart swings in the effusion with a two-beat period
+// (swingOffset), which the ECG's alternans follows. Other cases: the case's own
+// circulation.
+// ---------------------------------------------------------------------------
+function beatGeometry(phase, beat) {
+  const G = geometryAt(phase, breathPath(state.path, beat, phase));
+  const sw = swingOffset(state.path, beat, phase);
+  if (sw) G.swing = sw;
+  G.beat = beat;   // (the spectral display's cursor marks this beat of the breath)
+  return G;
+}
+
+// ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
 let lastBannerT = 0;   // throttle for the probe-banner frame-rate readout
@@ -349,13 +371,15 @@ function loop(now) {
     // (electromechanical coupling), so an irregular rhythm (AF, PVC) makes the
     // heart beat — and the echo move — irregularly.
     playback.advance(dt);
-    state.phase = heart.mechanical().phase;
+    const mech = heart.mechanical();
+    state.phase = mech.phase;
+    state.beat = mech.beat;
     const scrub = document.getElementById('scrub');
     scrub.value = Math.round(state.phase * 1000);
     scrub.setAttribute('aria-valuetext', Math.round(state.phase * 100) + '% — ' + phaseName(state.phase));
   }
 
-  const G = geometryAt(state.phase, state.path);
+  const G = beatGeometry(state.phase, state.beat);
   const probe = effectiveProbe(G.A);
 
   echo.depthCm = state.depthCm || 17;
@@ -502,8 +526,9 @@ function drawPvLoop(G) {
   pvCtx.strokeStyle = '#c0392b'; pvCtx.lineWidth = 1.8; pvCtx.beginPath();
   _pv.pts.forEach((p, i) => { const px = x(p.V), py = y(p.P); i ? pvCtx.lineTo(px, py) : pvCtx.moveTo(px, py); });
   pvCtx.closePath(); pvCtx.stroke();
-  // operating-point marker at the current phase (from the live per-frame snapshot)
-  const hd = G && G.hemo;
+  // operating-point marker at the current phase (from the live per-frame snapshot;
+  // a tamponade beat's own breath state sits off the case's loop: read the case)
+  const hd = G && G.path !== state.path && G.hemo ? hemodynamics(state.phase, state.path) : G && G.hemo;
   if (hd && hd.Vlv != null && hd.Plv != null) {
     pvCtx.fillStyle = '#39c0e8';
     pvCtx.beginPath(); pvCtx.arc(x(hd.Vlv), y(hd.Plv), 3.4, 0, Math.PI * 2); pvCtx.fill();
@@ -794,9 +819,21 @@ function syncScenarioControls(key) {
   }
   if (isDcm) dcmSelect.value = state.path.dcmSeverity || 'severe';
 }
+// set the heart rate (control, readouts, rhythm engine)
+function setHeartRate(hr) {
+  state.hr = hr;
+  heart.setHR(hr);
+  setRange('hr', hr, 'hrOut', String(hr), hr + ' bpm');
+  const ro = document.getElementById('hrReadout'); if (ro) ro.textContent = hr + ' bpm';
+}
 function syncCaseModel() {
   heart3d.setPathology(state.path);
   heart.setPathology(state.path);
+  // a case solved at its own heart rate (tamponade's sinus tachycardia) brings
+  // that rate with it; leaving such a case restores the default
+  const caseHr = state.path.hr || (heartRate(state.path) !== 72 ? heartRate(state.path) : null);
+  if (caseHr || state.caseHr) setHeartRate(caseHr || 72);
+  state.caseHr = caseHr;
   // Repaint the retained beat history with the new morphology, including when
   // paused, without moving the shared clock or mixing two different regions.
   vcgHead = vcgFilled = 0;
@@ -999,11 +1036,8 @@ document.getElementById('resetPlane').addEventListener('click', () => { setView(
 // Reset all — restore gain, nyquist, depth, HR, plane offsets and toggles to defaults
 const DEFAULTS = { hr: 72, depth: 15, gain: 1.0, nyq: 0.62 };
 function resetAll() {
-  // heart rate
-  state.hr = DEFAULTS.hr;
-  heart.setHR(state.hr);
-  setRange('hr', DEFAULTS.hr, 'hrOut', String(DEFAULTS.hr), DEFAULTS.hr + ' bpm');
-  document.getElementById('hrReadout').textContent = DEFAULTS.hr + ' bpm';
+  // heart rate (a case solved at its own rate — tamponade — resets to that rate)
+  setHeartRate(state.caseHr || DEFAULTS.hr);
   // imaging — depth is view-appropriate so the heart fills the field of view
   const dep = viewDepth(state.viewName);
   state.depthCm = dep; echo.depthCm = dep;

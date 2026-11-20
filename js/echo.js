@@ -10,6 +10,9 @@ import { classify, velocityAt, geometryAt, hemoSummary, hemodynamics, TISSUE, VA
 import { LM, rapEstimate, diaphragmBelow, rwmaBlend, lumenDist, hepaticVeinSegs } from './anatomy.js';
 import { clamp } from './mathutils.js';
 import { ALL_VIEWS } from './views.js';
+// (a case on its own cycle — tamponade's tachycardia — and its breath)
+import { phaseOfTime, timeOfPhase, respPath, SWING_LAST } from './cardiac-model.js';
+import { alternansGain } from './electrophysiology.js';
 
 // Human-readable labels for the flow compartment that produced the frame's peak
 // velocity (surfaced to the UI as metrics.peakLabel for teaching context).
@@ -365,9 +368,10 @@ const dopF = (fImg) => (fImg > 4 ? 3.8 : 2.0);
 // PRF <= c / (2 d), v_N = PRF c / (4 f0) = c^2 / (8 f0 d).
 const nyqLimit = (dCm, fMHz) => (1540 * 1540) / (8 * fMHz * 1e6 * Math.max(0.5, dCm) / 100);
 // Stand-in lead-II ECG (mV) over one cycle, phase 0 = QRS / mitral closure.
-function ecgAt(ph) {
+// qrs scales the QRS (electrical alternans: alternate beats of a swinging heart).
+function ecgAt(ph, qrs = 1) {
   const w = (c, s) => { let d = ph - c; d -= Math.round(d); return Math.exp(-(d / s) * (d / s)); };
-  return 0.14 * w(0.77, 0.022) - 0.12 * w(0.975, 0.006) + 1.0 * w(0.988, 0.006) - 0.25 * w(0.004, 0.007) + 0.3 * w(0.31, 0.045);
+  return 0.14 * w(0.77, 0.022) + qrs * (-0.12 * w(0.975, 0.006) + 1.0 * w(0.988, 0.006) - 0.25 * w(0.004, 0.007)) + 0.3 * w(0.31, 0.045);
 }
 // deterministic hash -> [0,1)
 function hash01(a, b) {
@@ -790,11 +794,14 @@ export class EchoView {
 
         // scatterers at this sample's material coordinates
         let mx = wx, my = wy, mz = wz, salt = 0;
+        // (a swinging heart carries its scatterers: the point of the heart drawn
+        // here, classify's displacement)
+        if (G.swing) { mx += SWING_LAST.dx; my += SWING_LAST.dy; mz += SWING_LAST.dz; }
         const isBloodK = kind === TISSUE.LV || kind === TISSUE.RV || kind === TISSUE.LA ||
                          kind === TISSUE.RA || kind === TISSUE.AORTA;
         if (isBloodK) salt = bloodSalt;
-        else if (wy < baseY + 0.3) { my = apxY + (wy - apxY) * lsyInv; mx *= rS; mz *= rS; }
-        else my = wy - dMy;
+        else if (my < baseY + 0.3) { my = apxY + (my - apxY) * lsyInv; mx *= rS; mz *= rS; }
+        else my = my - dMy;
         const ix = Math.floor(mx * SCAT_CELL), iy = Math.floor(my * SCAT_CELL), iz = Math.floor(mz * SCAT_CELL);
         const gI = scatGauss(ix, iy, iz, salt), gQ = scatGauss(ix, iy, iz, salt ^ 0x5bd1e995);
 
@@ -2166,8 +2173,14 @@ export class EchoView {
     ctx.beginPath(); ctx.moveTo(0, zeroY); ctx.lineTo(W, zeroY); ctx.stroke();
     const nb = S.nb || 1;
     ctx.strokeStyle = 'rgba(255,90,77,0.8)';
+    // (the cursor at the frame's time in the cycle: timeOfPhase, the identity at 72 bpm)
+    const tNow = ((timeOfPhase(G.phase, path) % 1) + 1) % 1;
+    // (a breath of several beats: the cursor sits in the beat the B-mode is
+    // playing — G.beat, the rhythm engine's count, on the same breath)
+    const bNow = nb > 1 && G.beat != null ? ((G.beat % nb) + nb) % nb : -1;
     for (let b = 0; b < nb; b++) {
-      const cxp = ((G.phase % 1) + b) / nb * W;
+      if (bNow >= 0 && b !== bNow) continue;
+      const cxp = (tNow + b) / nb * W;
       ctx.beginPath(); ctx.moveTo(cxp, 0); ctx.lineTo(cxp, H); ctx.stroke();
     }
     if (nb > 1) {                                   // respiratory phase of each beat
@@ -2258,7 +2271,9 @@ export class EchoView {
     for (let c = 0; c < cols; c++) {
       start[c] = n;
       const u = c * nb / cols, bi = Math.min(nb - 1, Math.floor(u));
-      const Gp = geometryAt(nb > 1 ? u - bi : c / cols, beats[bi]);
+      // (the columns are uniform in TIME: a case on its own cycle maps time to
+      // its cardiac phase — phaseOfTime, the identity at 72 bpm)
+      const Gp = geometryAt(phaseOfTime(nb > 1 ? u - bi : c / cols, beats[bi]), beats[bi]);
       let best = 0;
       for (const ln of lines) for (const dd of offs) {
         const vel = velocityAt(P[0] + ln[0] + dir[0] * dd, P[1] + ln[1] + dir[1] * dd, P[2] + ln[2] + dir[2] * dd, Gp, beats[bi]);
@@ -2286,7 +2301,14 @@ export class EchoView {
     ctx.strokeStyle = 'rgba(90,230,120,0.85)';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    for (let x = 0; x <= W; x += 1) { const y = mid - ecgAt((x / W * nb) % 1) * amp; if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }
+    // (time across the strip: phaseOfTime; QRS alternans on alternate beats, from
+    // the R of the beat ending each column's cycle)
+    const ePath = (G && G.path) || {};
+    for (let x = 0; x <= W; x += 1) {
+      const u = x / W * nb, b = Math.min(nb - 1, Math.floor(u)), t = u - b, ph = phaseOfTime(t, ePath);
+      const y = mid - ecgAt(ph, alternansGain(ePath, ph > 0.5 ? b + 1 : b)) * amp;
+      if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
     ctx.stroke();
     const rr = (this.rrSec || 0.833) * nb;
     ctx.strokeStyle = 'rgba(150,200,240,0.55)';
@@ -2310,7 +2332,8 @@ function specBeats(path) {
   if (!path || !path.tamponade) return [path];
   let b = _beatCache.get(path);
   if (!b) {
-    const ex = { ...path, resp: 'exp' }, ins = { ...path, resp: 'insp' };
+    // (the breath of hemodynamics breathOf, which the B-mode plays by the beat count)
+    const ex = respPath(path, 'exp'), ins = respPath(path, 'insp');
     b = [ex, ins, ex];
     _beatCache.set(path, b);
   }

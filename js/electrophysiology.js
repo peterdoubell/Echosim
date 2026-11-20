@@ -19,6 +19,7 @@
 
 import { clamp } from './mathutils.js';
 import { rwmaScenario } from './scenarios.js';
+import { caseTiming } from './hemodynamics.js';
 
 // Inverse-Dower coefficients: lead = row · [X, Y, Z]  (Frank VCG axes:
 // X = right→left, Y = superior→inferior, Z = posterior→anterior).
@@ -97,7 +98,7 @@ function applyMorphology(W, path, rhythm, beatType) {
     W.R.a = [W.R.a[0] * 0.85, W.R.a[1] * 0.85, W.R.a[2] * 0.85];
     W.R.s = 0.030;                                        // mild widening
   }
-  // --- pericardial effusion: low voltage (± electrical alternans handled by beat) ---
+  // --- pericardial effusion: low voltage (electrical alternans: Heartbeat._waves) ---
   if (path.effusion) {
     for (const k of ['P', 'Q', 'R', 'S', 'T']) W[k].a = W[k].a.map((v) => v * 0.5);
   }
@@ -143,6 +144,12 @@ function vcgAtBeat(tr, W, out) {
   return out;
 }
 
+// Electrical alternans of a swinging heart (tamponade): QRS voltage x1 on the
+// even beats (the heart nearest the chest wall at the QRS) and x ALTERNANS on the
+// odd ones, ~20 % lower (cardiac-model swingOffset puts the heart there).
+export const ALTERNANS = 0.8;
+export function alternansGain(path, n) { return path && path.tamponade && (n & 1) ? ALTERNANS : 1; }
+
 // ---------------------------------------------------------------------------
 // Heart-rate warp of the mechanical cycle.
 //
@@ -176,27 +183,36 @@ export function lvetAt(hr) { return clamp(0.413 - 0.0017 * hr, 0.18, 0.36); }
 const LVET_REF = lvetAt(60 / REF_RR);
 
 // Reference mechanical phase [0, 1) at time tp (s) since contraction onset
-// (QRS + electromechanical delay) in a beat whose R-R is rr (s).
-export function mechPhase(tp, rr) {
-  let ivct = PH_AVO * REF_RR;
-  let ej = (PH_AVC - PH_AVO) * REF_RR * lvetAt(60 / rr) / LVET_REF;
-  let ivrt = (PH_MVO - PH_AVC) * REF_RR;
+// (QRS + electromechanical delay) in a beat whose R-R is rr (s). tm: the timing
+// of a case whose circulation is solved on its own cycle (hemodynamics
+// caseTiming: its cycle tm.rr and its events as fractions of it — tamponade's
+// sinus tachycardia); the same warp then runs from that trace, so at the case's
+// own rate it is the identity in time, and the result is its cardiac phase
+// (tm.phaseOf: hemodynamics phaseOfTime). Without tm, the reference trace (unchanged).
+export function mechPhase(tp, rr, tm = null) {
+  const T = tm ? tm.rr : REF_RR, avo = tm ? tm.avo : PH_AVO, avc = tm ? tm.avc : PH_AVC;
+  const mvo = tm ? tm.mvo : PH_MVO, atrP = tm ? tm.atr : PH_ATR;
+  let ivct = avo * T;
+  let ej = (avc - avo) * T * lvetAt(60 / rr) / (tm ? lvetAt(60 / T) : LVET_REF);
+  let ivrt = (mvo - avc) * T;
   // very fast rates: keep at least ~28 % of the cycle for filling
   const sys = ivct + ej + ivrt, cap = 0.72 * rr;
   if (sys > cap) { const f = cap / sys; ivct *= f; ej *= f; ivrt *= f; }
   const dia = rr - (ivct + ej + ivrt);
-  const atr = Math.min((1 - PH_ATR) * REF_RR, 0.5 * dia);
+  // (atrial systole takes at most half of diastole, or the trace's own share of it)
+  const atr = Math.min((1 - atrP) * T, Math.max(0.5, (1 - atrP) / (1 - mvo)) * dia);
   const early = dia - atr;
   // piecewise-linear: [segment duration, phase at start, phase at end]
   const t = Math.max(0, tp);
   let t0 = 0;
-  const segs = [[ivct, 0, PH_AVO], [ej, PH_AVO, PH_AVC], [ivrt, PH_AVC, PH_MVO],
-    [early, PH_MVO, PH_ATR], [atr, PH_ATR, 1]];
+  const segs = [[ivct, 0, avo], [ej, avo, avc], [ivrt, avc, mvo],
+    [early, mvo, atrP], [atr, atrP, 1]];
+  const out = (x) => clamp(tm ? tm.phaseOf(x) : x, 0, 0.999);
   for (const [d, p0, p1] of segs) {
-    if (t < t0 + d) return clamp(p0 + (p1 - p0) * (t - t0) / d, 0, 0.999);
+    if (t < t0 + d) return out(clamp(p0 + (p1 - p0) * (t - t0) / d, 0, 0.999));
     t0 += d;
   }
-  return 0.999;
+  return out(0.999);
 }
 
 // ---------------------------------------------------------------------------
@@ -207,7 +223,9 @@ export class Heartbeat {
     this.hr = 72;
     this.rhythm = 'sinus';   // sinus | afib | brady | tachy | avblock1 | pvc | lbbb | rbbb | stemi | hyperk
     this.path = {};
-    this._beats = [];        // recent beat onsets: {t, rr, type, W}
+    this._beats = [];        // recent beat onsets: {t, rr, type, W, n}
+    this._n = 0;             // beats generated so far (each beat's number n)
+    this._timing = null;     // a case solved on its own cycle (hemodynamics caseTiming)
     this._t = 0;
     this._nextAt = 0;
     this._seed = 987654321;
@@ -247,8 +265,9 @@ export class Heartbeat {
   _genBeat(atT) {
     const prev = this._beats.length ? this._beats[this._beats.length - 1].type : 'normal';
     const sched = this._scheduleNext(prev, atT);
+    sched.n = this._n++;
     const W = this._waves(sched);
-    const beat = { t: atT, rr: sched.rr, type: sched.type, W };
+    const beat = { t: atT, rr: sched.rr, type: sched.type, W, n: sched.n };
     this._beats.push(beat);
     // Keep time, not a fixed beat count: six beats are less than three seconds
     // at tachycardic rates and cannot repaint the full ECG when a case changes.
@@ -267,6 +286,14 @@ export class Heartbeat {
     const rrC = clamp(sched.rr, 0.3, 1.5) / 0.857;
     W.T.t0 *= Math.sqrt(rrC);
     W.T.s *= Math.cbrt(rrC);
+    // electrical alternans (tamponade): the heart swinging in a large effusion
+    // with a two-beat period sits nearer the chest wall at every other QRS, so the
+    // QRS voltage alternates (cardiac-model swingOffset: the near beats are the
+    // even ones)
+    if (this.path.tamponade && sched.type !== 'pvc') {
+      const k = alternansGain(this.path, sched.n);
+      for (const key of ['Q', 'R', 'S', 'R2']) if (W[key]) W[key].a = W[key].a.map((v) => v * k);
+    }
     return W;
   }
 
@@ -318,14 +345,16 @@ export class Heartbeat {
     for (let j = 0; j < this._beats.length; j++) if (this._beats[j].t <= this._t + 1e-6) i = j;
     let cur = this._beats[i];
     if (this._t - cur.t < this._emDelay && i > 0) cur = this._beats[i - 1];
-    const phase = mechPhase(this._t - cur.t - this._emDelay, cur.rr);
-    return { phase, rr: cur.rr, beatType: cur.type };
+    const phase = mechPhase(this._t - cur.t - this._emDelay, cur.rr, this._timing);
+    // beat: the beat's number (the tamponade breath schedule and swing count beats)
+    return { phase, rr: cur.rr, beatType: cur.type, beat: cur.n };
   }
 
   setHR(hr) { this.hr = hr; }
   setRhythm(r) { this.rhythm = r; }
   setPathology(p) {
     this.path = p || {};
+    this._timing = caseTiming(this.path);
     // Apply the selected region to the current beat immediately without
     // restarting time or disturbing the rhythm/mechanical phase.
     for (const beat of this._beats) beat.W = this._waves(beat);

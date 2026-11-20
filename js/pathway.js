@@ -298,7 +298,7 @@ export const MODULES = [
     ],
     learn: [
       'Effusion size (maximal end-diastolic depth): < 1 cm small, 1–2 cm moderate, > 2 cm large.',
-      'Tamponade signs: RA systolic collapse, RV diastolic collapse, plethoric IVC, respiratory variation in mitral E > 25% / tricuspid E > 40%. It is a clinical diagnosis.',
+      'Tamponade signs: RA systolic collapse, RV diastolic collapse, plethoric IVC, respiratory variation in mitral E > 25% / tricuspid E > 40% with the septum shifting toward the LV in inspiration; in a large effusion the heart may swing, with electrical alternans. Sinus tachycardia and pulsus paradoxus are the bedside signs. It is a clinical diagnosis.',
       'In PLAX, pericardial fluid lies <b>anterior</b> to the descending aorta; pleural fluid extends posterior to it.',
       'ASD: secundum (commonest, fossa ovalis), primum (part of AVSD, cleft mitral leaflet), sinus venosus (often with anomalous right pulmonary venous drainage), coronary sinus.',
       'VSD: perimembranous (commonest in adults), muscular, outlet, inlet. A restrictive VSD has a high-velocity jet (large LV–RV gradient, normal RV pressure).',
@@ -306,7 +306,7 @@ export const MODULES = [
     ],
     tasks: [
       { id: 'eff', text: 'Load pericardial effusion in PLAX; measure the echo-free depth at end-diastole and relate it to the descending aorta.', sim: { path: 'effusion', view: 'PLAX' } },
-      { id: 'tamp', text: 'Load cardiac tamponade in A4C: scrub through late diastole into early systole to see the RA free wall fold in, and early diastole for the RV free wall; then read the mitral PW over the breath and the plethoric IVC (subcostal IVC view).', sim: { path: 'tamponade', view: 'A4C' } },
+      { id: 'tamp', text: 'Load cardiac tamponade in A4C (sinus tachycardia): watch the septum shift toward the LV on each inspiratory beat and the heart swing in the fluid; scrub from the end of atrial contraction into early systole to see the RA free wall fold in, and early diastole for the RV free wall; then read the mitral PW over the breath and the plethoric IVC (subcostal IVC view).', sim: { path: 'tamponade', view: 'A4C' } },
       { id: 'asd', text: 'Load the atrial septal defect in the subcostal view and find the shunt with colour; then look at RV size in A4C.', sim: { path: 'asd', view: 'SUBCOSTAL' } },
       { id: 'vsd', text: 'Load the VSD and catch the systolic jet crossing the septum.', sim: { path: 'vsd', view: 'A4C' } },
     ],
@@ -320,7 +320,7 @@ export const MODULES = [
       { q: 'A primum ASD is associated with:', options: ['A cleft anterior mitral leaflet', 'Anomalous pulmonary venous drainage', 'Ebstein anomaly', 'Pulmonary stenosis'], answer: 0, explain: 'Primum ASD is a partial atrioventricular septal defect, typically with a cleft mitral leaflet.' },
       { q: 'A VSD jet peak velocity of 5 m/s indicates:', options: ['A restrictive defect with normal RV systolic pressure', 'A large non-restrictive defect', 'Eisenmenger physiology', 'Severe pulmonary hypertension'], answer: 0, explain: '4 × 5² = 100 mmHg LV–RV gradient: RV pressure is low, so the defect is restrictive.' },
       { q: 'What is the main finding in this case?', case: { path: 'effusion', view: 'PLAX' }, options: ['Pericardial effusion', 'Pleural effusion only', 'Dilated cardiomyopathy', 'Normal study'], answer: 0, explain: 'An echo-free space surrounds the heart, deepest posteriorly — the model measures 2.3 cm, a large effusion.' },
-      { q: 'This patient is hypotensive. What does this case show?', case: { path: 'tamponade', view: 'A4C' }, options: ['Pericardial effusion with tamponade physiology', 'Pericardial effusion without haemodynamic effect', 'Dilated cardiomyopathy', 'Constrictive pericarditis'], answer: 0, explain: 'The effusion is under pressure: the RA free wall inverts for over a third of the cycle, the RV collapses in early diastole and the IVC is plethoric. The model\'s mitral E falls by ~27% in inspiration (tricuspid E rises ~47%).' },
+      { q: 'This patient is hypotensive. What does this case show?', case: { path: 'tamponade', view: 'A4C' }, options: ['Pericardial effusion with tamponade physiology', 'Pericardial effusion without haemodynamic effect', 'Dilated cardiomyopathy', 'Constrictive pericarditis'], answer: 0, explain: 'The effusion is under pressure, with a sinus tachycardia: the RA free wall inverts for over a third of the cycle, the RV collapses in early diastole and the IVC is plethoric. The model\'s mitral E falls by ~28% in inspiration (tricuspid E rises ~46%).' },
       { q: 'What is the main finding in this case?', case: { path: 'asd', view: 'SUBCOSTAL' }, options: ['Atrial septal defect with left-to-right flow', 'Ventricular septal defect', 'Tricuspid regurgitation', 'Normal interatrial septum'], answer: 0, explain: 'Low-velocity flow crosses the atrial septum from LA to RA, best seen subcostally.' },
       { q: 'What is the main finding in this case?', case: { path: 'vsd', view: 'A4C' }, options: ['Ventricular septal defect', 'Atrial septal defect', 'Mitral regurgitation', 'Normal study'], answer: 0, explain: 'A high-velocity systolic jet crosses the ventricular septum from LV to RV.' },
     ],

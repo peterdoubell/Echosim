@@ -18,6 +18,9 @@ import { clamp, smoothstep, pulse, unit } from './mathutils.js';
 import { anatomyParams, rightHeartLoad, hepaticVeinSegs, atrialFill, bodyClassify, visceralDist, lumenDist, mitralLift, tricuspidLift, buildRwma, rwmaWeight, BODY, CFG, LM, BODY_AX } from './anatomy.js';
 import { hemodynamics, hemoSummary, pvLoop, gradeOf, eaRatio, MS_AREA, laPhasic } from './hemodynamics.js';
 import { DCM_SEVERITIES, dcmSeverityOf } from './scenarios.js';
+// (heart rate and respiration: a case solved on its own cycle, the tamponade breath)
+import { phaseSeconds, phaseOfTime, timeOfPhase, heartRate, breathOf, respPath, TAMPONADE_HR } from './hemodynamics.js';
+export { phaseOfTime, timeOfPhase, heartRate, breathOf, respPath, TAMPONADE_HR };
 
 // Re-export the lumped-parameter circulation API so echo.js / the UI can read the
 // PV loop and instantaneous haemodynamics through cardiac-model (the single model
@@ -232,7 +235,10 @@ export function rvPhase(phase, path = null) {
 // lag. Closure takes ~20-40 ms, and the leaflets cross 10 % open within a few
 // ms of the flow-defined events (AVO, AVC, MVO, MVC). Pre-computed once
 // per circulation as a periodic trace indexed by phase; the right-heart valves
-// read their own solved flows (tricuspid Qtv, pulmonary Qpa).
+// read their own solved flows (tricuspid Qtv, pulmonary Qpa). The lead and the
+// time constants are in seconds: a case on its own cycle (tamponade's
+// tachycardia) turns them into phase with its own systolic time scale
+// (hemodynamics phaseSeconds; OPEN_CYCLE at 72 bpm).
 const OPEN_N = 960, OPEN_CYCLE = 0.833;                   // samples per cycle; reference cycle (s)
 const OPEN_TAU_OPEN = 0.008, OPEN_TAU_CLOSE = 0.008, OPEN_LEAD_O = 0.007, OPEN_LEAD = 0.011;   // s
 const OPEN_Q_AV = 0.2, OPEN_Q_SL = 0.12;                  // flow (x peak) for a fully open valve
@@ -248,7 +254,8 @@ function openTrace(path) {
     qmv[i] = h.Qmv; qao[i] = h.Qao; qtv[i] = h.Qtv; qpa[i] = h.Qpa;
     qtvMax = Math.max(qtvMax, h.Qtv); qpaMax = Math.max(qpaMax, h.Qpa);
   }
-  const L = Math.round(OPEN_LEAD / OPEN_CYCLE * OPEN_N), Lo = Math.round(OPEN_LEAD_O / OPEN_CYCLE * OPEN_N), dt = OPEN_CYCLE / OPEN_N;
+  const T = heartRate(path) === 72 ? OPEN_CYCLE : phaseSeconds(path);
+  const L = Math.round(OPEN_LEAD / T * OPEN_N), Lo = Math.round(OPEN_LEAD_O / T * OPEN_N), dt = T / OPEN_N;
   const build = (q, qFull) => {
     const tgt = new Float32Array(OPEN_N), out = new Float32Array(OPEN_N);
     for (let i = 0; i < OPEN_N; i++) tgt[i] = 0.02 + 0.98 * smoothstep(0, qFull, Math.min(q[(i + Lo) % OPEN_N], q[(i + L) % OPEN_N]));
@@ -753,13 +760,14 @@ function effusionGap(px, py, pz, A) {
 
 // Tamponade: the pericardial pressure exceeds the transmural (distending) pressure
 // of the thin-walled right heart when its chambers are least full — the RA free
-// wall inverts from late diastole into systole (RA transmural < 0) and the RV free
-// wall is pushed in in early diastole (RV transmural < ~1 mmHg). Each free wall is
+// wall inverts from the end of atrial contraction into systole and the RV free
+// wall is pushed in in early diastole (transmural < ~1 mmHg, the buckling
+// pressure of either thin free wall: hemodynamics RA_BUCKLE / RV_BUCKLE). Each free wall is
 // indented by a depth that follows that phase's solved pressures, over a Gaussian
 // patch centred on the free wall (away from the septum and the AV groove).
-const RA_INV_K = 0.8, RA_INV_MAX = 1.0;      // cm per mmHg below zero transmural, cap
+const RA_INV_K = 0.8, RA_INV_MAX = 1.0;      // cm per mmHg below the buckling pressure, cap
 const RV_COL_K = 1.2, RV_COL_MAX = 0.55;     // cm per mmHg below the buckling pressure
-const RV_BUCKLE_P = 1.0;                     // mmHg (hemodynamics.js RV_BUCKLE)
+const RV_BUCKLE_P = 1.0, RA_BUCKLE_P = 1.0;  // mmHg (hemodynamics.js RV_BUCKLE, RA_BUCKLE)
 const WALL_IN = 0.3;                         // drawn atrial / RV free-wall thickness inside the lumen surface (cm)
 const _tampCache = new WeakMap();
 function tamponadeDent(G) {
@@ -767,7 +775,7 @@ function tamponadeDent(G) {
   if (t) return t;
   const A = G.A, H = G.hemo || {};
   const raT = (H.Pra || 0) - (H.Ppc || 0), rvT = (H.Prv || 0) - (H.Ppc || 0);
-  const dRa = clamp(-raT * RA_INV_K, 0, RA_INV_MAX), dRv = clamp((RV_BUCKLE_P - rvT) * RV_COL_K, 0, RV_COL_MAX);
+  const dRa = clamp((RA_BUCKLE_P - raT) * RA_INV_K, 0, RA_INV_MAX), dRv = clamp((RV_BUCKLE_P - rvT) * RV_COL_K, 0, RV_COL_MAX);
   // free-wall points: march out of the lumen from the chamber centre
   // (into the lumen first, then out through the free wall)
   const wallOf = (c, u, which) => {
@@ -813,8 +821,46 @@ function tamponadeWall(px, py, pz, G, code) {
   return null;
 }
 
+// Swinging heart (tamponade). In a large effusion the heart swings within the
+// fluid-filled sac with a period of two beats — the pendular motion behind
+// electrical alternans (electrophysiology.js alternansGain: the even beats'
+// QRS finds the heart nearest the chest wall). swingOffset(path, beat, phase):
+// the displacement (cm, heart space) at that beat and cardiac phase, along the
+// left-posterior axis where the fluid is deepest: SWING.amp either side of a
+// mean SWING.mean, so it never presses through the thin anterior layer of fluid
+// (0.8 cm between alternate beats). null for other cases. The caller sets it on
+// the frame's geometry (G.swing); classify() then draws the heart and its
+// visceral layer displaced by it, tapering from the ventricles to the great-
+// vessel reflections (swingWeight), inside the parietal sac, which stays where
+// it is, so the fluid thickens on one side as it thins on the other.
+const SWING = { amp: 0.4, mean: 0.2, dir: unit([BODY_AX.P[0] + 0.6 * BODY_AX.L[0], BODY_AX.P[1] + 0.6 * BODY_AX.L[1], BODY_AX.P[2] + 0.6 * BODY_AX.L[2]]) };
+export function swingOffset(path, beat, phase) {
+  if (!path || !path.tamponade || beat == null) return null;
+  const s = SWING.mean - SWING.amp * Math.cos(Math.PI * (beat + (((phase % 1) + 1) % 1)));
+  return [SWING.dir[0] * s, SWING.dir[1] * s, SWING.dir[2] * s];
+}
+function swingWeight(py, A) { return 1 - smoothstep(A.lv.M[1] - 0.5, A.la.c[1] + 1.4, py); }
+// The path a beat is drawn from (tamponade): the respiratory phase of beat
+// `beat` of the breath (hemodynamics breathOf: expiration, inspiration,
+// expiration — the spectral display's beats), its solved circulation blended
+// into the next beat's across diastole (respPath), so the inspiratory RV fills
+// and the septum moves before the QRS rather than jumping at it. Other cases (or
+// no beat count): the case's own path.
+export function breathPath(path, beat, phase) {
+  if (!path || !path.tamponade || beat == null) return path;
+  const w0 = breathOf(beat) === 'insp' ? 1 : 0, w1 = breathOf(beat + 1) === 'insp' ? 1 : 0;
+  const f = w0 === w1 ? 0 : smoothstep(0.55, 1.0, ((phase % 1) + 1) % 1);
+  return respPath(path, w0 + (w1 - w0) * f);
+}
+// (the displacement classify() applied to its last point: velocityAt reads the
+// flow of the same sample at the same displaced point)
+const _swLast = { x: NaN, y: 0, z: 0, dx: 0, dy: 0, dz: 0 };
+export const SWING_LAST = _swLast;   // (read-only: the renderer's scatterers move with the heart)
+const HEART_CODES = new Set([BODY.MYO, BODY.PAP, BODY.LV, BODY.RV, BODY.LA, BODY.RA]);
+
 export function classify(px, py, pz, G, path = {}) {
   const A = G.A;
+  if (G.swing) { _swLast.x = px; _swLast.y = py; _swLast.z = pz; _swLast.dx = _swLast.dy = _swLast.dz = 0; }
 
   // --- pericardial effusion: a DEPENDENT echo-free layer between the
   // epicardium and the parietal pericardium (which it pushes outward) — so it
@@ -826,7 +872,22 @@ export function classify(px, py, pz, G, path = {}) {
     // taper to nothing toward the reflections at the great-vessel roots (no flat cut-off)
     const g = gap * (1 - smoothstep(A.la.c[1] - 0.2, A.la.c[1] + 1.4, py));
     const de = visceralDist(px, py, pz, A); // signed distance to the visceral envelope (epicardium + CS in its fat)
-    if (de > 0.02 && de < g) {
+    const sw = G.swing, wq = sw && de < g ? swingWeight(py, A) : 0;
+    if (wq > 0) {
+      // swinging heart: inside the fixed sac, the heart (and its visceral layer)
+      // is displaced; where it has moved away the sac holds fluid
+      const qx = px - sw[0] * wq, qy = py - sw[1] * wq, qz = pz - sw[2] * wq;
+      if (visceralDist(qx, qy, qz, A) > 0.02) {
+        // (a chamber the heart has moved away from turns to fluid only where it
+        // lay inside the visceral envelope: the atrial lumen that the envelope
+        // does not wrap, toward the reflections, stays as drawn)
+        const b0 = bodyClassify(px, py, pz, A, g);
+        if (b0.code === BODY.OUT || b0.code === BODY.PERI || b0.code === BODY.FAT || (de <= 0.02 && HEART_CODES.has(b0.code))) return cls(TISSUE.PERICARDIUM, 0.02);
+      } else {
+        _swLast.dx = qx - px; _swLast.dy = qy - py; _swLast.dz = qz - pz;
+        px = qx; py = qy; pz = qz;
+      }
+    } else if (de > 0.02 && de < g) {
       // fluid only displaces the pericardial space itself — never a vessel, lung or liver
       const b0 = bodyClassify(px, py, pz, A, g);
       if (b0.code === BODY.OUT || b0.code === BODY.PERI || b0.code === BODY.FAT) return cls(TISSUE.PERICARDIUM, 0.02);
@@ -1711,6 +1772,9 @@ function aorticFlow(px, py, pz, G, H, phase) {
 // jet/tract the returned velocity is null / near-zero.
 // ---------------------------------------------------------------------------
 export function velocityAt(px, py, pz, G, path = {}) {
+  // (swinging heart: the flow moves with the heart — the displacement classify()
+  // gave this sample)
+  if (G.swing && px === _swLast.x && py === _swLast.y && pz === _swLast.z) { px += _swLast.dx; py += _swLast.dy; pz += _swLast.dz; }
   const phase = G.phase;
   const H = G.hemo;   // per-frame haemodynamic scalars (jet peaks + flow envelopes)
   _velHasBest = false;

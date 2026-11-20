@@ -16,13 +16,15 @@
 //        node tools/review-pack.mjs <outDir> --scene <pathology> <VIEW,VIEW,...> <phase>
 //          renders just that scene (echo + tissue) into <outDir>/echo/<pathology>_<phase>/ and
 //          <outDir>/tissue/<pathology>_<phase>/, for checking a change quickly. Env PORT picks the server port.
+//          Tamponade: --beat <n> holds the playing beat (its breath: 0 exp, 1 insp, 2 exp; the swing),
+//          written to <pathology>_<phase>_b<n>/.
 import fs from 'fs';
 import path from 'path';
 import http from 'http';
 import zlib from 'zlib';
 import { execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
-import { geometryAt, classify, TISSUE } from '../js/cardiac-model.js';
+import { geometryAt, classify, TISSUE, breathPath, swingOffset } from '../js/cardiac-model.js';
 import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, teeManipulate } from '../js/views.js';
 import { hemoSummary } from '../js/hemodynamics.js';
 
@@ -46,8 +48,11 @@ let ECHO_SCENES = [
   ['ms', 'ms', 'PSAX_MV,A4C,PLAX', 0.62], ['phtn', 'phtn', 'PSAX,A4C', 0.3], ['eff', 'effusion', 'PLAX,A4C,SUBCOSTAL', 0.99],
   ['asd', 'asd', 'SUBCOSTAL,A4C,MEBICAVAL,MEAVSAX', 0.5], ['vsd', 'vsd', 'A4C,PSAX', 0.25], ['rwma', 'rwma', 'PSAX,A4C', 0.42],
   ['tr', 'tr', 'A4C,RVIT', 0.25],
-  // tamponade: RA inversion (late diastole into early systole) and RV early-diastolic collapse
-  ['tamp_RAinv', 'tamponade', 'A4C,SUBCOSTAL,SC_IVC', 0.05], ['tamp_RVcol', 'tamponade', 'PLAX,PSAX', 0.55],
+  // tamponade: RA inversion (end of atrial contraction into early systole) and RV early-diastolic
+  // collapse, on an expiratory beat; then early diastole of an inspiratory and an expiratory beat
+  // (septal shift, RV size; the heart swings between alternate beats). [.., beat]: the playing beat
+  ['tamp_RAinv', 'tamponade', 'A4C,SUBCOSTAL,SC_IVC', 0.05, 0], ['tamp_RVcol', 'tamponade', 'PLAX,PSAX', 0.55, 0],
+  ['tamp_insp', 'tamponade', 'A4C,PSAX', 0.62, 1], ['tamp_exp', 'tamponade', 'A4C,PSAX', 0.62, 2],
 ];
 // TEE omniplane sweep from the ME4C probe position: [scene dir, view, omniplane angles]
 let OMNI_SCENES = [['tee_omni', 'ME4C', [0, 60, 90, 130]]];
@@ -57,7 +62,8 @@ let TISSUE_SCENES = [
     [`${p}_ED`, p, 'PLAX,PSAX,PSAX_AV,PSAX_MV,A4C,A2C,SUBCOSTAL,ME4C,MEBICAVAL', 0.99],
     [`${p}_ES`, p, 'PLAX,PSAX,A4C,SUBCOSTAL', 0.42],
   ]),
-  ['tamponade_RAinv', 'tamponade', 'A4C,SUBCOSTAL,SC_IVC,PLAX,PSAX', 0.05], ['tamponade_RVcol', 'tamponade', 'A4C,SUBCOSTAL,PLAX,PSAX', 0.55],
+  ['tamponade_RAinv', 'tamponade', 'A4C,SUBCOSTAL,SC_IVC,PLAX,PSAX', 0.05, 0], ['tamponade_RVcol', 'tamponade', 'A4C,SUBCOSTAL,PLAX,PSAX', 0.55, 0],
+  ['tamponade_insp', 'tamponade', 'A4C,PSAX', 0.62, 1], ['tamponade_exp', 'tamponade', 'A4C,PSAX', 0.62, 2],
 ];
 
 // quick single-scene mode
@@ -65,10 +71,11 @@ let QUICK = false;
 const si = process.argv.indexOf('--scene');
 if (si > 0) {
   const [key, views, ph] = process.argv.slice(si + 1, si + 4);
-  if (!PATHS[key] || !views || !(+ph >= 0)) { console.error('usage: --scene <pathology> <VIEW,...> <phase>'); process.exit(2); }
-  const dir = `${key}_${ph}`;
-  ECHO_SCENES = [[dir, key, views, +ph]];
-  TISSUE_SCENES = [[dir, key, views, +ph]];
+  if (!PATHS[key] || !views || !(+ph >= 0)) { console.error('usage: --scene <pathology> <VIEW,...> <phase> [--beat <n>]'); process.exit(2); }
+  const bi = process.argv.indexOf('--beat'), beat = bi > 0 ? +process.argv[bi + 1] : null;
+  const dir = `${key}_${ph}` + (beat != null ? `_b${beat}` : '');
+  ECHO_SCENES = [[dir, key, views, +ph, beat]];
+  TISSUE_SCENES = [[dir, key, views, +ph, beat]];
   OMNI_SCENES = [];
   QUICK = true;
 }
@@ -95,8 +102,10 @@ function png(w, h, rgb) {
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
 }
 const viewOf = (name) => TTE_VIEWS[name] || EXTRA_VIEWS[name] || TEE_VIEWS[name];
-function tissueMap(name, phase, flags, size = 420, omni = null) {
-  const v = viewOf(name), G = geometryAt(phase, flags);
+function tissueMap(name, phase, flags, size = 420, omni = null, beat = null) {
+  const v = viewOf(name), G = geometryAt(phase, breathPath(flags, beat, phase));
+  // (tamponade: the beat's breath and the swinging heart, as the app plays them)
+  const sw = swingOffset(flags, beat, phase); if (sw) G.swing = sw;
   let p = v.probe();
   let pos = p.pos;
   if (v.track) { const o = v.track(G.A); pos = pos.map((x, i) => x + o[i]); }
@@ -116,9 +125,9 @@ function tissueMap(name, phase, flags, size = 420, omni = null) {
   return png(W, H, rgb);
 }
 if (!ONLY || ONLY === 'tissue') {
-  for (const [dir, key, views, phase] of TISSUE_SCENES) {
+  for (const [dir, key, views, phase, beat] of TISSUE_SCENES) {
     const d = path.join(OUT, 'tissue', dir); fs.mkdirSync(d, { recursive: true });
-    for (const v of views.split(',')) fs.writeFileSync(path.join(d, `${v}.png`), tissueMap(v, phase, { ...PATHS[key], grade: 'severe' }));
+    for (const v of views.split(',')) fs.writeFileSync(path.join(d, `${v}.png`), tissueMap(v, phase, { ...PATHS[key], grade: 'severe' }, 420, null, beat));
   }
   for (const [dir, v, angles] of OMNI_SCENES) {
     const d = path.join(OUT, 'tissue', dir); fs.mkdirSync(d, { recursive: true });
@@ -149,17 +158,19 @@ if (!ONLY || ONLY === 'echo' || ONLY === '3d') {
   await page.waitForTimeout(1500);
   const got = await page.$('#helpGot'); if (got) await got.click().catch(() => {});
   await page.evaluate(() => { const c = document.getElementById('labelsOn'); if (c.checked) c.click(); });
-  const setScene = async (key, view, phase) => {
+  const setScene = async (key, view, phase, beat = null) => {
     await page.selectOption('#pathology', key);
     await page.waitForTimeout(500);
     await page.evaluate((v) => window.echosim.setView(v), view);
     await page.$eval('#scrub', (el, v) => { el.value = String(Math.round(v * 1000)); el.dispatchEvent(new Event('input', { bubbles: true })); }, phase);
+    // (the playing beat: a tamponade breath's respiratory phase and the swing)
+    if (beat != null) await page.evaluate((b) => { window.echosim.state.beat = b; }, beat);
     await page.waitForTimeout(1300);   // several frames: persistence settles
   };
   if (!ONLY || ONLY === 'echo') {
-    for (const [dir, key, views, phase] of ECHO_SCENES) {
+    for (const [dir, key, views, phase, beat] of ECHO_SCENES) {
       const d = path.join(OUT, 'echo', dir); fs.mkdirSync(d, { recursive: true });
-      for (const v of views.split(',')) { await setScene(key, v, phase); await (await page.$('.viewEcho')).screenshot({ path: path.join(d, `${v}.png`) }); }
+      for (const v of views.split(',')) { await setScene(key, v, phase, beat); await (await page.$('.viewEcho')).screenshot({ path: path.join(d, `${v}.png`) }); }
       console.log('echo', dir);
     }
     for (const [dir, v, angles] of OMNI_SCENES) {
