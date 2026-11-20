@@ -6,7 +6,7 @@
 // (BART) convention with a wall filter and aliasing, on-image anatomical
 // labels, live measurements, and a scrolling spectral-Doppler trace.
 
-import { classify, velocityAt, geometryAt, hemoSummary, hemodynamics, TISSUE, VALVE_DEFS, FLOW, AORTIC_CUSPS, shuntLabel, stenosisCw, FLOW_AXES, FLOW_SITES, membSite } from './cardiac-model.js';
+import { classify, velocityAt, geometryAt, hemoSummary, hemodynamics, TISSUE, VALVE_DEFS, FLOW, AORTIC_CUSPS, shuntLabel, stenosisCw, FLOW_AXES, FLOW_SITES, membSite, asdStream } from './cardiac-model.js';
 import { LM, rapEstimate, diaphragmBelow, rwmaBlend, lumenDist, hepaticVeinSegs } from './anatomy.js';
 import { clamp } from './mathutils.js';
 import { ALL_VIEWS } from './views.js';
@@ -107,6 +107,40 @@ const MEDI_VIEWS = { SSN: 1, SUBCOSTAL: 1, SC_IVC: 1 };
 // fluid labels (blood pools, venous blood, effusion), indexed by tissue kind
 const FLUID_K = new Uint8Array(16);
 for (const k of [TISSUE.LV, TISSUE.RV, TISSUE.LA, TISSUE.RA, TISSUE.AORTA, TISSUE.VEIN, TISSUE.PERICARDIUM]) FLUID_K[k] = 1;
+// Colour Doppler: the blood pools each flow may colour (a bit per TISSUE kind).
+// The colour pass asks velocityAt only for the flows allowed in the sample's own
+// pool, so a flow field that runs on past its chamber (a shunt column wider than
+// the RA, a vein's stream line continued through the atrial wall) can neither
+// paint a foreign lumen nor hide the flow that belongs there. Labels: the PA
+// lumen carries the great-artery (AORTA) label, the pulmonary veins the LA's, the
+// cavae and coronary sinus the RA's; the ascending-aorta flow starts above the
+// sinotubular junction. Every flow tag has an entry (an audit row checks it); a
+// tag without one may colour any blood pool, so a new flow is never lost.
+const _kb = (...ks) => ks.reduce((m, k) => m | (1 << k), 0);
+const ANY_POOL = _kb(TISSUE.LV, TISSUE.RV, TISSUE.LA, TISSUE.RA, TISSUE.AORTA, TISSUE.VEIN);
+export const FLOW_POOLS = {
+  [FLOW.MITRAL_IN]: _kb(TISSUE.LA, TISSUE.LV),
+  [FLOW.TRICUSPID_IN]: _kb(TISSUE.RA, TISSUE.RV),
+  [FLOW.LVOT]: _kb(TISSUE.LV, TISSUE.AORTA),
+  [FLOW.RVOT]: _kb(TISSUE.RV, TISSUE.AORTA),
+  [FLOW.MR_JET]: _kb(TISSUE.LV, TISSUE.LA),
+  [FLOW.AS_JET]: _kb(TISSUE.LV, TISSUE.AORTA),
+  [FLOW.VSD_JET]: _kb(TISSUE.LV, TISSUE.RV),
+  [FLOW.ASD_JET]: _kb(TISSUE.LA, TISSUE.RA),
+  [FLOW.TR_JET]: _kb(TISSUE.RV, TISSUE.RA),
+  [FLOW.PV_FLOW]: _kb(TISSUE.LA),
+  [FLOW.HV_FLOW]: _kb(TISSUE.VEIN, TISSUE.RA),
+  [FLOW.AORTA]: _kb(TISSUE.AORTA),
+};
+// (the appendage's own flow, where the model has one: the LAA lumen is the LA's)
+if (FLOW.LAA_FLOW != null) FLOW_POOLS[FLOW.LAA_FLOW] = _kb(TISSUE.LA);
+// ... and per tissue kind, the flows it may show (a bit per FLOW tag)
+const POOL_FLOWS = new Uint32Array(16);
+for (const f of Object.values(FLOW)) {
+  if (f === FLOW.NONE) continue;
+  const m = FLOW_POOLS[f] != null ? FLOW_POOLS[f] : ANY_POOL;
+  for (let k = 0; k < 16; k++) if (m & (1 << k)) POOL_FLOWS[k] |= 1 << f;
+}
 const Z_OF = {
   [TISSUE.OUTSIDE]: 1.62, [TISSUE.MYO]: 1.68, [TISSUE.LV]: 1.61, [TISSUE.RV]: 1.61,
   [TISSUE.LA]: 1.61, [TISSUE.RA]: 1.61, [TISSUE.AORTA]: 1.61, [TISSUE.VALVE]: 1.72,
@@ -193,6 +227,8 @@ const hasMR = (path) => !!(path.mr || path.dilated);
 const _hvSeg = (A) => hepaticVeinSegs(A)[1];                 // the middle hepatic vein
 const _hvAt = (A) => { const v = _hvSeg(A); return _add(v.a, v.u, 1.6); };
 const _dtaAxis = (A) => { const d = A.ao.dta, u = [d.a[0] - d.top[0], d.a[1] - d.top[1], d.a[2] - d.top[2]], l = Math.hypot(...u); return [u[0] / l, u[1] / l, u[2] / l]; };
+const ASD_SITE = { name: 'Atrial septum', label: 'shunt flow at the atrial septal defect (RA side)', mode: 'PW', ref: 'S',
+  at: (A, p, G, P, pr) => asdGate(G, P, pr).q, axis: (p, G, P, pr) => asdGate(G, P, pr).ax, box: (A, p, G) => asdStream(G, 0.4, 0.8)[2].q };
 export const DOPPLER_SITES = {
   mvTips: { name: 'Mitral inflow', label: 'mitral inflow at the leaflet tips', mode: 'PW', ref: 'E',
     at: (A) => _add(A.valves.mitral.c, DAX.mitralIn, 0.5), axis: () => DAX.mitralIn, box: (A) => A.valves.mitral.c },
@@ -211,8 +247,18 @@ export const DOPPLER_SITES = {
     box: (A, p) => (p.tr ? _add(A.valves.tricuspid.c, DAX.tr, 1.5) : A.valves.tricuspid.c) },
   rvot: { name: 'RVOT', label: 'RVOT, below the pulmonary valve', mode: 'PW', ref: 'S',
     at: (A) => _add(A.valves.pulmonic.c, DAX.rvot, -0.5), axis: () => DAX.rvot, box: (A) => A.valves.pulmonic.c },
-  asd: { name: 'Atrial septum', label: 'interatrial septum (shunt flow)', mode: 'PW', ref: 'S',
-    at: () => FLOW_SITES.asd, axis: () => DAX.asd, box: () => _add(FLOW_SITES.asd, DAX.asd, 1.2) },
+  // the shunt: the sample volume in the stream on the RA side of the defect
+  // (asdGate), its axis the stream's own direction there (across the septum,
+  // IAS_N, at the defect, turning toward the tricuspid valve in the RA); the colour
+  // box over the septum, centred 0.8 cm into the RA on the stream, so that it holds
+  // the defect and the column leaving it
+  asd: ASD_SITE,
+  // the same, recorded from the subcostal window, where the operator rocks the
+  // probe to line the beam up with the shunt (as for the hepatic veins): the
+  // subcostal 4C plane here meets the septal normal at ~55 deg (the septum faces
+  // horizontally, its normal 49 deg out of that plane), so the view's own beam
+  // crosses the shunt too steeply to record it
+  asdSc: { ...ASD_SITE, align: true },
   vsd: { name: 'VSD CW', label: 'CW across the VSD', mode: 'CW', ref: 'S', align: true,
     at: (A, p, G) => (p.vsd === 'perimembranous' ? membSite(G).c : FLOW_SITES.vsd),
     axis: (p, G) => (p.vsd === 'perimembranous' ? membSite(G).rad : DAX.vsd),
@@ -229,6 +275,32 @@ export const DOPPLER_SITES = {
 // sonographer typically achieves when angling to a modified window.
 export const DOPPLER_MAX_ANGLE = 20;
 const ALIGN_RES = 8;
+// The PW sample volume on a secundum ASD shunt: in the stream on the RA side of
+// the defect (cardiac-model asdStream), slid along it (up to 1.2 cm) to where the
+// view's beam records the highest velocity (v cos theta: the beam lined up with
+// the flow, still near the defect), among points within DOPPLER_MAX_ANGLE and
+// within 1 cm of the plane; with none, just past the septum (0.2 cm). The flow
+// crosses the septum along its normal and turns toward the tricuspid valve in
+// the RA, so the ME AV short axis (whose beam meets the septal normal at ~39 deg)
+// records it ~1 cm into the RA, where the stream has turned toward its beam.
+let _asdGateMemo = null;
+function asdGate(G, P, probe) {
+  const m = _asdGateMemo;
+  if (m && m.G === G && m.P === P && m.pr === probe) return m.r;
+  const st = asdStream(G, 0.1, 1.2), N = probe && probe.normal;
+  const cMax = Math.cos(DOPPLER_MAX_ANGLE * Math.PI / 180);
+  let best = null, bv = 0;
+  for (const s of st) {
+    const dx = s.q[0] - P[0], dy = s.q[1] - P[1], dz = s.q[2] - P[2], l = Math.hypot(dx, dy, dz) || 1;
+    if (N && Math.abs(dx * N[0] + dy * N[1] + dz * N[2]) > 1.0) continue;   // out of the slice
+    const c = Math.abs(dx * s.ax[0] + dy * s.ax[1] + dz * s.ax[2]) / l;
+    if (c >= cMax && s.k * c > bv) { bv = s.k * c; best = s; }
+  }
+  if (!best) best = st[2];
+  const r = { q: best.q, ax: best.ax };
+  _asdGateMemo = { G, P, pr: probe, r };
+  return r;
+}
 // Where the Doppler beam meets a site, seen from probe (pos/dir/lat/normal) with
 // sector half-angle `half` and display depth `depthCm`: the gate (or CW focus)
 // is the site projected into the plane, on a beam from the transducer, clamped
@@ -244,7 +316,7 @@ function siteGeometry(site, path, Gr, P, probe, half, depthCm, align) {
     const al = rx * D[0] + ry * D[1] + rz * D[2], la = rx * L[0] + ry * L[1] + rz * L[2];
     return { theta: Math.atan2(la, al), depth: Math.hypot(al, la), off: rx * N[0] + ry * N[1] + rz * N[2] };
   };
-  const q = site.at(Gr.A, path, Gr);
+  const q = site.at(Gr.A, path, Gr, P, probe);
   const g = polar(q);
   const theta = clamp(g.theta, -half * 0.97, half * 0.97);
   let depth = clamp(g.depth, 0.8, depthCm * 0.94);
@@ -257,7 +329,7 @@ function siteGeometry(site, path, Gr, P, probe, half, depthCm, align) {
     dir = [rx / rl, ry / rl, rz / rl];
     depth = rl;
   }
-  const ax = site.axis(path, Gr);
+  const ax = site.axis(path, Gr, P, probe);
   let cosA = dir[0] * ax[0] + dir[1] * ax[1] + dir[2] * ax[2];
   const rawAngle = Math.acos(Math.min(1, Math.abs(cosA))) * 180 / Math.PI;
   let P0 = P, aligned = false;
@@ -278,6 +350,17 @@ function siteGeometry(site, path, Gr, P, probe, half, depthCm, align) {
     angleDeg: Math.acos(Math.min(1, Math.abs(cosA))) * 180 / Math.PI,
     offPlane: Math.abs(g.off), outside: !inside, box: polar(site.box(Gr.A, path, Gr)),
   };
+}
+// The Doppler sites of the lesions a case carries (the shunt, the stenotic or
+// regurgitant valve): where its colour box belongs when the view shows the lesion.
+function lesionSites(path) {
+  const L = [];
+  if (path.asd) L.push('asd', 'asdSc');
+  if (path.vsd) L.push('vsd');
+  if (path.aorticStenosis) L.push('avCw');
+  if (path.mr || path.mitralStenosis || path.dilated) L.push('mvCw');
+  if (path.tr) L.push('tvCw');
+  return L;
 }
 // Candidate standard sites per view, in order of preference (lesion first). Only
 // a candidate the view's beam reaches within DOPPLER_MAX_ANGLE of the flow (after
@@ -302,6 +385,9 @@ function siteCandidates(view, path) {
     case 'A2C': case 'ME2C': if (mr || ms) L.push('mvCw'); L.push('mvTips'); break;
     case 'RVIT': if (tr) L.push('tvCw'); L.push('tvTips'); break;
     case 'SC_IVC': L.push('hvPw'); break;
+    // the subcostal window is where a secundum ASD's shunt is recorded on TTE (ASE
+    // ASD guideline); nothing else is a standard subcostal 4C trace
+    case 'SUBCOSTAL': if (path.asd) L.push('asdSc'); break;
     case 'SSN': L.push('descAoPw'); break;
     case 'MELAX': if (mr || ms) L.push('mvCw'); L.push('mvTips'); break;
     case 'MEAVSAX': if (tr) L.push('tvCw'); if (path.asd) L.push('asd'); L.push('rvot'); break;
@@ -384,6 +470,17 @@ export function colourDefault(view, path = {}) {
   if (path.aorticStenosis && (view === 'PLAX' || view === 'PSAX_AV' || view === 'MEAVSAX' || view === 'MELAX')) return false;
   if (path.mitralStenosis && (view === 'PLAX' || view === 'PSAX_MV' || view === 'MELAX')) return false;
   return true;
+}
+// Colour scale (Nyquist, m/s) and box width (share of the sector) a case opens
+// with. A shunt study for a secundum ASD (a ~1 m/s laminar left-to-right flow)
+// narrows the box over the septum and lowers the scale to ~45 cm/s so the
+// low-velocity shunt fills with colour (and its core aliases); every other case
+// keeps the standard 62 cm/s box of 0.45 of the sector. (A VSD jet runs at
+// 4-5 m/s: its colour is a mosaic at any scale, so it keeps the standard one.)
+export const COLOUR_STD = { nyquist: 0.62, box: 0.45 };
+export function colourPreset(view, path = {}) {
+  if (path.asd) return { nyquist: 0.46, box: 0.3 };
+  return COLOUR_STD;
 }
 
 export class EchoView {
@@ -474,6 +571,7 @@ export class EchoView {
     this.cboxSize = 0.45;
     this.colorNyquist = this.nyquist;
     this._cbox = null;
+    this._lfocus = null;       // colour-box centre on the lesion in view (null: none in the plane)
 
     // memoised fixed-phase geometry for _computeMetrics (recomputed only when the
     // path/pathology object identity changes).
@@ -892,7 +990,8 @@ export class EchoView {
 
         // --- colour Doppler overlay ---
         if (colorOn && depth >= cD0 && depth <= cD1 && theta >= cT0 && theta <= cT1) {
-          const vel = velocityAt(wx, wy, wz, G, path);
+          // (in a blood pool, only the flows that belong to it: FLOW_POOLS)
+          const vel = velocityAt(wx, wy, wz, G, path, isBloodK ? POOL_FLOWS[kind] : 0);
           if (vel && vel.speed > 0.05) {
             // line-of-sight velocity: beamDir points away from probe
             const los = vel.vx * bd[0] + vel.vy * bd[1] + vel.vz * bd[2];
@@ -1686,12 +1785,7 @@ export class EchoView {
   // the view shows (the shunt, the stenotic or regurgitant valve), else on the
   // valve the view is built around; mid-sector when none lies in the plane.
   _colourFocus(G, path, probe) {
-    const L = [];
-    if (path.asd) L.push('asd');
-    if (path.vsd) L.push('vsd');
-    if (path.aorticStenosis) L.push('avCw');
-    if (path.mr || path.mitralStenosis || path.dilated) L.push('mvCw');
-    if (path.tr) L.push('tvCw');
+    const L = lesionSites(path);
     L.push(({ PLAX: 'mvTips', PSAX_MV: 'mvTips', SUBCOSTAL: 'tvTips' })[this.viewName]);
     const half = this.sectorHalf;
     for (const key of L) {
@@ -1711,19 +1805,41 @@ export class EchoView {
     const key = this.dopplerSite || dopplerDefault(this.viewName, path) || (ALL_VIEWS[this.viewName] || {}).doppler || null;   // (a view's own standard site)
     const site = key ? DOPPLER_SITES[key] : null;
     this._cfocus = null;
+    this._lfocus = null;
     if (!site) { this._dGate = null; this._cfocus = this._colourFocus(G, path, probe); return null; }
-    const ref = typeof site.ref === 'function' ? site.ref(path) : site.ref;
-    const Gr = refPhases(path)[ref] || G;
     // A view that tracks a landmark slides the probe with the cycle; the Doppler
     // beam is set once, from where the probe sits at the site's reference phase,
     // so it stays put (and its one-cycle sweep stays cached) while the image tracks.
     const vw = ALL_VIEWS[this.viewName];
-    let P = probe.pos;
-    if (vw && vw.track && G.A && Gr.A) {
-      const o1 = vw.track(G.A), o0 = vw.track(Gr.A);
-      P = [P[0] - o1[0] + o0[0], P[1] - o1[1] + o0[1], P[2] - o1[2] + o0[2]];
-    }
+    const refOf = (st) => {
+      const Gr = refPhases(path)[typeof st.ref === 'function' ? st.ref(path) : st.ref] || G;
+      let P = probe.pos;
+      if (vw && vw.track && G.A && Gr.A) {
+        const o1 = vw.track(G.A), o0 = vw.track(Gr.A);
+        P = [P[0] - o1[0] + o0[0], P[1] - o1[1] + o0[1], P[2] - o1[2] + o0[2]];
+      }
+      return [Gr, P];
+    };
     const half = this.sectorHalf;
+    // The colour box sits over the lesion the view is used for, whatever site
+    // gives the trace: a lesion's own site that this view lists ahead of the trace
+    // site (siteCandidates) but whose flow the beam crosses too steeply to record,
+    // when the lesion lies in the slice. (The secundum ASD in the A4C: the shunt
+    // crosses the beam at ~75 deg, so the trace is the mitral inflow, and the box
+    // goes over the atrial septum.) An operator-placed gate keeps the box on it.
+    if (!user) {
+      const les = lesionSites(path);
+      for (const k of siteCandidates(this.viewName, path)) {
+        if (k === key) break;
+        if (!les.includes(k)) continue;
+        const [Gl, Pl] = refOf(DOPPLER_SITES[k]);
+        const b = siteGeometry(DOPPLER_SITES[k], path, Gl, Pl, probe, half, this.depthCm, false).box;
+        if (Math.abs(b.off) > 1.0 || Math.abs(b.theta) > half * 0.97 || b.depth > this.depthCm * 0.94) continue;
+        this._lfocus = { theta: b.theta, depth: clamp(b.depth, 1, this.depthCm * 0.9) };
+        break;
+      }
+    }
+    const [Gr, P] = refOf(site);
     // the view's standard site is recorded aligned (angling to a modified window
     // where the jet needs it); a site the operator picks is taken as the beam
     // meets it, and flagged when that is too steep to measure
@@ -1741,7 +1857,8 @@ export class EchoView {
     return this._dGate;
   }
 
-  // Colour box (ROI) for this frame: centred on the Doppler site (or mid-sector),
+  // Colour box (ROI) for this frame: centred on the lesion the view is used for
+  // (_lfocus; an operator-placed gate: on that gate), else on the Doppler site (or mid-sector),
   // `cboxSize` of the sector wide. Sets the box Nyquist limit (capped by the PRF
   // its deepest line allows) and a modelled acquisition frame rate: each frame
   // fires the B-mode lines plus, per colour line, a packet of pulses to the box
@@ -1750,7 +1867,7 @@ export class EchoView {
     const half = this.sectorHalf;
     const size = clamp(this.cboxSize || 0.45, 0.15, 1);
     const bw = size * half;
-    const fb = gate ? gate.box : this._cfocus;
+    const fb = gate && gate.user ? gate.box : this._lfocus || (gate ? gate.box : this._cfocus);
     const tc = fb ? clamp(fb.theta, -half + bw, half - bw) : 0;
     const span = Math.min(this.depthCm * 0.92, 3 + 0.6 * this.depthCm * size);
     const dc = fb ? fb.depth : this.depthCm * 0.5;
@@ -2044,7 +2161,20 @@ export class EchoView {
     // its inflow), and the scale so the whole envelope fits inside with ~10 %
     // headroom (no clipping at the edge).
     let fTop, kpx;
-    if (mode === 'PW') { fTop = 0.5; kpx = plotH * 0.5 / nyqPW; }
+    if (mode === 'PW') {
+      // PW: the baseline sits mid-plot. A one-way signal faster than the Nyquist
+      // limit gets the baseline shifted (as the sonographer does), which gives that
+      // direction up to twice the limit, when the whole signal then fits (the
+      // ~1.3 m/s shunt of a secundum ASD at a 13 cm subcostal gate, limit ~1.1 m/s);
+      // a jet faster than that still wraps: CW. Not with an operator-set scale.
+      fTop = 0.5; kpx = plotH * 0.5 / nyqPW;
+      const big = Math.max(S.posMax, S.negMax), small = Math.min(S.posMax, S.negMax);
+      const need = (v) => (v > 0.03 ? v * 1.1 + 0.08 : 0.04);          // room a direction needs (band + headroom)
+      if (!this.pwNyquist && big > nyqPW && need(big) + need(small) <= 2 * nyqPW) {
+        fTop = need(big) / (2 * nyqPW);
+        if (S.negMax > S.posMax) fTop = 1 - fTop;
+      }
+    }
     else {
       const pe = Math.max(S.envPosMax, 0.05), ne = Math.max(S.envNegMax, 0.05);
       if (pe > 0.25 && ne > 0.25) fTop = clamp(pe / (pe + ne), 0.25, 0.75);
@@ -2062,7 +2192,8 @@ export class EchoView {
     if (!this._specP || this._specP.length < NP) this._specP = new Float32Array(NP);
     const Pw = this._specP; Pw.fill(0, 0, NP);
     const dv = 1 / kpx;                                  // m/s per row
-    const wrap = (u) => (mode === 'PW' ? u - 2 * nyqPW * Math.round(u / (2 * nyqPW)) : u);
+    const vMid = (vTop + vBot) / 2;                      // (0 unless the PW baseline is shifted)
+    const wrap = (u) => (mode === 'PW' ? u - 2 * nyqPW * Math.round((u - vMid) / (2 * nyqPW)) : u);
     const addAt = (c, u, w) => {
       const uu = wrap(u);
       if (uu > vTop || uu < vBot) return;
@@ -2074,7 +2205,7 @@ export class EchoView {
       for (let k = S.start[c]; k < S.start[c + 1]; k++) {
         const v = S.v[k], w = S.w[k], vr = S.t[k], av = Math.abs(v), sg = v < 0 ? -1 : 1;
         if (av < 0.03) continue;
-        if (mode === 'PW' && av > nyqPW) wrapped++;
+        if (mode === 'PW' && (v > vTop + 1e-9 || v < vBot - 1e-9)) wrapped++;
         if (mode === 'PW') {
           // spectral band: laminar = narrow band just below the modal velocity
           // (dark window beneath); disturbed flow broadens it toward the baseline
@@ -2195,12 +2326,11 @@ export class EchoView {
       label(`aligned: modified window (view θ ${Math.round(gate.rawAngleDeg)}°)`, 4, y2, 'rgba(150,200,240,0.8)', '9px monospace');
       y2 += 11;
     }
-    if (mode === 'PW') label(`Nyquist ±${nyqPW.toFixed(2)}  gate ${gate.depth.toFixed(1)} cm`, 4, y2, 'rgba(150,200,240,0.8)', '9px monospace');
+    if (mode === 'PW') label(`Nyquist ±${nyqPW.toFixed(2)}${fTop !== 0.5 ? ' (baseline shifted)' : ''}  gate ${gate.depth.toFixed(1)} cm`, 4, y2, 'rgba(150,200,240,0.8)', '9px monospace');
     // peak readout: from the same envelope the trace's edge is drawn on; PW only
     // when it is not aliased
     // (an aliased direction has no readable peak: the other one keeps its own)
-    const lim = mode === 'PW' ? nyqPW : 1e9;
-    const pOk = S.envPosMax <= lim, nOk = S.envNegMax <= lim;
+    const pOk = mode !== 'PW' || S.envPosMax <= vTop + 1e-9, nOk = mode !== 'PW' || S.envNegMax <= -vBot + 1e-9;
     let peak = 0, sign = 1;
     if (nOk && (!pOk || S.envNegMax >= S.envPosMax)) { peak = S.envNegMax; sign = -1; } else if (pOk) { peak = S.envPosMax; }
     const aliased = mode === 'PW' && wrapped > 0;

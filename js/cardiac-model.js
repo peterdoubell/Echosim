@@ -1334,6 +1334,7 @@ const VORTEX_STRENGTH = 0.45;  // swirl gain (m/s per cm, before the Gaussian ro
 // its thresholded form (variance >= 0.5) for older callers.
 const _velResult = { vx: 0, vy: 0, vz: 0, speed: 0, flow: FLOW.NONE, turbulent: false, variance: 0 };
 let _velHasBest = false;
+let _flowMask = 0;                 // flows velocityAt may return (bit per FLOW tag; 0 = any)
 
 // Lifted out of velocityAt so no closure is allocated per sample; state (the
 // current best) lives in the module-scoped singleton above. Keeps the fastest
@@ -1341,6 +1342,7 @@ let _velHasBest = false;
 // `turb` is a variance 0..1, or a boolean (true = a fully turbulent cell).
 function considerFlow(inside, dirx, diry, dirz, speed, flow, turb) {
   if (!inside || speed <= 0.01) return;
+  if (_flowMask && !((_flowMask >>> flow) & 1)) return;
   if (_velHasBest && speed <= _velResult.speed) return;
   const vr = typeof turb === 'number' ? (turb < 0 ? 0 : turb > 1 ? 1 : turb) : (turb ? 0.85 : 0);
   _velResult.vx = dirx * speed;
@@ -1470,37 +1472,69 @@ export function stenosisCw(flow, H, path = {}) {
   return _cw;
 }
 
-// Secundum ASD shunt: a broad, laminar left-to-right column. On the LA side the
-// flow converges on the defect only within ~1 cm of it; through the defect it
-// runs across the septum (IAS_N) with a blunt profile as wide as the hole; on
-// the RA side it streams on as a column that bends toward the tricuspid valve
-// over 3-4 cm and slows as it goes. Only the core of the column (about 1 m/s)
-// aliases at a standard colour scale. Variance stays low (laminar).
+// Secundum ASD shunt: a laminar left-to-right column. On the LA side the flow
+// converges on the defect only within ~1 cm of it; through the defect it runs
+// across the septum (IAS_N) with a blunt profile as wide as the hole; on the RA
+// side it streams on as a column that bends toward the tricuspid valve, slowing as
+// it goes and fading out by ASD_COL_END of the way to the valve. The column keeps
+// the oval defect's shape: across the hole's short axis it is held to ASD_COL_WU
+// (half-width ~0.5-0.65 cm), across its long axis it starts as wide as the hole
+// (~0.8 cm) and spreads to at most ASD_COL_WB (before review 12 it spread to ~1.8
+// cm half-width, 1.85x the hole across its short axis, and flooded the RA). Only
+// the core of the column (about 1 m/s) aliases at a standard colour scale.
+// Variance stays low (laminar). Each part is held to its own lumen: the
+// convergence and the defect to the atrium on that side of the septum, the RA
+// column to the RA lumen, and none of it to the aortic root, which bulges against
+// the RA (in the ME AV short axis the ungated column ran on into the closed root,
+// where diastolic colour reads as aortic regurgitation or a ruptured sinus).
+const ASD_BEND = 2.6;                   // cm along IAS_N to the stream's bend (Bezier control) point
+const ASD_COL_WU = 0.65, ASD_COL_WB = 1.3;    // cm, RA column half-width caps (across the defect's short / long axis)
+const ASD_COL_END = 0.85;               // fraction of the defect -> TV path where the column has faded out
+// the column's spread (x its starting half-widths) and its centreline speed
+// (relative to the flow through the defect, ~1/width as a free jet slows) a
+// fraction f of the way from the defect to the valve
+const asdSpread = (f) => [1 + 0.5 * f, 1 + f];
+const asdSpeedK = (f) => {
+  if (f >= ASD_COL_END) return 0;
+  const g = asdSpread(f);
+  return 1 / Math.pow(g[0] * g[1], 0.6) * (f > ASD_COL_END - 0.15 ? (ASD_COL_END - f) / 0.15 : 1);
+};
 const _asdCache = new WeakMap();
 function asdPath(G) {
   let c = _asdCache.get(G.A);
   if (c) return c;
   const C = ASD_CORE, N = LM.IAS_N, T = G.A.valves.tricuspid.c;
-  const K = [C[0] + N[0] * 2.6, C[1] + N[1] * 2.6, C[2] + N[2] * 2.6];
-  const pts = [];
+  const K = [C[0] + N[0] * ASD_BEND, C[1] + N[1] * ASD_BEND, C[2] + N[2] * ASD_BEND];
+  const pts = [], tans = [];
   for (let i = 0; i <= 12; i++) {
     const t = i / 12, a = (1 - t) * (1 - t), b = 2 * (1 - t) * t, d = t * t;
     pts.push([a * C[0] + b * K[0] + d * T[0], a * C[1] + b * K[1] + d * T[1], a * C[2] + b * K[2] + d * T[2]]);
+    // the curve's own tangent at each knot, for a direction that turns smoothly
+    const w = [0, 1, 2].map((k) => (1 - t) * (K[k] - C[k]) + t * (T[k] - K[k])), wl = Math.hypot(w[0], w[1], w[2]) || 1;
+    tans.push([w[0] / wl, w[1] / wl, w[2] / wl]);
   }
   const segs = [];
   let L = 0;
   for (let i = 0; i < 12; i++) {
     const a = pts[i], e = pts[i + 1], u = [e[0] - a[0], e[1] - a[1], e[2] - a[2]], l = Math.hypot(u[0], u[1], u[2]);
-    segs.push({ a, u: [u[0] / l, u[1] / l, u[2] / l], l, s0: L });
+    segs.push({ a, u: [u[0] / l, u[1] / l, u[2] / l], l, s0: L, ta: tans[i], tb: tans[i + 1] });
     L += l;
   }
   c = { segs, L };
   _asdCache.set(G.A, c);
   return c;
 }
+// the stream direction a fraction `t` (0..1) along segment `g`: its end tangents blended
+function asdDir(g, t, out) {
+  const x = g.ta[0] + (g.tb[0] - g.ta[0]) * t, y = g.ta[1] + (g.tb[1] - g.ta[1]) * t, z = g.ta[2] + (g.tb[2] - g.ta[2]) * t;
+  const l = Math.hypot(x, y, z) || 1;
+  out[0] = x / l; out[1] = y / l; out[2] = z / l;
+  return out;
+}
+const _asdU = [0, 0, 0];
 function asdFlow(px, py, pz, G, H) {
   const v = H.vAsd || 0;
-  if (Math.abs(v) < 0.02) return;
+  if (Math.abs(v) < 0.02 || (_flowMask && !((_flowMask >>> FLOW.ASD_JET) & 1))) return;
   const C = ASD_CORE, N = LM.IAS_N, U = LM.IAS.asdU, Bk = LM.IAS.asdB;
   const Ru = LM.IAS.asdR, Rb = LM.IAS.asdRb;
   const dx = px - C[0], dy = py - C[1], dz = pz - C[2];
@@ -1516,34 +1550,59 @@ function asdFlow(px, py, pz, G, H) {
     if (up > -0.5 && r2 < 1.6) {
       const conv = up > -0.1 ? 1 : Math.exp((up + 0.1) / 0.15);       // converging only within the last few mm
       const prof = r2 < 1 ? 1 - 0.75 * r2 : 0.25 * (1.6 - r2) / 0.6;
-      considerFlow(true, N[0] * sg, N[1] * sg, N[2] * sg, av * prof * conv, FLOW.ASD_JET, 0.05);
+      const sp = av * prof * conv;
+      // in the atrial lumen on this side of the septum (not the septal rim round
+      // the hole, not the aortic root)
+      if (sp > 0.01 && !(_velHasBest && sp <= _velResult.speed) &&
+          lumenDist(px, py, pz, G.A, s < 0 ? 'LA' : 'RA') < 0 && lumenDist(px, py, pz, G.A, 'AOROOT') > 0) {
+        considerFlow(true, N[0] * sg, N[1] * sg, N[2] * sg, sp, FLOW.ASD_JET, 0.05);
+      }
     }
-    if (up > -0.1) return;
     return;
   }
   if (sg < 0) return;                                   // the brief reversal stays at the defect
   // RA side: nearest point on the column's centreline
   const P = asdPath(G);
-  let best = 1e9, bs = 0, bu = null, bx = 0, by = 0, bz = 0;
+  let best = 1e9, bs = 0, bg = null, bt = 0, bx = 0, by = 0, bz = 0;
   for (const g of P.segs) {
     const qx = px - g.a[0], qy = py - g.a[1], qz = pz - g.a[2];
     const t = clamp(qx * g.u[0] + qy * g.u[1] + qz * g.u[2], 0, g.l);
     const rx = qx - g.u[0] * t, ry = qy - g.u[1] * t, rz = qz - g.u[2] * t;
     const d2 = rx * rx + ry * ry + rz * rz;
-    if (d2 < best) { best = d2; bs = g.s0 + t; bu = g.u; bx = rx; by = ry; bz = rz; }
+    if (d2 < best) { best = d2; bs = g.s0 + t; bg = g; bt = t / g.l; bx = rx; by = ry; bz = rz; }
   }
+  const bu = asdDir(bg, bt, _asdU);
   const f = bs / P.L;                                    // 0 at the defect -> 1 at the valve
-  if (f > 0.85) return;
-  // the column fans out as it goes (more across the long axis of the oval
-  // defect), slowing as a free jet does (~1/width): only its core near the
-  // defect is above a standard colour scale
-  const gu = 1 + f, gb = 1 + 1.5 * f;
-  const ru = (bx * U[0] + by * U[1] + bz * U[2]) / (Ru * 1.2 * gu), rb = (bx * Bk[0] + by * Bk[1] + bz * Bk[2]) / (Rb * 0.8 * gb);
+  if (f >= ASD_COL_END) return;
+  // the column spreads a little as it goes and slows as a free jet does (~1/width):
+  // only its core near the defect is above a standard colour scale
+  const g = asdSpread(f);
+  const ru = (bx * U[0] + by * U[1] + bz * U[2]) / Math.min(ASD_COL_WU, Ru * 1.2 * g[0]);
+  const rb = (bx * Bk[0] + by * Bk[1] + bz * Bk[2]) / Math.min(ASD_COL_WB, Rb * 0.8 * g[1]);
   const r2 = ru * ru + rb * rb;
   if (r2 >= 1.3) return;
   const prof = r2 < 1 ? 1 - 0.75 * r2 : 0.25 * (1.3 - r2) / 0.3;
-  const sp = av * prof / Math.pow(gu * gb, 0.6) * (f > 0.7 ? (0.85 - f) / 0.15 : 1);
-  considerFlow(true, bu[0], bu[1], bu[2], sp, FLOW.ASD_JET, f < 0.2 && r2 < 0.4 ? 0.25 : 0.08);
+  const sp = av * prof * asdSpeedK(f);
+  // the RA lumen only (never the aortic root against it)
+  if (sp > 0.01 && !(_velHasBest && sp <= _velResult.speed) &&
+      lumenDist(px, py, pz, G.A, 'RA') < -0.05 && lumenDist(px, py, pz, G.A, 'AOROOT') > 0) {
+    considerFlow(true, bu[0], bu[1], bu[2], sp, FLOW.ASD_JET, f < 0.2 && r2 < 0.4 ? 0.25 : 0.08);
+  }
+}
+// The shunt stream's centreline from the defect into the RA, sampled every `ds`
+// cm up to `sMax` cm: point, unit tangent (the flow direction: IAS_N at the
+// defect, turning toward the tricuspid valve) and the centreline speed relative to
+// the flow through the defect. The spectral PW site for the shunt is placed on it.
+export function asdStream(G, ds = 0.1, sMax = 1.6) {
+  const P = asdPath(G), out = [];
+  for (let i = 0; i * ds <= sMax + 1e-9; i++) {
+    const s = i * ds;
+    let g = P.segs[0];
+    for (const h of P.segs) if (h.s0 <= s) g = h;
+    const t = Math.min(s - g.s0, g.l);
+    out.push({ s, q: [g.a[0] + g.u[0] * t, g.a[1] + g.u[1] * t, g.a[2] + g.u[2] * t], ax: asdDir(g, t / g.l, [0, 0, 0]), k: asdSpeedK(s / P.L) });
+  }
+  return out;
 }
 
 // Ascending aorta, arch and descending thoracic aorta: a blunt (plug) systolic
@@ -1599,12 +1658,15 @@ function aorticFlow(px, py, pz, G, H, phase) {
 // Blood-flow velocity field (cm/s) at a point & phase, for colour Doppler.
 // Returns {vx,vy,vz, speed, flow, turbulent} (a reused singleton) or null.
 // speed in m/s magnitude. Every compartment is a tapering stream: away from a
-// jet/tract the returned velocity is null / near-zero.
+// jet/tract the returned velocity is null / near-zero. `flowMask` (a bit per FLOW
+// tag, 0 = all) limits the answer to those flows: the colour pass passes the
+// flows of the sample's own blood pool (echo.js FLOW_POOLS).
 // ---------------------------------------------------------------------------
-export function velocityAt(px, py, pz, G, path = {}) {
+export function velocityAt(px, py, pz, G, path = {}, flowMask = 0) {
   const phase = G.phase;
   const H = G.hemo;   // per-frame haemodynamic scalars (jet peaks + flow envelopes)
   _velHasBest = false;
+  _flowMask = flowMask;
   _jetPhase = phase;
 
   const inLV = ellip(px, py, pz, G.lv.c, G.lv.r) <= 1;

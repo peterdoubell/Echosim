@@ -3434,14 +3434,27 @@ SECTION = 'Pathology';
   // secundum ASD colour: a laminar column through the defect into the RA
   const ga = 'ASD colour (a column through the defect, streaming toward the TV)';
   const asd = PATHS.asd, iasS = (q) => dot(sub(q, LM.IAS_P), LM.IAS_N);
-  for (const V of ['MEBICAVAL', 'SUBCOSTAL']) {
+  // (review 12) the colour pass asks velocityAt only for the flows of the sample's
+  // own blood pool (echo.js FLOW_POOLS); `shown` re-evaluates a pixel that way
+  const { FLOW_POOLS, colourPreset } = await import('../js/echo.js');
+  const { asdStream } = await import('../js/cardiac-model.js');
+  const poolMask = (k) => {
+    if (!isBlood(k)) return 0;
+    let m = 0;
+    for (const f of Object.values(FLOW)) if (f !== FLOW.NONE && ((FLOW_POOLS[f] == null) || (FLOW_POOLS[f] >> k) & 1)) m |= 1 << f;
+    return m;
+  };
+  const shown = (R, i, j, path) => { const q = world(R, i, j), v = velocityAt(q[0], q[1], q[2], R.G, path, poolMask(R.kind[j * R.SW + i])); return v ? v.flow : -1; };
+  assert(ga, 'colour whitelist: every flow tag has its blood pools (FLOW_POOLS)', Object.values(FLOW).every((f) => f === FLOW.NONE || FLOW_POOLS[f] != null));
+  for (const V of ['MEBICAVAL', 'SUBCOSTAL', 'MEAVSAX', 'A4C']) {
     const R = renderDoppler(V, 0.5, asd, { cboxSize: 0.6 }), G = R.G;
     // "toward the TV" on the image: the defect-to-valve direction projected into the plane
     const T = G.A.valves.tricuspid.c, C = LM.IAS.asdC, nP = R.probe.normal, t3 = sub(T, C), uT = unit(sub(t3, mul(nP, dot(t3, nP))));
-    let n = 0, ra = 0, sept = 0, all = 0, vmax = 0, cx = 0, cy = 0, sx = 0, sy = 0, sxy = 0, cw = [0, 0, 0];
+    let n = 0, ra = 0, sept = 0, all = 0, vmax = 0, cx = 0, cy = 0, sx = 0, sy = 0, sxy = 0, cw = [0, 0, 0], onAo = 0, outRL = 0, nShown = 0;
     const pts = [];
     for (let j = 0; j < R.SH; j++) for (let i = 0; i < R.SW; i++) {
       const k = j * R.SW + i; if (R.alpha[k] < 0.5) continue;
+      if (shown(R, i, j, asd) === FLOW.ASD_JET) { nShown++; if (R.kind[k] === TISSUE.AORTA) onAo++; if (R.kind[k] !== TISSUE.RA && R.kind[k] !== TISSUE.LA) outRL++; }
       const q = world(R, i, j), v = velocityAt(q[0], q[1], q[2], G, asd);
       if (!v || v.flow !== FLOW.ASD_JET) continue;
       n++; if (iasS(q) > 0) ra++;
@@ -3449,22 +3462,77 @@ SECTION = 'Pathology';
       pts.push([i / R.pxPerCm, j / R.pxPerCm]); cw = add(cw, q);
     }
     for (let j = 0; j < R.SH; j++) for (let i = 0; i < R.SW; i++) { const k = j * R.SW + i; if (R.alpha[k] < 0.5) continue; all++; if (!isBlood(R.kind[k])) sept++; }
-    for (const [x, y] of pts) { cx += x; cy += y; } cx /= pts.length || 1; cy /= pts.length || 1;
-    for (const [x, y] of pts) { sx += (x - cx) ** 2; sy += (y - cy) ** 2; sxy += (x - cx) * (y - cy); }
-    const tr = sx + sy, det = sx * sy - sxy * sxy, l1 = tr / 2 + Math.sqrt(Math.max(0, tr * tr / 4 - det)), l2 = tr / 2 - Math.sqrt(Math.max(0, tr * tr / 4 - det));
-    const cen = mul(cw, 1 / (n || 1));
-    check(ga, `${V}: shunt colour cells on the RA side / all shunt colour`, n ? ra / n : null, [0.75, 1], '', `${n} px`);
-    check(ga, `${V}: colour cells over septal (non-blood) tissue`, all ? 100 * sept / all : null, [0, 1], '%');
-    check(ga, `${V}: shunt colour region elongation (major / minor axis)`, l2 > 0 ? Math.sqrt(l1 / l2) : null, [1.8, 6], '');
-    // KNOWN-FAIL in ME bicaval: the tricuspid valve lies ~3.4 cm out of that plane,
-    // so the column leaves the slice as it bends toward the valve; the in-plane
-    // shift into the RA (across the septum) is checked below for both views
-    KNOWN = V === 'MEBICAVAL';
-    check(ga, `${V}: shunt colour centroid shift from the defect toward the TV`, dot(sub(cen, C), uT), [1, 4], 'cm');
-    KNOWN = false;
-    const uN = unit(sub(LM.IAS_N, mul(R.probe.normal, dot(LM.IAS_N, R.probe.normal))));
-    check(ga, `${V}: shunt colour centroid shift from the defect into the RA (in-plane)`, dot(sub(cen, C), uN), [0.8, 4], 'cm');
-    check(ga, `${V}: peak shunt velocity`, vmax, [0.6, 1.3], 'm/s');
+    // review 12: the shunt never colours the aortic root (in the ME AV short axis an
+    // ungated column ran on into the closed root, reading as AR) or any pool but the atria
+    check(ga, `${V}: shunt colour pixels over the aortic root / aorta (AORTA-labelled)`, onAo, [0, 0], 'px', `${nShown} shunt px`);
+    check(ga, `${V}: shunt colour pixels outside the RA / LA`, nShown ? 100 * outRL / nShown : 0, [0, 1], '%');
+    {
+      // ... nor does the shunt's velocity field reach into the root (the flow is
+      // held to the atrial lumens, whatever the colour gate does)
+      const S = planeSample(ALL_V[V], G, asd, 0.1);
+      let leak = 0;
+      for (let jj = 0; jj < S.nd; jj++) for (let ii = 0; ii < S.nx; ii++) {
+        if (S.lab[jj * S.nx + ii] !== TISSUE.AORTA) continue;
+        const q = S.pt(ii, jj); if (lumenDist(q[0], q[1], q[2], G.A, 'AOROOT') > 0) continue;
+        const v = velocityAt(q[0], q[1], q[2], G, asd); if (v && v.flow === FLOW.ASD_JET) leak++;
+      }
+      check(ga, `${V}: shunt velocity field inside the aortic root (in-plane area)`, leak * 0.01, [0, 0], 'cm2');
+    }
+    {
+      // the column's width 1 cm into the RA: in the image, across the stream, through
+      // the stream point 1 cm past the defect (projected into the plane), over the
+      // shunt velocity field (>= 0.1 m/s; the colour itself drops out where the beam
+      // crosses the stream at ~90 deg, as in the A4C)
+      const s1 = asdStream(G, 0.5, 1.0)[2], off1 = dot(sub(s1.q, R.probe.pos), nP), q1 = sub(s1.q, mul(nP, off1));
+      const a1 = unit(sub(s1.ax, mul(nP, dot(s1.ax, nP)))), p1 = unit(cross(nP, a1));
+      const runs = []; let cur = 0, x0 = 0;
+      for (let x = -3; x <= 3.0001; x += 0.02) {
+        const q = add(q1, mul(p1, x)), v = velocityAt(q[0], q[1], q[2], G, asd), on = !!(v && v.flow === FLOW.ASD_JET && v.speed >= 0.1);
+        if (on) { if (!cur) x0 = x; cur += 0.02; } else if (cur) { runs.push([x0, cur]); cur = 0; }
+      }
+      if (cur) runs.push([x0, cur]);
+      let w = 0, dmin = 1e9; for (const [a, l] of runs) { const d = a <= 0 && a + l >= 0 ? 0 : Math.min(Math.abs(a), Math.abs(a + l)); if (d < dmin) { dmin = d; w = l; } }
+      if (dmin > 0.3) w = 0;
+      // KNOWN-FAIL in ME AV SAX: that plane passes 0.45 cm from the defect's centre and
+      // misses the hole (its nearest edge ~0.1 cm off the plane), and the stream 1 cm
+      // past the defect lies ~1.5 cm out of it: the shunt crosses the septum outside
+      // the slice and is seen only where it turns back into it, 2-3 cm into the RA
+      // (the ME AV SAX plane and the defect position: tee / rawall)
+      KNOWN = V === 'MEAVSAX';
+      check(ga, `${V}: RA-side shunt column width 1 cm beyond the septum`, w, [0.6, 1.6], 'cm', `stream point ${off1.toFixed(2)} cm off the plane`);
+      KNOWN = false;
+    }
+    if (V === 'MEBICAVAL' || V === 'SUBCOSTAL') {
+      // (review 11 rows: in the A4C the beam crosses the shunt at ~80 deg and the
+      // colour drops out along the column, and the ME AV SAX sees it only downstream)
+      for (const [x, y] of pts) { cx += x; cy += y; } cx /= pts.length || 1; cy /= pts.length || 1;
+      for (const [x, y] of pts) { sx += (x - cx) ** 2; sy += (y - cy) ** 2; sxy += (x - cx) * (y - cy); }
+      const tr = sx + sy, det = sx * sy - sxy * sxy, l1 = tr / 2 + Math.sqrt(Math.max(0, tr * tr / 4 - det)), l2 = tr / 2 - Math.sqrt(Math.max(0, tr * tr / 4 - det));
+      const cen = mul(cw, 1 / (n || 1));
+      check(ga, `${V}: shunt colour cells on the RA side / all shunt colour`, n ? ra / n : null, [0.75, 1], '', `${n} px`);
+      check(ga, `${V}: colour cells over septal (non-blood) tissue`, all ? 100 * sept / all : null, [0, 1], '%');
+      check(ga, `${V}: shunt colour region elongation (major / minor axis)`, l2 > 0 ? Math.sqrt(l1 / l2) : null, [1.8, 6], '');
+      // KNOWN-FAIL in ME bicaval: the tricuspid valve lies ~3.4 cm out of that plane,
+      // so the column leaves the slice as it bends toward the valve; the in-plane
+      // shift into the RA (across the septum) is checked below for both views
+      KNOWN = V === 'MEBICAVAL';
+      check(ga, `${V}: shunt colour centroid shift from the defect toward the TV`, dot(sub(cen, C), uT), [1, 4], 'cm');
+      KNOWN = false;
+      const uN = unit(sub(LM.IAS_N, mul(R.probe.normal, dot(LM.IAS_N, R.probe.normal))));
+      check(ga, `${V}: shunt colour centroid shift from the defect into the RA (in-plane)`, dot(sub(cen, C), uN), [0.8, 4], 'cm');
+      check(ga, `${V}: peak shunt velocity`, vmax, [0.6, 1.3], 'm/s');
+    }
+  }
+  {
+    // review 12: the colour box goes over the lesion whatever the spectral trace (in
+    // the A4C the ASD's trace is the mitral inflow), narrowed, with a lowered scale
+    const pre = colourPreset('A4C', asd), R = renderDoppler('A4C', 0.5, asd, { nyquist: pre.nyquist, cboxSize: pre.box });
+    const b = R.box, tc = (b.t0 + b.t1) / 2, dc = (b.d0 + b.d1) / 2, pr = R.probe, C = LM.IAS.asdC;
+    const bc = add(pr.pos, add(mul(pr.dir, dc * Math.cos(tc)), mul(pr.lat, dc * Math.sin(tc))));
+    const C0 = sub(C, mul(pr.normal, dot(sub(C, pr.pos), pr.normal)));
+    check(ga, 'A4C: colour box centre to the defect', Math.hypot(...sub(bc, C0)), [0, 1.0], 'cm', `trace ${R.spec.site}, box ${((b.t1 - b.t0) / (2 * 0.66)).toFixed(2)} of the sector`);
+    check(ga, 'secundum ASD: colour scale for the shunt study (Nyquist)', pre.nyquist, [0.4, 0.5], 'm/s', `box ${pre.box} of the sector`);
+    assert(ga, 'normal heart: standard colour scale and box (62 cm/s, 0.45)', colourPreset('A4C', {}).nyquist === 0.62 && colourPreset('A4C', {}).box === 0.45);
   }
 }
 
@@ -3476,9 +3544,29 @@ SECTION = 'Pathology';
   // shunt and the right-heart volume load it brings
   const asd = PATHS.asd, sA = hemoSummary(asd);
   check(g, 'secundum ASD: Qp:Qs', sA.QpQs, [1.5, 3], '', `shunt ${sA.shuntVol.toFixed(0)} mL/beat`);
-  // (the shunt crosses the subcostal and ME bicaval beams at 30-40 deg: no standard
-  // trace there; ME AV short axis meets it end-on)
-  for (const vn of ['SUBCOSTAL', 'MEBICAVAL']) assert(g, `secundum ASD ${vn}: no default spectral site (shunt crosses the beam > 20 deg)`, renderDoppler(vn, 0.3, asd, { color: false }).spec.site === null);
+  // (the shunt crosses the ME bicaval beam at ~30-40 deg: no standard trace there;
+  // the ME AV short axis meets it within 20 deg where it has turned toward the beam)
+  for (const vn of ['MEBICAVAL']) assert(g, `secundum ASD ${vn}: no default spectral site (shunt crosses the beam > 20 deg)`, renderDoppler(vn, 0.3, asd, { color: false }).spec.site === null);
+  {
+    // review 12: the subcostal window is where the shunt is recorded on TTE (ASE
+    // 2015 ASD/PFO guideline, Silvestry et al.: the subcostal views put the atrial
+    // septum most nearly perpendicular to the beam). The view's own beam meets the
+    // stream at > 30 deg here, so the trace is taken from a modified window (the
+    // operator rocks the probe: site asdSc, `align`), within the 20 deg policy. At a
+    // ~13 cm gate the PRF limit (~1.1 m/s) is below the shunt's peak: the baseline
+    // is shifted for the one-way signal, so the trace reads without wrapping.
+    const sp = renderDoppler('SUBCOSTAL', 0.3, asd, {}).spec;
+    let mx = 0;
+    for (let c = 0; c < sp.cols; c++) mx = Math.max(mx, Math.abs(sp.vs[c]));
+    assert(g, 'secundum ASD SUBCOSTAL: default PW at the atrial septum', sp.mode === 'PW' && sp.site === 'asdSc', `${sp.mode} ${sp.site}`);
+    check(g, 'secundum ASD SUBCOSTAL: default PW at the atrial septum, beam-flow angle', sp.angleDeg, [0, 20], 'deg');
+    check(g, 'secundum ASD SUBCOSTAL: PW peak', mx, [0.9, 1.5], 'm/s');
+    check(g, 'secundum ASD SUBCOSTAL: peak read off the trace (not aliased: baseline shifted for the one-way signal)', sp.aliased ? null : sp.peak, [0.9, 1.5], 'm/s',
+      `Nyquist ${sp.nyq.toFixed(2)} m/s, baseline at ${sp.baseline.toFixed(2)} of the plot, toward the probe ${sp.peakSign > 0 ? 'yes' : 'no'}`);
+    // (a jet faster than twice the limit still wraps; an ordinary trace keeps the baseline mid-plot)
+    const n4 = renderDoppler('A4C', 0.3, {}, { color: false }).spec;
+    assert(g, 'normal A4C mitral PW: baseline mid-plot (no shift without aliasing)', n4.mode === 'PW' && n4.baseline === 0.5 && !n4.aliased, `baseline ${n4.baseline}`);
+  }
   for (const vn of ['MEAVSAX']) {
     const sp = renderDoppler(vn, 0.3, asd, {}).spec;
     let mx = 0, mn = 99;
