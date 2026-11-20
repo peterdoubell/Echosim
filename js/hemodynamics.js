@@ -43,22 +43,25 @@ const TR = 0.14;              // relaxation: activation decays back to zero
 // right bundle reaches the free wall last) and relaxes on its own time (relax).
 // With the low, compliant pulmonary load this puts tricuspid
 // closure (T1) after mitral closure (M1), pulmonary closure (P2) after aortic (A2,
-// the physiological split of S2) and tricuspid opening before mitral opening.
+// the physiological split of S2) and a shorter isovolumic relaxation than the LV's.
 // delay: activation delay as a fraction of the reference cycle (0.03 ~ 25 ms);
 // contract: RV activation rise time to its peak (cycle fraction; the LV's is TC),
 // a little longer: with the delay, P2 follows A2 by ~30 ms and the RVOT envelope
 // peaks in mid-systole;
 // relax: RV activation decay time (cycle fraction; the LV's is TR), shorter than
 // the LV's: the RV only has to fall from ~25 to ~5 mmHg, so its isovolumic
-// relaxation is brief and the tricuspid valve opens ~15 ms before the mitral.
-// raLead: how far (cycle fraction) the RA booster peaks ahead of the LA's. In
-// this lumped model an AV valve shuts when its flow stops, so the RA kick is
-// timed against its own, later-contracting ventricle, as the LA's is against the
-// LV: its tricuspid A wave decelerates to zero as the RV contracts and T1 follows
-// M1 by ~25 ms (-0.02: the RA booster peaks ~17 ms after the LA's; in vivo the
-// RA is activated 10-20 ms before the LA, but the valve sound waits for the RV).
+// relaxation is brief (~50 ms against the LV's ~75) and the tricuspid valve opens
+// within a few ms of the mitral.
+// raLead: how far (cycle fraction) the RA booster peaks ahead of the LA's: 0.02,
+// ~17 ms, as in vivo (the sinus node is in the RA, which is activated 10-20 ms
+// before the LA). In this lumped model an AV valve shuts when its flow stops. The
+// tricuspid A wave outlasts the mitral's although the RA contracts first: the RV
+// is activated later (delay) and, as its last filling lifts the annulus back,
+// the RA keeps its pressure (raDesc), so T1 follows M1 by ~25 ms. (Before the
+// annular descent was modelled the RA kick had to lag the LA's, -0.02, to hold
+// the tricuspid valve open that long.)
 // A pathology may override it (p.raLead: the ASD's shunt calibration).
-export const RV_TIMING = { delay: 0.03, contract: 0.41, relax: 0.09, raLead: -0.02 };
+export const RV_TIMING = { delay: 0.03, contract: 0.41, relax: 0.09, raLead: 0.02 };
 const NSAMPLE = 240;          // samples stored per output cycle
 const STEPS = 3000;           // integration steps per cycle
 const NCYCLE = 60;            // cycles run to reach the limit cycle (the right heart's volumes settle slowly)
@@ -204,9 +207,12 @@ function circParams(path) {
     kVI: 0,
     Era: 0.13,   // passive RA elastance
     // RA booster (activation raises Era by aRa x Era, timed by RV_TIMING.raLead).
-    // The normal RA's a-wave stands at or just above its v-wave (review 12, MOT-7:
-    // 1.0 left v > a, the left-atrial pattern)
-    aRa: 1.5,
+    // The normal RA's a-wave stands at or just above its v-wave (review 12, MOT-7).
+    // The x descent of the annulus (raDesc) lowers the v-wave, so a booster of 1.0
+    // gives a ~4.4, v ~3.6 mmHg; without the descent 1.0 left v > a (the left-atrial
+    // pattern), and 1.5 with it doubles the hepatic-vein atrial reversal (~0.26 m/s
+    // against the normal ~0.13) and pushes the tricuspid E/A below 1.
+    aRa: 1.0,
     V0ra: 8,     // RA unstressed volume
     Rsv: 0.018,  // systemic vein -> RA resistance (phasic caval S / D inflow)
     // Tricuspid annular descent: as the RV long axis shortens in systole the
@@ -215,7 +221,9 @@ function circParams(path) {
     // then falls through ejection (the x descent) and the caval / hepatic-vein
     // inflow peaks in systole: the S wave that dominates the normal hepatic-vein
     // trace (S > D). Follows the RV volume ratio, rho_RV^0.24, as laDesc does the LV's.
-    raDesc: 42,
+    // (38 mL at an RV ejection fraction of 0.6: hepatic S/D ~1.6 with the solved
+    // RV of review 12, RVEF ~55 %; a pathology may override it, rightHeartParams.)
+    raDesc: 38,
     kLv: 0, Vk: 0, // restrictive LV: extra passive stiffness kLv (mmHg/mL2) above volume Vk (mL)
     Atr: 0,      // effective TR orifice (cm2), Bernoulli
     Ppc: 0,      // pericardial pressure (mmHg), added to every chamber (tamponade)
@@ -421,8 +429,14 @@ function rightHeartParams(path, g) {
     // severe: the RA is "ventricularised" — a dilated (RA ~95-125 mL, not the
     // ~450 mL of a slack chamber) but full, stiff atrium whose systolic filling by
     // the regurgitant volume is a giant c-v wave well above its weak a-wave, and
-    // whose y descent is steep; the volume-loaded RV is compliant (RAP ~12)
-    severe: { Atr: 0.8, Era: 0.4, V0ra: 80, aRa: 0.1, V0rv: 23.5, Ermin: 0.065, Ermax: 0.55, Rpvr: 0.199 },
+    // whose y descent is steep; the volume-loaded RV is compliant (RAP ~12).
+    // (raDesc 0: in severe TR the x descent is obliterated. The regurgitant jet
+    // fills the RA from the first instant of RV contraction and the c-v wave takes
+    // the place of the systolic fall in RA pressure, so the hepatic-vein S wave is
+    // reversed. With the annular-descent capacity of a competent valve the RA would
+    // absorb the regurgitant volume at an almost flat pressure: v - a ~2.6 mmHg and
+    // forward systolic hepatic flow, the picture of mild TR.)
+    severe: { Atr: 0.8, Era: 0.4, V0ra: 80, aRa: 0.1, raDesc: 0, V0rv: 23.5, Ermin: 0.065, Ermax: 0.55, Rpvr: 0.199 },
   })[g]);
   if (path.dilated) Object.assign(r, ({
     borderline: { Ermax: 0.5, Ermin: 0.04 }, impaired: { Ermax: 0.4, Ermin: 0.055, V0rv: 40 },
@@ -432,7 +446,12 @@ function rightHeartParams(path, g) {
   // flow; the volume-loaded atria contract a little later in diastole)
   if (path.asd) Object.assign(r, { Ermin: 0.02, V0rv: 60, Era: 0.1, V0ra: 25, aRa: 3, aAt: 0.915, raLead: 0.035 });
   if (path.tamponade) {
-    Object.assign(r, { Ppc: 13.2, Kpc: 0.177, Era: 0.233, Ermin: 0.0168, V0rv: 18.2, laOff: 5.3, respLa: 1.0, septShift: 0.5, V0la: 20, aWave: 5, aRa: 2.5 });
+    // (Kpc 0.20, from 0.177: with the tricuspid annular descent, raDesc, the RA
+    // fills while the ventricles eject, so the total heart volume swings less over
+    // the cycle; the tenser sac keeps the end-diastolic pressure peak that inverts
+    // the just-emptied RA free wall — > 1.5 mm for ~0.4 of the cycle, 0.28 at 0.177 —
+    // and holds the hepatic-vein D wave down, D/S < 0.3 in every breath.)
+    Object.assign(r, { Ppc: 13.2, Kpc: 0.20, Era: 0.233, Ermin: 0.0168, V0rv: 18.2, laOff: 5.3, respLa: 1.0, septShift: 0.5, V0la: 20, aWave: 5, aRa: 2.5 });
     // (vr: the venous return, up in inspiration as the pleural pressure falls)
     if (path.resp === 'insp') r.vr = 1.45;
     if (path.resp === 'exp') r.vr = 0.7;

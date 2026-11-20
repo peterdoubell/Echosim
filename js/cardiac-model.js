@@ -199,7 +199,7 @@ function atrialKick(phase) {
 // Right-heart timing. The right heart is solved in the same closed loop as the
 // left (hemodynamics.js: its own RV elastance, activated RV_TIMING.delay after
 // the LV and relaxing on its own time; RA, tricuspid, pulmonary valve and PA), so
-// its valve events (T1 after M1, P2 after A2, tricuspid opening before mitral),
+// its valve events (T1 after M1, P2 after A2, a shorter isovolumic relaxation),
 // its volume and its flows come straight from the solved Qtv, Qpa and Vrv at the
 // cycle phase. (Review 12: the earlier replay of the LEFT ventricle's trace on a
 // shifted clock is retired.) What remains is phaseRV, the phase at which the
