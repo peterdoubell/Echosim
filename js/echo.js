@@ -2171,8 +2171,10 @@ export class EchoView {
       const big = Math.max(S.posMax, S.negMax), small = Math.min(S.posMax, S.negMax);
       const need = (v) => (v > 0.03 ? v * 1.1 + 0.08 : 0.04);          // room a direction needs (band + headroom)
       if (!this.pwNyquist && big > nyqPW && need(big) + need(small) <= 2 * nyqPW) {
-        fTop = need(big) / (2 * nyqPW);
-        if (S.negMax > S.posMax) fTop = 1 - fTop;
+        // (flow above the baseline also keeps clear of the header line at the top, as far as the other direction allows)
+        const up = S.posMax >= S.negMax;
+        fTop = Math.max(need(big) / (2 * nyqPW), up ? Math.min(big / (2 * nyqPW) + 14 / plotH, 1 - need(small) / (2 * nyqPW)) : 0);
+        if (!up) fTop = 1 - fTop;
       }
     }
     else {
@@ -2315,8 +2317,9 @@ export class EchoView {
       ctx.fillStyle = col; ctx.fillText(t, x, y);
     };
     label(`${mode}  ${gate.name}  θ ${Math.round(gate.angleDeg)}°  m/s`, 4, 10, 'rgba(170,215,245,0.95)', '9px monospace');
-    // (a CW trace above the baseline: the flag goes below it, clear of the envelope)
-    let y2 = mode === 'CW' && fTop > 0.5 ? plotH - 4 : 21;
+    // (a CW trace above the baseline: the flag goes below it, clear of the envelope;
+    // so do the two lines of a PW trace whose baseline is shifted down the plot)
+    let y2 = fTop > 0.5 ? (mode === 'CW' ? plotH - 4 : plotH - (gate.steep || gate.aligned ? 15 : 4)) : 21;
     if (gate.steep) {
       // an operator-placed site the beam crosses too steeply: the trace is shown
       // but flagged, since v cos(theta) under-reads the flow
