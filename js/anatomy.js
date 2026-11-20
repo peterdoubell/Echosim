@@ -2017,13 +2017,21 @@ function dSVC(x, y, z, v, grow) {
   const lo = sdCapsule(x, y, z, v.a[0], v.a[1], v.a[2], v.b[0], v.b[1], v.b[2], v.r + grow);
   return v.c ? Math.min(lo, sdCapsule(x, y, z, v.b[0], v.b[1], v.b[2], v.c[0], v.c[1], v.c[2], v.r + grow)) : lo;
 }
+// RA wall over the aortic mound (torus aorticus), cm: the thin medial atrial wall
+// lying on the non-coronary sinus. With the root on the body axes and the RA at
+// its normal size the apical four-chamber plane passes ~0.4 cm behind the sinus
+// at end-systole and grazes this wall: at 0.22 cm it joined the interatrial
+// septum into a 1.4 cm block at the crux (mean septal thickness 0.62 cm); at
+// 0.15 cm the RA gains 0.6 cm2 in that plane (RA / LA area 0.92). 0.18 cm: mean
+// septal thickness 0.47 cm, RA 17.6 cm2, RA / LA 0.91.
+const RA_AO_WALL = 0.18;
 function dRAlumen(x, y, z, A, folds = true) {
   const e = sdAtrium(x, y, z, A.ra, 0);
   if (e > 4.0) {                                                     // far away: only the caval tubes matter
     const v = A.svc, w = A.ivc;
     const t = Math.min(e, dSVC(x, y, z, v, 0),
       sdCapsule(x, y, z, w.a[0], w.a[1], w.a[2], w.b[0], w.b[1], w.b[2], w.r));
-    return t > 1.5 ? t : ssub(t, dAOroot(x, y, z, A) - A.ao.wall - 0.22, 0.15);   // SVC abuts, never enters, the aorta
+    return t > 1.5 ? t : ssub(t, dAOroot(x, y, z, A) - A.ao.wall - RA_AO_WALL, 0.15);   // SVC abuts, never enters, the aorta
   }
   let d = smin(e, dAppendage(x, y, z, A.ra.aa, 0.3), 0.7);          // BROAD mouth
   const v = A.svc, w = A.ivc;
@@ -2050,7 +2058,7 @@ function dRAlumen(x, y, z, A, folds = true) {
   d = smax(d, -s.s + s.t, 0.12);
   // the aortic root (non-coronary sinus) bulges against the RA: its wall and the
   // RA wall lie between the two blood pools, never a shared lumen
-  d = ssub(d, dAOroot(x, y, z, A) - A.ao.wall - 0.22, 0.15);
+  d = ssub(d, dAOroot(x, y, z, A) - A.ao.wall - RA_AO_WALL, 0.15);
   // the crista terminalis and the Eustachian valve are folds of the RA wall: carved
   // from the lumen, so they stay continuous with the wall in every plane
   if (folds && A.crista && d > -0.9) d = smax(d, -dCrista(x, y, z, A), 0.1);
