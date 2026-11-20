@@ -1608,13 +1608,18 @@ function asdFlow(px, py, pz, G, H) {
   // the RA lumen only (never the aortic root against it)
   if (sp > 0.01 && !(_velHasBest && sp <= _velResult.speed) &&
       lumenDist(px, py, pz, G.A, 'RA') < -0.05 && lumenDist(px, py, pz, G.A, 'AOROOT') > 0) {
-    considerFlow(true, bu[0], bu[1], bu[2], sp, FLOW.ASD_JET, f < 0.2 && r2 < 0.4 ? 0.25 : 0.08);
+    // (the column's slow skirt and far end are laminar: no velocity spread there. With
+    // a spread, the colour map's per-cell scatter is as large as the few cm/s the
+    // beam records where a plane cuts the skirt lengthwise, as the subcostal one
+    // does toward the tricuspid valve, and the colour broke up into a grid of dots.)
+    considerFlow(true, bu[0], bu[1], bu[2], sp, FLOW.ASD_JET, f < 0.2 && r2 < 0.4 ? 0.25 : sp > 0.3 ? 0.08 : 0);
   }
 }
 // The shunt stream's centreline from the defect into the RA, sampled every `ds`
 // cm up to `sMax` cm: point, unit tangent (the flow direction: IAS_N at the
 // defect, turning toward the tricuspid valve) and the centreline speed relative to
-// the flow through the defect. The spectral PW site for the shunt is placed on it.
+// the flow through the defect (and `w`, the column's short half-width there). The
+// spectral PW site for the shunt and its colour box are placed on it.
 export function asdStream(G, ds = 0.1, sMax = 1.6) {
   const P = asdPath(G), out = [];
   for (let i = 0; i * ds <= sMax + 1e-9; i++) {
@@ -1622,7 +1627,7 @@ export function asdStream(G, ds = 0.1, sMax = 1.6) {
     let g = P.segs[0];
     for (const h of P.segs) if (h.s0 <= s) g = h;
     const t = Math.min(s - g.s0, g.l);
-    out.push({ s, q: [g.a[0] + g.u[0] * t, g.a[1] + g.u[1] * t, g.a[2] + g.u[2] * t], ax: asdDir(g, t / g.l, [0, 0, 0]), k: asdSpeedK(s, P.L) });
+    out.push({ s, q: [g.a[0] + g.u[0] * t, g.a[1] + g.u[1] * t, g.a[2] + g.u[2] * t], ax: asdDir(g, t / g.l, [0, 0, 0]), k: asdSpeedK(s, P.L), w: asdSpread(s)[0] });
   }
   return out;
 }

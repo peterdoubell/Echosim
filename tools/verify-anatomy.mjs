@@ -3497,7 +3497,7 @@ SECTION = 'Pathology';
       // misses the hole (its nearest edge ~0.1 cm off the plane), and the stream 1 cm
       // past the defect lies ~1.5 cm out of it: the shunt crosses the septum outside
       // the slice and is seen only where it turns back into it, 2-3 cm into the RA
-      // (the ME AV SAX plane and the defect position: tee / rawall)
+      // (the ME AV SAX plane and the defect position: pending tee / rawall)
       KNOWN = V === 'MEAVSAX';
       check(ga, `${V}: RA-side shunt column width 1 cm beyond the septum`, w, [0.6, 1.6], 'cm', `stream point ${off1.toFixed(2)} cm off the plane`);
       KNOWN = false;
@@ -3537,6 +3537,8 @@ SECTION = 'Pathology';
       // with the box's straight edges: 25 % of the shunt colour lay along them. The
       // column's slow far end still leaves the box toward the RA free wall, which is
       // what the ~5 % left is; a column cut lengthwise by an edge gives far more.)
+      // The 8 % limit has no outside source: it was set from the 5.7 % measured on
+      // this build against the 25 % of the reviewed one.
       let edge = 0, tot = 0;
       for (let j = 0; j < R.SH; j++) for (let i = 0; i < R.SW; i++) {
         const k = j * R.SW + i; if (R.alpha[k] < 0.5 || shown(R, i, j, asd) !== FLOW.ASD_JET) continue;
@@ -3545,6 +3547,24 @@ SECTION = 'Pathology';
         if (Math.min(Math.abs(th - b.t0), Math.abs(th - b.t1)) * d < 0.12 || Math.min(Math.abs(d - b.d0), Math.abs(d - b.d1)) < 0.12) edge++;
       }
       check(ga, 'A4C: shunt colour along the edges of the colour box / all shunt colour', tot ? 100 * edge / tot : null, [0, 8], '%', `${tot} px`);
+    }
+    {
+      // the same in the ME AV short axis, whose plane passes beside the defect: the
+      // box goes over the part of the column the slice cuts (echo.js asdBox), not over
+      // the septum (where the box's far corner cut the colour: 16 % along its edge)
+      const pm = colourPreset('MEAVSAX', asd), Rm = renderDoppler('MEAVSAX', 0.5, asd, { nyquist: pm.nyquist, cboxSize: pm.box }), bm = Rm.box;
+      let edge = 0, tot = 0, ao = 0;
+      for (let j = 0; j < Rm.SH; j++) for (let i = 0; i < Rm.SW; i++) {
+        const k = j * Rm.SW + i; if (Rm.alpha[k] < 0.5) continue;
+        if (Rm.kind[k] === TISSUE.AORTA) ao++;
+        if (shown(Rm, i, j, asd) !== FLOW.ASD_JET) continue;
+        tot++;
+        const th = Math.atan2(i - Rm.cx, j - Rm.apexY), d = Math.hypot(i - Rm.cx, j - Rm.apexY) / Rm.pxPerCm;
+        if (Math.min(Math.abs(th - bm.t0), Math.abs(th - bm.t1)) * d < 0.12 || Math.min(Math.abs(d - bm.d0), Math.abs(d - bm.d1)) < 0.12) edge++;
+      }
+      check(ga, 'MEAVSAX: shunt colour in the shunt-study colour box', tot, [1500, 99999], 'px', `box ${pm.box} of the sector`);
+      check(ga, 'MEAVSAX: shunt colour along the edges of the colour box / all shunt colour', tot ? 100 * edge / tot : null, [0, 8], '%', `${tot} px`);
+      check(ga, 'MEAVSAX: colour pixels in the aortic root with the shunt-study box', ao, [0, 0], 'px');
     }
     check(ga, 'secundum ASD: colour scale for the shunt study (Nyquist)', pre.nyquist, [0.4, 0.5], 'm/s', `box ${pre.box} of the sector`);
     assert(ga, 'normal heart: standard colour scale and box (62 cm/s, 0.45)', colourPreset('A4C', {}).nyquist === 0.62 && colourPreset('A4C', {}).box === 0.45);
@@ -3588,6 +3608,8 @@ SECTION = 'Pathology';
     for (let c = 0; c < sp.cols; c++) { const v = Math.abs(sp.vs[c]); mx = Math.max(mx, v); mn = Math.min(mn, v); }
     assert(g, `secundum ASD ${vn}: PW at the atrial septum`, sp.mode === 'PW' && sp.site === 'asd', `${sp.mode} ${sp.site}`);
     check(g, `secundum ASD ${vn}: PW peak`, mx, [0.9, 1.5], 'm/s', `beam-flow angle ${sp.angleDeg.toFixed(0)} deg`);
+    // the gate is placed 2 deg inside the 20 deg limit (asdGate), so the quoted angle has margin
+    check(g, `secundum ASD ${vn}: PW beam-flow angle`, sp.angleDeg, [0, 18], 'deg');
     check(g, `secundum ASD ${vn}: phasic (max / min |v| over the cycle)`, mx / Math.max(mn, 0.01), [2, 999], '', `min ${mn.toFixed(2)} m/s`);
   }
   {

@@ -228,7 +228,7 @@ const _hvSeg = (A) => hepaticVeinSegs(A)[1];                 // the middle hepat
 const _hvAt = (A) => { const v = _hvSeg(A); return _add(v.a, v.u, 1.6); };
 const _dtaAxis = (A) => { const d = A.ao.dta, u = [d.a[0] - d.top[0], d.a[1] - d.top[1], d.a[2] - d.top[2]], l = Math.hypot(...u); return [u[0] / l, u[1] / l, u[2] / l]; };
 const ASD_SITE = { name: 'Atrial septum', label: 'shunt flow at the atrial septal defect (RA side)', mode: 'PW', ref: 'S',
-  at: (A, p, G, P, pr) => asdGate(G, P, pr).q, axis: (p, G, P, pr) => asdGate(G, P, pr).ax, box: (A, p, G) => asdStream(G, 0.4, 0.8)[2].q };
+  at: (A, p, G, P, pr) => asdGate(G, P, pr).q, axis: (p, G, P, pr) => asdGate(G, P, pr).ax, box: (A, p, G, P, pr) => asdBox(G, P, pr) };
 export const DOPPLER_SITES = {
   mvTips: { name: 'Mitral inflow', label: 'mitral inflow at the leaflet tips', mode: 'PW', ref: 'E',
     at: (A) => _add(A.valves.mitral.c, DAX.mitralIn, 0.5), axis: () => DAX.mitralIn, box: (A) => A.valves.mitral.c },
@@ -278,21 +278,25 @@ const ALIGN_RES = 8;
 // The PW sample volume on a secundum ASD shunt: in the stream on the RA side of
 // the defect (cardiac-model asdStream), slid along it (up to 1.2 cm) to where the
 // view's beam records the highest velocity (v cos theta: the beam lined up with
-// the flow, still near the defect), among points within DOPPLER_MAX_ANGLE and
-// within 1 cm of the plane; with none, just past the septum (0.2 cm). The flow
+// the flow, still near the defect), among points ASD_GATE_MARGIN deg inside
+// DOPPLER_MAX_ANGLE and within 1.2 cm of the plane (the slab siteGeometry takes a
+// site as lying in); with none, just past the septum (0.2 cm). The flow
 // crosses the septum along its normal and turns toward the tricuspid valve in
 // the RA, so the ME AV short axis (whose beam meets the septal normal at ~39 deg)
 // records it ~1 cm into the RA, where the stream has turned toward its beam.
+// The gate keeps ASD_GATE_MARGIN deg inside the limit, so the angle the display
+// quotes is not sitting on it.
+const ASD_GATE_MARGIN = 2;
 let _asdGateMemo = null;
 function asdGate(G, P, probe) {
   const m = _asdGateMemo;
   if (m && m.G === G && m.P === P && m.pr === probe) return m.r;
   const st = asdStream(G, 0.1, 1.2), N = probe && probe.normal;
-  const cMax = Math.cos(DOPPLER_MAX_ANGLE * Math.PI / 180);
+  const cMax = Math.cos((DOPPLER_MAX_ANGLE - ASD_GATE_MARGIN) * Math.PI / 180);
   let best = null, bv = 0;
   for (const s of st) {
     const dx = s.q[0] - P[0], dy = s.q[1] - P[1], dz = s.q[2] - P[2], l = Math.hypot(dx, dy, dz) || 1;
-    if (N && Math.abs(dx * N[0] + dy * N[1] + dz * N[2]) > 1.0) continue;   // out of the slice
+    if (N && Math.abs(dx * N[0] + dy * N[1] + dz * N[2]) > 1.2) continue;   // out of the slice
     const c = Math.abs(dx * s.ax[0] + dy * s.ax[1] + dz * s.ax[2]) / l;
     if (c >= cMax && s.k * c > bv) { bv = s.k * c; best = s; }
   }
@@ -300,6 +304,27 @@ function asdGate(G, P, probe) {
   const r = { q: best.q, ax: best.ax };
   _asdGateMemo = { G, P, pr: probe, r };
   return r;
+}
+// The colour box for the shunt study: centred on the stream 0.8 cm into the RA
+// when the slice holds it there (within ASD_BOX_SLICE cm of the plane: the A4C, ME
+// bicaval, ME 4C and subcostal planes, which cut the defect). A plane that passes
+// beside the defect (the ME AV short axis: the stream just past the septum lies
+// ~1 cm out of it and curves back into the slice toward the tricuspid valve) shows
+// the column only further into the RA, so there the box is centred on the part of
+// the column the slice does cut: the stream points weighted by their speed and by
+// how much of the column's width (asdStream w) reaches the plane.
+const ASD_BOX_SLICE = 0.7;
+function asdBox(G, P, probe) {
+  const near = asdStream(G, 0.4, 0.8)[2].q, N = probe && probe.normal;
+  if (!N || !P) return near;
+  const off = (q) => (q[0] - P[0]) * N[0] + (q[1] - P[1]) * N[1] + (q[2] - P[2]) * N[2];
+  if (Math.abs(off(near)) <= ASD_BOX_SLICE) return near;
+  let W = 0; const c = [0, 0, 0];
+  for (const s of asdStream(G, 0.2, 5)) {
+    const w = s.k * Math.max(0, 1 - Math.abs(off(s.q)) / (1.3 * s.w));
+    W += w; c[0] += w * s.q[0]; c[1] += w * s.q[1]; c[2] += w * s.q[2];
+  }
+  return W > 0 ? [c[0] / W, c[1] / W, c[2] / W] : near;
 }
 // Where the Doppler beam meets a site, seen from probe (pos/dir/lat/normal) with
 // sector half-angle `half` and display depth `depthCm`: the gate (or CW focus)
@@ -348,7 +373,7 @@ function siteGeometry(site, path, Gr, P, probe, half, depthCm, align) {
   return {
     q, theta, depth, dir, P0, cosA, aligned, rawAngleDeg: rawAngle, through,
     angleDeg: Math.acos(Math.min(1, Math.abs(cosA))) * 180 / Math.PI,
-    offPlane: Math.abs(g.off), outside: !inside, box: polar(site.box(Gr.A, path, Gr)),
+    offPlane: Math.abs(g.off), outside: !inside, box: polar(site.box(Gr.A, path, Gr, P, probe)),
   };
 }
 // The Doppler sites of the lesions a case carries (the shunt, the stenotic or
@@ -991,7 +1016,12 @@ export class EchoView {
         // --- colour Doppler overlay ---
         if (colorOn && depth >= cD0 && depth <= cD1 && theta >= cT0 && theta <= cT1) {
           // (in a blood pool, only the flows that belong to it: FLOW_POOLS)
-          const vel = velocityAt(wx, wy, wz, G, path, isBloodK ? POOL_FLOWS[kind] : 0);
+          // The velocity is read at the slab's centre (in the plane), not at this
+          // pixel's dithered elevation offset: the colour is written crisp, with no
+          // PSF pass to average neighbours that sampled different offsets, so where
+          // a flow's edge grazes the plane (the ASD column's skirt in the subcostal
+          // 4-chamber) the 2 x 2 dither showed as a grid of dots.
+          const vel = velocityAt(wx - enx * eOff, wy - eny * eOff, wz - enz * eOff, G, path, isBloodK ? POOL_FLOWS[kind] : 0);
           if (vel && vel.speed > 0.05) {
             // line-of-sight velocity: beamDir points away from probe
             const los = vel.vx * bd[0] + vel.vy * bd[1] + vel.vz * bd[2];
