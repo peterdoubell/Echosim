@@ -153,7 +153,8 @@ const PLAX_N = (() => {
   return vdot(n, vcross(Y, D_AO)) < 0 ? vscale(n, -1) : n;
 })();
 const inPlane = (v, n) => norm(vsub(v, vscale(n, vdot(v, n))));
-const PLAX_TIP = 0.12;                                // rad
+const PLAX_TIP = 0.35;                                // rad (~20 deg)
+const PLAX_SLIDE = 2.0;                              // cm, probe slid toward the apex along the chest wall
 function plaxProbe() {
   // aorto-mitral curtain, image centre (projected into the plane)
   const t0 = [-0.35, 0.3, 0.35];
@@ -161,14 +162,20 @@ function plaxProbe() {
   // Beam runs posteriorly from the chest wall, tipped PLAX_TIP toward the base —
   // the sonographer's adjustment (one interspace up / probe angulation) that lays
   // the LV long axis near-horizontal on screen with the Ao/LA stacked at right.
-  // (~7 deg: tipped further, the right of the sector reaches past the ascending
-  // aorta to the SVC, which crosses this plane ~1 cm beyond its right wall.)
+  // (~20 deg: the root lies ~47 deg from the LV axis in this plane, so without
+  // the tip the root climbs steeply to the near field and the beam through the
+  // aortic valve crosses no RVOT. The probe also sits PLAX_SLIDE cm toward the
+  // apex (the 3rd-4th interspace rather than over the base), so the beam to the
+  // aortic valve comes up through the infundibulum: 2-3 cm of RVOT in front of
+  // the root at ED and ~2 cm at ES, the root ~27 deg off the chest wall, and the
+  // right edge of the sector stays short of the SVC, which crosses this plane
+  // beyond the ascending aorta.)
   const post = vscale(inPlane(BODY_AX.A, PLAX_N), -1);
   const yIn = inPlane(Y, PLAX_N);                   // long axis within the plane
   const perp = inPlane(vsub(post, vscale(yIn, vdot(post, yIn))), PLAX_N); // posterior, perpendicular to it
   const dir = norm(vadd(vscale(perp, Math.cos(PLAX_TIP)), vscale(yIn, Math.sin(PLAX_TIP))));
   // base / aorta to the right of the screen (ASE)
-  return chestWallProbe(tgt, dir, yIn, 5.0 + WALL, WALL);
+  return chestWallProbe(vsub(tgt, vscale(yIn, PLAX_SLIDE)), dir, yIn, 5.0 + WALL, WALL);
 }
 // The parasternal beams run posteriorly from the chest wall (as the PLAX's does):
 // each short-axis beam is body-posterior taken within its imaging plane. The heart
@@ -202,7 +209,7 @@ function psaxProbe(y, sx, rot, tilt, roll) {
 }
 // mid-papillary: 40 deg toward body-posterior, 13 deg cephalad, slid 0.7 cm laterally
 const PSAX_MID = [-3.4, 0.7, 40, 13, 0];             // y, sx (cm), rot, tilt, roll (deg)
-const PSAX_AV_H = 0.45, PSAX_AV_TILT = [-8, 8];     // cm along the root axis; deg, deg
+const PSAX_AV_H = 0.45, PSAX_AV_TILT = [-7.5, 0];    // cm along the root axis; deg, deg
 function psaxAvProbe() {
   const tgt = vadd(A, vscale(LM.U_AO, PSAX_AV_H));   // just below the cusp coaptation level
   // the plane is the root's short axis (cusps en face); the beam, body-posterior
@@ -211,12 +218,16 @@ function psaxAvProbe() {
   let dir = postIn(LM.U_AO);
   let right = vcross(LM.U_AO, dir);
   if (vdot(right, LM.E_SCR) < 0) right = vscale(right, -1);
-  // tipped PSAX_AV_TILT[0] caudally about screen-right and rolled PSAX_AV_TILT[1]
-  // about the beam (its left edge toward the base): the plane then holds the PA
-  // bifurcation with the origins of both branches — the RPA running screen-left
-  // behind the root, the LPA on down to the right ('trousers') — and cuts the LA
-  // body behind the root rather than its roof and the appendage, while the cusps
-  // stay within ~11 deg of en face
+  // Tipped PSAX_AV_TILT[0] caudally about screen-right: the PA trunk runs back and
+  // ~13 deg toward the apex from the root's short-axis plane (U_PA . U_AO = -0.22),
+  // so the tipped plane lies along the trunk (PV, trunk and bifurcation in view at
+  // every phase, the RVOT PW beam within ~19 deg of the valve axis) and its far
+  // field cuts the LA body behind the root (~4 cm wide) rather than its roof. It is
+  // not rolled about the beam: the first ~2.5 cm of the LPA (laid in the root's
+  // short-axis plane) stays in the plane, so the trunk divides with both branch
+  // origins in view ('trousers'). (The review-11 roll of 8 deg, the left edge
+  // toward the base, carried the trunk and the infundibulum out of the plane
+  // through systole; tipped further than ~8.5 deg the LPA leaves the plane.)
   dir = vrot(dir, right, PSAX_AV_TILT[0] * Math.PI / 180);
   right = vrot(right, dir, PSAX_AV_TILT[1] * Math.PI / 180);
   return chestWallProbe(tgt, dir, right, 4.3 + WALL, WALL);
@@ -287,7 +298,10 @@ function a4cTrack(A) {
 export const TTE_VIEWS = {
   PLAX: { probe: plaxProbe, depth: 16 },
   PSAX: { probe: () => psaxProbe(...PSAX_MID), depth: 13, track: papTrack(() => psaxProbe(...PSAX_MID), 0.3, 0.25) },   // mid-papillary
-  PSAX_AV: { probe: psaxAvProbe, depth: 15, track: (A) => [0, 0.8 * (A.lv.A[1] - A0.lv.A[1]), 0] },   // follows the root's descent
+  // (14.5 cm deep: the PA bifurcation and both branch origins and the LA body
+  // behind the root; the sector's far-left corner, low on the patient's right,
+  // stops short of the liver dome)
+  PSAX_AV: { probe: psaxAvProbe, depth: 14.5, track: (A) => [0, 0.8 * (A.lv.A[1] - A0.lv.A[1]), 0] },   // follows the root's descent
   A4C: { probe: a4cProbe, depth: 17, track: a4cTrack },
   // (15 cm deep: the LA and its roof; the PA bifurcation and the right PA lie
   // just beyond the LA roof in this plane and run along the beam to 17 cm)
@@ -707,6 +721,19 @@ function meRvioProbe() {
   right = vsub(right, vscale(dir, vdot(right, dir)));
   return teeClear(probeFrom(tgt, dir, right, vdot(vsub(tgt, ESO), dir)));
 }
+// the tricuspid annulus descends ~1-2 cm in systole and this plane's normal runs
+// largely along the LV axis, so the plane follows the cardiac base along its
+// normal (the small advance / flex that holds the TV and RV inflow in view): the
+// tricuspid annulus mostly, the aortic root (which descends about half as far)
+// for the rest — so at end-systole the root is still cut near its annulus, not
+// through the LVOT below it
+let _rvioN = null;
+const RVIO_TV_W = 0.7;
+function meRvioTrack(A) {
+  if (!_rvioN) _rvioN = meRvioProbe().normal;
+  const d = vadd(vscale(vsub(A.valves.tricuspid.c, A0.valves.tricuspid.c), RVIO_TV_W), vscale(vsub(A.valves.aortic.c, A0.valves.aortic.c), 1 - RVIO_TV_W));
+  return vscale(_rvioN, vdot(d, _rvioN));
+}
 // Descending thoracic aorta short axis: the probe turned to face posteriorly;
 // the round aorta lies immediately behind the oesophagus.
 const DESCAO_GAP = 1.05;                             // probe face -> aortic lumen (cm)
@@ -740,7 +767,7 @@ export const TEE_VIEWS = {
   MELAX: { probe: melaxProbe, depth: 13 },
   MEAVSAX: { probe: meAvSaxProbe, depth: 10, track: (A) => [0, 0.8 * (A.lv.A[1] - A0.lv.A[1]), 0] },   // follows the root
   MEBICAVAL: { probe: meBicavalProbe, depth: 11 },
-  MERVIO: { probe: meRvioProbe, depth: 12 },
+  MERVIO: { probe: meRvioProbe, depth: 12, track: meRvioTrack },              // follows the tricuspid annulus
   DESCAO: { probe: descAoSaxProbe, depth: 8 },
   TGSAX: { probe: tgsaxProbe, depth: 12 },
   // Mid-oesophageal left-atrial-appendage view: the plane CONTAINS the appendage's

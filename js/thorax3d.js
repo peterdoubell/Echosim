@@ -152,7 +152,7 @@ export function structureLabels(A) {
   const out = [];
   const aa = A.la.aa; if (aa && aa.length) out.push(['LAA', aa[aa.length - 1].b]);
   for (const v of (A.pv && A.pv.veins) || []) out.push([v.name, v.b]);
-  out.push(['SVC', A.svc.b]);
+  out.push(['SVC', A.svc.c || A.svc.b]);   // at its top (the brachiocephalic confluence), clear of the aorta and its label
   const ivcTop = dot(A.ivc.a, S) > dot(A.ivc.b, S) ? A.ivc.a : A.ivc.b;      // its RA end
   out.push(['IVC', mad(ivcTop, S, -3.5)]);
   out.push(['Ao', mad(A.valves.aortic.c, LM.U_AO, 4.5)]);
@@ -166,8 +166,9 @@ export function structureLabels(A) {
 
 // 3D camera presets per view, in body axes (l, a, s): the camera sits on that
 // side of the heart with patient-superior up, in the anterior hemisphere and
-// never far left of the sternal plane, so the SVC always projects to the
-// patient's right of the ascending aorta (screen left, as on a CT or an anterior
+// never far left of the sternal plane, so the SVC — which runs up to the
+// patient's right of the ascending aorta, ~2-3 cm from it side to side — projects
+// clear of it on the patient's right (screen left, as on a CT or an anterior
 // anatomical view) — the left-lateral cameras used before showed it on the
 // aortic arch's concave side, as if left of the aorta.
 export const CAMERA_PRESETS = {

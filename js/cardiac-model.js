@@ -154,7 +154,7 @@ const LEAFLETS = {
   // cusp centres at 90 (right-coronary, anterior), 210 (non-coronary) and 330 deg
   // (left-coronary), so each cusp sits in its own sinus of Valsalva and the
   // commissures (30 / 150 / 270 deg) fall between the sinuses
-  aortic:    { flow: _aoFlow, cd: 0.95, thick: 0.065, ap: null, asym: 1,
+  aortic:    { flow: _aoFlow, cd: 0.95, thick: 0.05, ap: null, asym: 1,
                cusps: 3, u: LM.E_SCR, w: LM.E_ANT, commOff: Math.PI / 6 },
   pulmonic:  { flow: _puFlow, cd: 0.9,  thick: 0.065, ap: null, asym: 1,
                cusps: 3, u: _puB.u, w: _puB.w, commOff: 0.0 },
@@ -1015,7 +1015,18 @@ function avTipWorld(name, G, sgn, q) {
 // blended (opening / closing) profile.
 const SL_COAPT = 0.28, SL_SAG = 0.13, SL_COAPT_H = 0.55, SL_N = 16;
 const AS_OPEN = 0.28;                                     // AS: restricted opening (valveOpening)
+// aortic cusps: nodulus of Arantius (cm) and the half-width of the shut cusps'
+// coaptation seams (cm: two apposed lunulae, ~0.5 mm — finer than the renderer's
+// coarsest sampling block, so its coarse sampler looks for valve tissue inside
+// each block, see valveAt); calcific AS: the nodule threshold of the calcium
+// lattice, and the half-width of the open cusps' commissural slits (cm)
+const AO_NODULE = 0.05, AO_COAPT_W = 0.025, AS_NODULE = 0.06, AS_SLIT = 0.06, AS_SLIT_T = 0.3;
 const _slA = new Float64Array(SL_N + 1), _slR = new Float64Array(SL_N + 1);
+// Valve tissue alone at a point (classify() tests the valves before any other
+// tissue, so a hit here is what classify returns there): the renderer's coarse
+// sampler uses it to look for sub-block cusps cheaply. Returns the shared result
+// object (tissue / echo / calc) or null.
+export function valveAt(px, py, pz, G, path = {}) { return valveTissue(px, py, pz, G, path); }
 function valveTissue(px, py, pz, G, path) {
   // apex-anchored contraction descends the AV valve planes with the annulus: a
   // valve at end-diastolic height y maps to apexY + (y−apexY)·lsy (same material
@@ -1092,14 +1103,14 @@ function valveTissue(px, py, pz, G, path) {
     //    then meet along the commissural lines (seams below).
     // In between, the two curves blend (sampled, nearest point).
     const asv = name === 'aortic' && !!path.aorticStenosis;
-    let dist;
+    let dist, bl = 0;
     if (!isCusp) {
       if (a < -0.05 || a > cd) continue;                  // only the leaflet span, hinge→edge
       const sc = t * t * (3 - 2 * t);
       dist = Math.abs(rad - (v.r + (edgeR - v.r) * sc));
     } else {
       const oN = asv ? open / AS_OPEN : open;              // opening relative to this valve's full excursion
-      const bl = smoothstep(0.02, 0.45, oN);               // 0 shut .. 1 open shape
+      bl = smoothstep(0.02, 0.45, oN);                     // 0 shut .. 1 open shape
       const rho = rad / v.r;
       if (bl === 0 && rho <= 1) {
         // shut: the cusp height is a function of radius (shallow: vertical distance)
@@ -1140,15 +1151,24 @@ function valveTissue(px, py, pz, G, path) {
     let th = thick * (0.45 + 0.55 * (1 - t) * (1 - t));
     // Nodulus of Arantius: a fibrous thickening at the CENTRE of each semilunar
     // cusp's free edge, where the three cusps meet — bulk up the free-edge tip at
-    // the cusp centre so the coaptation shows the three little nodules.
+    // the cusp centre so the coaptation shows the three little nodules. (Aortic:
+    // ~1 mm, so the shut cusps read on TEE as a fine line, not a bar with a bulb.)
+    const ao = name === 'aortic';
     let nod = 0;
-    if (isCusp && t > 0.7) nod = 0.11 * ((t - 0.7) / 0.3) * (1 - cptr);
+    if (isCusp && t > 0.7) nod = (ao ? AO_NODULE : 0.11) * ((t - 0.7) / 0.3) * (1 - cptr);
     th += nod;
-    // calcific AS: thick (3-5 mm), nodular cusps — calcium masses concentrated at the
-    // cusp bodies and bases rather than a thin bright membrane
+    // calcific AS: fibrous cusps 3-5 mm thick carrying discrete calcium nodules
+    // (~3-4 mm masses on a 3-D lattice fixed to the valve, on the cusp bodies and
+    // bases more than the free edges) — near-white with a distal acoustic shadow
+    // (calc 2), the rest of the cusp fibrous (calc 0). Open, the cusps part along
+    // their commissural lines from mid-cusp to the free edge (partial fusion at the
+    // bases only): three thick cusp masses round a small stellate orifice.
+    let nodule = false;
     if (asv) {
-      const lump = 0.5 + 0.5 * Math.sin(rx * 7.1 + ry * 5.3 + rz * 6.7);
-      th = th * 2.6 + 0.06 + 0.06 * lump * (1 - t * 0.5);
+      const lump = (0.5 + 0.5 * Math.sin(dx * 4.3 + 1.3)) * (0.5 + 0.5 * Math.sin(dy * 3.8 + 0.7)) * (0.5 + 0.5 * Math.sin(dz * 3.5 + 2.1));
+      nodule = lump > AS_NODULE && t < 0.85;
+      th = th * 2.2 + 0.045 + (nodule ? 0.12 * (1 - 0.5 * t) : 0);
+      if (bl > 0 && t > AS_SLIT_T && (Math.abs(kh) / 3) * rad < AS_SLIT) continue;
     }
     let hit = dist <= th;
     // Coaptation zone of the shut semilunar valve: neighbouring cusps' free
@@ -1159,7 +1179,7 @@ function valveTissue(px, py, pz, G, path) {
     if (!hit && isCusp && open < 0.25 * (asv ? AS_OPEN : 1)) {
       const angDist = Math.abs(kh) / 3;                   // angular distance to a commissure
       const rho = rad / v.r;
-      if (rho < 0.92 && angDist * rad < (asv ? 0.126 : 0.04)) {
+      if (rho < 0.92 && angDist * rad < (asv ? 0.126 : ao ? AO_COAPT_W : 0.04)) {
         const tb = 1 - rho;
         const base = SL_COAPT * tb - SL_SAG * Math.sin(Math.PI * tb);
         const top = SL_COAPT + SL_COAPT_H + rho * (cd - SL_COAPT - SL_COAPT_H);
@@ -1168,11 +1188,12 @@ function valveTissue(px, py, pz, G, path) {
     }
     if (!hit) continue;
     let echo = 0.8 + 0.05 * (1 - t) + (nod > 0.03 ? 0.04 : 0); // nodule reads a touch brighter
-    const calc = (name === 'aortic' && path.aorticStenosis) || (name === 'mitral' && path.mitralStenosis);
+    const calc = asv ? nodule : (name === 'mitral' && path.mitralStenosis);
     if (calc) echo = 0.98; // calcified / restricted → bright, thickened
+    else if (asv) echo = 1.0; // the sclerotic, thickened AS cusp between the nodules (renderer: a few dB above a normal cusp)
     _valveResult.tissue = TISSUE.VALVE;
     _valveResult.echo = echo;
-    _valveResult.calc = calc ? 1 : 0;
+    _valveResult.calc = asv ? (nodule ? 2 : 0) : calc ? 1 : 0;
     return _valveResult;
   }
   return null;

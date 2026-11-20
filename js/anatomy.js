@@ -121,7 +121,11 @@ const D_AO0 = unit([A0[0], 0, A0[2]]);
 const U_AO = unit(add(mul([0, 1, 0], Math.cos(AO_TILT)), mul(D_AO0, Math.sin(AO_TILT))));
 // the Ao/LA M-mode line: perpendicular to the root, pointing away from the chest wall
 const AO_LA_DIR = unit(add(mul([0, 1, 0], Math.sin(AO_TILT)), mul(D_AO0, -Math.cos(AO_TILT))));
-const AO = { annR: 1.15, sinusR: 1.65, stjR: 1.4, ascR: 1.5 };  // d 2.3 / 3.3 / 2.8 / 3.0
+// annulus, sinus (max, at the cusp centres), sino-tubular junction, ascending:
+// d 2.3 / 3.3 / 2.8 / 3.0 (stjR is the calibre at which the root cone meets the
+// tubular aorta; the sino-tubular ridge, STJ_RIDGE, narrows the lumen at the
+// junction itself to d ~2.5)
+const AO = { annR: 1.15, sinusR: 1.65, stjR: 1.4, ascR: 1.5 };
 // LV outflow tract: from the anteroseptal LV cavity up to the aortic annulus,
 // d 2.2 cm, running close to the septum.
 const LVOT0 = [-0.95, -2.1, 0.55];
@@ -150,9 +154,16 @@ const TV_R = 1.7;
 // PSAX-at-aortic-valve frame: looking up the root axis from the apex, anterior
 // (toward the probe) up, patient-left to the right. Used to place the pulmonary
 // valve and RVOT in the positions the PSAX-AV view shows them.
-// root frame (cusps, PV, coronary ostia) is rigid with the heart: unrolled anterior
+// The root frame (cusps, PV, coronary ostia) is built on the BODY anterior (the
+// rolled axes the views use), so 12 o'clock of this frame is 12 o'clock on the
+// PSAX-AV screen: closed commissures at ~2 / 10 / 6 o'clock and the infundibulum
+// over the front of the root at ~11-12 o'clock (so the PLAX plane cuts the RVOT
+// in front of the root). Built on the UNROLLED anterior it was turned ~31 deg
+// about the root. _ANT0 (LM.ANT_HEART) stays the unrolled heart anterior: the
+// short-axis probes use it.
 const _ANT0 = mul(BP0, -1);
-const E_ANT = unit(sub(_ANT0, mul(U_AO, dot(_ANT0, U_AO))));
+const _ANTB = mul(BP, -1);
+const E_ANT = unit(sub(_ANTB, mul(U_AO, dot(_ANTB, U_AO))));
 const E_SCR = unit(cross(U_AO, E_ANT));
 const avFrame = (deg, r, h) => {
   const a = deg * Math.PI / 180;
@@ -161,7 +172,7 @@ const avFrame = (deg, r, h) => {
 // Pulmonary valve: anterior, leftward and ~1.2 cm higher than the aortic valve
 // (~1-2 o'clock in PSAX-AV). The RVOT arcs over the front of the aortic root from
 // the tricuspid side (~10 o'clock) to it — the RV "wraps" the aorta.
-const PV0 = avFrame(58, 3.05, 1.25);
+const PV0 = avFrame(26.46, 3.05, 1.25);            // the same world point as before the frame re-base
 const PV_R = 1.1;                                    // annulus d 2.2
 // Main PA: from the pulmonary valve it courses POSTERIORLY along the left of the
 // aortic root (screen-right in PSAX-AV) to bifurcate at about the depth of the
@@ -181,11 +192,26 @@ const U_RPA2 = unit(add(add(mul(BODY_AX.R, 0.85), mul(BP, 0.3)), mul(BS, 0.1)));
 const RPA_O = mad(PA_BIF, BS, -0.8);
 const RPA_M = mad(RPA_O, U_RPA, 1.0);
 const RPA_E = mad(RPA_M, U_RPA2, 2.2);
-const U_LPA = unit(add(add(mul(BL, 0.6), mul(BP, 0.7)), mul(BS, 0.25)));
+// The LPA's first ~2.8 cm runs in the root's short-axis plane (left and back,
+// U_LPA taken perpendicular to the root axis): the trunk divides in its own
+// plane, so the standard PSAX-AV shows both branch origins ('trousers') without
+// tipping the probe; the LPA then climbs over the left bronchus beyond it.
+const U_LPA = (() => { const u = unit(add(add(mul(BL, 0.6), mul(BP, 0.7)), mul(BS, 0.25))); return unit(sub(u, mul(U_AO, dot(u, U_AO)))); })();
 // (the infundibulum is separated from the LVOT / aortic root by the muscular
 // outlet septum, so on PLAX its centre lies ~3.4 cm in front of the aortic-root
 // centre, clear of the basal LV)
-const RVOT_PTS = [avFrame(132, 3.4, -1.0), avFrame(90, 4.1, 0.5), mad(PV0, U_PA, -0.25)];
+// In the root frame (on the body axes) the outflow channel starts in the RV
+// inflow beneath the tricuspid annulus (165 deg, ~9.5 o'clock; the valve itself
+// lies at ~147 deg) and runs forward under the supraventricular crest, and the
+// mid-infundibulum arches over the front of the root at ~12.3 o'clock (80 deg):
+// it lies in the PLAX plane (0.5 cm off it), so the PLAX beam through the aortic
+// valve crosses 2-3 cm of RVOT before the anterior root wall, and in the ME RV
+// inflow-outflow plane the inflow and the outflow are one chamber. (Toward
+// 12 o'clock or higher, the infundibulum fills the anterior edge of the A3C
+// sector; lower, it splits the ME RV inflow-outflow RV in two. Started further
+// forward, at ~100-130 deg, the channel leaves the basal RV crescent of the
+// mitral-level PSAX at end-systole.)
+const RVOT_PTS = [avFrame(165, 3.4, -1.0), avFrame(80, 4.1, 0.2), mad(PV0, U_PA, -0.25)];
 
 // Atria. Each sits on its (moving) AV annulus with a roof fixed in the chest, so
 // the systolic descent of the AV plane STRETCHES them: that is how the atrial
@@ -274,6 +300,10 @@ const IAS = {
 // SVC -> IVC, svBulge off the septum, its upper end svFwd forward along the
 // septum so the RA covers the septum up to the SVC); flare*: the SVC orifice
 // funnel toward the tricuspid valve.
+// SVC course: the lower segment (cm, straight up the caval line), the height of
+// the SVC top above its orifice (cm), and the side-to-side distance of the top to
+// the patient's right of the ascending-aorta top (cm, centre to centre)
+const SVC_LOW = 1.8, SVC_H = 3.9, SVC_SIDE = 2.8;
 const CAVA = {
   svcSd: 1.0, svcV: 0.5, svcUp: 1.2, svcR: 0.8, aoGap: 0.15,
   ivcSd: 0.95, ivcV: -1.0, ivcTilt: 0.25,
@@ -393,7 +423,7 @@ const ARCH_SEGS = (() => {
 // live SVC top; its course is pushed forward until it clears every arch segment.
 const BCV_R = 0.5, BCV_UP = 2.2, BCV_PUSH = 0.5, BCV_RUN = 2.8;       // d ~1 cm; height above the arch summit; in-plane run
 function buildBCV(svc) {
-  const top = svc.b;
+  const top = svc.c || svc.b;                               // the SVC top
   // the suprasternal (arch) plane: it crosses it in the near field, above the
   // ascending limb and in front of the brachiocephalic trunk, then runs out of the
   // plane to the patient's left
@@ -780,7 +810,13 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   const tvLatDrop = tvSep + TV_FW * kR * RH.rvL;
   const tvDrop = 0.5 * (tvSep + tvLatDrop);                // annulus-centre (and RA floor) descent
   const Tlive = [T0[0], T0[1] - tvDrop, T0[2]];
-  const PVlive = mad(PV0, [0, 1, 0], -0.25 * tapse);
+  // The infundibulum and the pulmonary valve ride with the aortic root: they
+  // descend with it (the curtain's share of the annular descent) and swing
+  // anteriorly with it in systole (rootSwing; half of it at the proximal RVOT).
+  // Fixed in the chest, the RVOT was carved away by the root's clearance shell
+  // as the root swung toward it, and left the PSAX-AV plane that follows the root.
+  const rootDrop = [0, MV_W_CURTAIN * dM, 0];
+  const PVlive = add(add(PV0, rootDrop), rootSwing);
   const rvB = CFG.rvBody;
   // a dilated LV displaces the RV crescent outward rather than crushing it
   const push = (lvScale - 1) * LVP.b * 0.9;
@@ -800,9 +836,9 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   const tvLat = mad(Tlive, unit(sub(TV_LAT, mul(tvN, dot(TV_LAT, tvN)))), TV_R);   // lateral rim (TAPSE point)
   const inflow = { c: mad(Tlive, tvN, -1.6), r: [2.25 * rvS * rvpoScale, 1.8 * (1 - 0.15 * kR * rvC), 2.1 * rvS * rvpoScale] };
   const rvot = [
-    mad(RVOT_PTS[0], [0, 1, 0], -0.25 * tapse),
-    mad(RVOT_PTS[1], [0, 1, 0], -0.25 * tapse),
-    mad(RVOT_PTS[2], [0, 1, 0], -0.25 * tapse),
+    add(add(RVOT_PTS[0], rootDrop), mul(rootSwing, 0.5)),
+    add(RVOT_PTS[1], mul(rootSwing, 0.6)),
+    add(add(RVOT_PTS[2], rootDrop), rootSwing),
   ];
   const rvotR = [1.3 * (1 - kR * 0.18 * rvC) * rvpoScale, 1.1 * (1 - kR * 0.12 * rvC) * rvpoScale, PV_R * 1.02];
 
@@ -918,14 +954,33 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
     const ivcS = ivcOfRap(hemoSummary(path).RAP);
     const ivcR = ivcS.r;
     const ia = seat(mad(mad(mad(rr.c, BS, -(hS + 0.4)), away, 1.0), BP, 1.0), Math.max(CAVA.ivcSd, ivcR + 0.05), CAVA.ivcV);
-    // the SVC abuts the aorta without indenting it: slide the orifice back along
-    // the septum until its first 3 cm clear the aortic wall
+    // The SVC lies to the patient's RIGHT of the ascending aorta (and a little
+    // behind it): it forms the right upper mediastinal border, centres ~2.5-3 cm
+    // apart side to side. Its orifice stays ~1 cm on the RA side of the septum,
+    // and its lower SVC_LOW cm run straight up the caval line (the SVC -> fossa
+    // -> IVC axis of the ME bicaval view; in this heart body-right is close to
+    // the septal normal, so neither the orifice nor that segment can move right
+    // without leaving the bicaval plane). Above it the SVC runs up to its top
+    // (the confluence of the brachiocephalic veins), SVC_H above the orifice and
+    // SVC_SIDE to the right of the ascending-aorta top, so the vein follows the
+    // aorta's own course in the mediastinum. (Straight up it ran 3.4 cm directly
+    // behind the ascending aorta: hidden behind it in every anterior view, and cut
+    // beyond the root by a basally tipped PLAX plane.) svc.a -> svc.b is the lower
+    // segment, svc.b -> svc.c the upper one. It abuts the aorta without indenting
+    // it: slide the orifice back along the septum until its first 3 cm clear the
+    // aortic wall.
     const aoA = { ao: buildAorta(A0, path) };
     const sDir = unit(add(mul(BS, 4.5), mul(BP, 0.3)));
+    const course = (q) => {
+      const b = mad(q, sDir, SVC_LOW), up = SVC_H - dot(sub(b, q), BS);
+      const c = mad(mad(b, BS, up), BP, up * 0.3 / 4.5);         // (the lower segment's slight backward run)
+      return { b, c: mad(c, BODY_AX.R, dot(sub(AO_ASC_TOP, c), BODY_AX.R) + SVC_SIDE) };
+    };
     const gap = (q) => {
+      const { b, c } = course(q), u = unit(sub(c, b));
       let g = 1e9;
       for (let t = 0; t <= 3.0; t += 0.25) {
-        const p = mad(q, sDir, t);
+        const p = t <= SVC_LOW ? mad(q, sDir, t) : mad(b, u, t - SVC_LOW);
         g = Math.min(g, dAOroot(p[0], p[1], p[2], aoA) - aoA.ao.wall - CAVA.svcR - CAVA.aoGap);
       }
       return g;
@@ -937,7 +992,7 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
     const tether = mul(su, -ROOF_FOLLOW * tvDrop * su[1]);
     sa = add(sa, tether);
     return {
-      svc: { a: sa, b: mad(sa, sDir, 4.5), r: CAVA.svcR },     // d 1.6
+      svc: { a: sa, ...course(sa), r: CAVA.svcR },     // d 1.6
       // sniff: the IVC halves in calibre with normal RA pressure; plethoric with
       // raised RA pressure it barely collapses (< 50 %)
       ivc: { a: add(ia, tether), b: mad(add(ia, tether), unit(mad(BODY_AX.I, SEPT_V, CAVA.ivcTilt)), 11.0), r: ivcR,
@@ -1235,12 +1290,31 @@ function buildCS(M, raFloor) {
 // trilobed, not a tube), sino-tubular junction, ascending aorta, arch and the
 // descending thoracic aorta.
 const AS_POST_DIL = 0.36;                      // AS: ascending-aorta calibre gain above the STJ (~4 cm)
+// The sino-tubular ridge: a ring of wall round the root axis at the STJ (a torus
+// carved out of the lumen) narrows it to d ~2.5 over ~0.7 cm. That is the root's
+// 'tulip' — sinuses ~15-25 % wider than the waist in the long-axis cuts (ME AV
+// LAX 2.95 / 2.48 cm, PLAX 2.91 / 2.51 cm) — with the tubular aorta widening again
+// just above it. A ridge rather than a narrower junction calibre (stjR 1.4 ->
+// 1.25): that also narrowed the top of the sinuses, which the systolic descent of
+// the root brings into the PLAX M-mode line (the root walls then lost their
+// parallel motion), and the start of the tubular aorta (the AS post-stenotic
+// dilatation, the SVC's slide past the aorta). inR: the lumen radius at the
+// ridge; r: the ring's half-thickness; k: its blend into the wall (cm).
+const STJ_RIDGE = { inR: 1.25, r: 0.4, k: 0.1 };
 function buildAorta(A, path, swing = null) {
   const cuspDirs = [0, 1, 2].map((i) => {
-    const a = (90 + i * 120) * Math.PI / 180;               // RCC anterior, LCC left-posterior, NCC right-posterior
+    // RCC anterior, LCC left-posterior, NCC right-posterior. The NCC sinus bulges
+    // ~20 deg toward the RCC/NCC commissure: centred on its cusp (8 o'clock in
+    // PSAX-AV) it pressed into the RA over the fossa ovalis, which in this heart
+    // lies at ~7.7 o'clock only ~2.1 cm from the root axis at sinus height.
+    const a = (90 + i * 120 + (i === 1 ? -20 : 0)) * Math.PI / 180;
     return add(mul(E_SCR, Math.cos(a)), mul(E_ANT, Math.sin(a)));
   });
-  const sinusH = 0.85, sinusOff = 0.62, sinusR = AO.sinusR - 0.62; // sinus spheres -> root d 3.3
+  // sinus spheres (centre sinusH above the hinge line, sinusOff out from the axis
+  // toward each cusp centre) -> root d 3.3 at the cusp centres. (Larger, the
+  // non-coronary sinus presses into the RA over the fossa ovalis, and the right
+  // coronary sinus takes the PLAX root walls out of parallel motion.)
+  const sinusH = 0.85, sinusOff = 0.62, sinusR = AO.sinusR - sinusOff;
   const dil = path.dilatedAorta ? 1.25 : 1;
   // (swing: the systolic anterior displacement of the sinuses and the STJ; the
   // annulus stays on the fibrous skeleton, so the root shears just above it)
@@ -1249,8 +1323,10 @@ function buildAorta(A, path, swing = null) {
   return {
     valve: A,
     sinus: cuspDirs.map((d) => add(mad(mad(A, U_AO, sinusH), d, sinusOff), sw(sinusH))),
-    sinusR: sinusR * dil,
+    sinusR: sinusR * dil, sinusOff, sinusH,
     root: { a: mad(A, U_AO, -0.05), b: stj, r1: AO.annR, r2: AO.stjR * dil },
+    // the sino-tubular ridge: a ring round the root axis at the STJ (moving with it)
+    ridge: { c: stj, R: (STJ_RIDGE.inR + STJ_RIDGE.r) * dil, r: STJ_RIDGE.r * dil },
     asc: { a: stj, b: AO_ASC_TOP, r1: AO.stjR * dil, r2: AO.ascR * dil },
     // the curved ascending tube (STJ -> top), tapering from the STJ to the ascending calibre
     // (the STJ moves with the root while the top is fixed in the mediastinum: the
@@ -1327,10 +1403,10 @@ function buildCoronaries(L, ao, T, tvN) {
     const a = angDeg * Math.PI / 180, r = lvEpiRadiusAt(y, L) + lift;
     return [Math.cos(a) * r, y, Math.sin(a) * r];
   };
-  const axis = mad(ao.valve, U_AO, 0.85);
+  const axis = mad(ao.valve, U_AO, ao.sinusH);
   const dirAt = (deg) => { const a = deg * Math.PI / 180; return add(mul(E_SCR, Math.cos(a)), mul(E_ANT, Math.sin(a))); };
   // left main from the left-coronary sinus (330 deg in the PSAX-AV frame)
-  const lmO = mad(axis, dirAt(330), 0.62 + ao.sinusR - 0.12);
+  const lmO = mad(axis, dirAt(330), ao.sinusOff + ao.sinusR - 0.12);
   const bif = mad(lmO, unit(add(add(mul(E_SCR, 0.75), mul(E_ANT, 0.45)), mul(U_AO, -0.25))), 1.1);
   chain([lmO, bif], 0.23, 0.22);
   const yb = L.base;
@@ -1351,8 +1427,9 @@ function buildCoronaries(L, ao, T, tvN) {
   chain(cx, 0.18, 0.12);
   chain([cx[2], onLV(18, lf(0.22), 0.26), onLV(12, lf(0.42), 0.24), onLV(8, lf(0.6), 0.22)], 0.13, 0.09, 'OM1');
   chain([cx[4], onLV(-32, lf(0.22), 0.26), onLV(-38, lf(0.42), 0.24), onLV(-42, lf(0.56), 0.22)], 0.12, 0.08, 'OM2');
-  // RCA from the right-coronary sinus (anterior, 90 deg), round the right AV groove
-  const rcaO = mad(axis, dirAt(90), 0.62 + ao.sinusR - 0.12);
+  // RCA from the right-coronary sinus (anterior, 90 deg: ~12 o'clock in PSAX-AV
+  // with the root frame on the body axes), round the right AV groove
+  const rcaO = mad(axis, dirAt(90), ao.sinusOff + ao.sinusR - 0.12);
   const ea = unit(sub([0, 0, 1], mul(tvN, dot([0, 0, 1], tvN))));          // anterior, in the TV plane
   const el = unit(sub([-1, 0, 0], mul(tvN, dot([-1, 0, 0], tvN))));        // lateral (right)
   const rg = TV_R + 0.75;
@@ -1811,17 +1888,22 @@ function clearRPA(d, x, y, z, A) {
     sdCapsule(x, y, z, q[0][0], q[0][1], q[0][2], q[1][0], q[1][1], q[1][2], q[2]));
   return ssub(d, c - A.pa.wall - 0.1, 0.1);
 }
+// the SVC lumen: its lower (caval-line) and upper (rightward) segments
+function dSVC(x, y, z, v, grow) {
+  const lo = sdCapsule(x, y, z, v.a[0], v.a[1], v.a[2], v.b[0], v.b[1], v.b[2], v.r + grow);
+  return v.c ? Math.min(lo, sdCapsule(x, y, z, v.b[0], v.b[1], v.b[2], v.c[0], v.c[1], v.c[2], v.r + grow)) : lo;
+}
 function dRAlumen(x, y, z, A) {
   const e = sdAtrium(x, y, z, A.ra, 0);
   if (e > 4.0) {                                                     // far away: only the caval tubes matter
     const v = A.svc, w = A.ivc;
-    const t = Math.min(e, sdCapsule(x, y, z, v.a[0], v.a[1], v.a[2], v.b[0], v.b[1], v.b[2], v.r),
+    const t = Math.min(e, dSVC(x, y, z, v, 0),
       sdCapsule(x, y, z, w.a[0], w.a[1], w.a[2], w.b[0], w.b[1], w.b[2], w.r));
     return t > 1.5 ? t : ssub(t, dAOroot(x, y, z, A) - A.ao.wall - 0.22, 0.15);   // SVC abuts, never enters, the aorta
   }
   let d = smin(e, dAppendage(x, y, z, A.ra.aa, 0.3), 0.7);          // BROAD mouth
   const v = A.svc, w = A.ivc;
-  d = smin(d, sdCapsule(x, y, z, v.a[0], v.a[1], v.a[2], v.b[0], v.b[1], v.b[2], v.r), 0.9);
+  d = smin(d, dSVC(x, y, z, v, 0), 0.9);
   d = smin(d, sdCapsule(x, y, z, w.a[0], w.a[1], w.a[2], w.b[0], w.b[1], w.b[2], w.r), 0.6);
   // sinus venarum: the smooth-walled venous back of the RA between the two caval
   // orifices, so SVC -> RA -> IVC is one continuous channel (the ME bicaval view)
@@ -1932,6 +2014,10 @@ function dAOroot(x, y, z, A) {
   let da = 1e9;
   for (const s of ao.ascSegs) da = Math.min(da, sdRoundCone(x, y, z, s.a[0], s.a[1], s.a[2], s.b[0], s.b[1], s.b[2], s.r1, s.r2));
   d = smin(d, da, 0.4);
+  // the sino-tubular ridge (a torus round the root axis) carved out of the lumen
+  const g = ao.ridge, qx = x - g.c[0], qy = y - g.c[1], qz = z - g.c[2], h = qx * U_AO[0] + qy * U_AO[1] + qz * U_AO[2];
+  const rad = Math.hypot(qx - h * U_AO[0], qy - h * U_AO[1], qz - h * U_AO[2]);
+  d = ssub(d, Math.hypot(rad - g.R, h) - g.r, STJ_RIDGE.k);
   return d;
 }
 function dAOarchDTA(x, y, z, A) {
@@ -2008,7 +2094,7 @@ function myoParts(x, y, z, A) {
   if (ra < 4.0) {
     d = smin(d, smin(smax(ra, -sep - 0.02, 0.1), dAppendage(x, y, z, A.ra.aa, 0.3) - 0.15, 0.4), 0.4);
     const v = A.svc, iv = A.ivc;
-    tubes = Math.min(tubes, sdCapsule(x, y, z, v.a[0], v.a[1], v.a[2], v.b[0], v.b[1], v.b[2], v.r + 0.1));
+    tubes = Math.min(tubes, dSVC(x, y, z, v, 0.1));
     tubes = Math.min(tubes, sdCapsule(x, y, z, iv.a[0], iv.a[1], iv.a[2], iv.b[0], iv.b[1], iv.b[2], iv.r + 0.1));
     // (the sinus venarum and the caval funnels carry the RA wall with them)
     const sv = A.ra.sv, c = A.ra.c;
@@ -2088,7 +2174,7 @@ export function lumenDist(x, y, z, A, which) {
     // thoracic aorta, the cavae, the left brachiocephalic vein, the coronaries)
     case 'ARCH': return dArchHeads(x, y, z, A);
     case 'DESC': return dDTA(x, y, z, A);
-    case 'SVC': { const v = A.svc; return sdCapsule(x, y, z, v.a[0], v.a[1], v.a[2], v.b[0], v.b[1], v.b[2], v.r); }
+    case 'SVC': return dSVC(x, y, z, A.svc, 0);
     case 'IVC': { const v = A.ivc; return sdCapsule(x, y, z, v.a[0], v.a[1], v.a[2], v.b[0], v.b[1], v.b[2], v.r); }
     case 'BCV': return dBCV(x, y, z, A);
     case 'CORONARY': return dCoronary(x, y, z, A, 0, 0.5);       // (exact within 0.5 cm of a vessel)

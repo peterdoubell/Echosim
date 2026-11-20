@@ -6,7 +6,7 @@
 // (BART) convention with a wall filter and aliasing, on-image anatomical
 // labels, live measurements, and a scrolling spectral-Doppler trace.
 
-import { classify, velocityAt, geometryAt, hemoSummary, hemodynamics, TISSUE, VALVE_DEFS, FLOW, AORTIC_CUSPS, shuntLabel, stenosisCw, FLOW_AXES, FLOW_SITES, membSite } from './cardiac-model.js';
+import { classify, velocityAt, geometryAt, hemoSummary, hemodynamics, TISSUE, VALVE_DEFS, FLOW, AORTIC_CUSPS, shuntLabel, stenosisCw, FLOW_AXES, FLOW_SITES, membSite, valveAt } from './cardiac-model.js';
 import { LM, rapEstimate, diaphragmBelow, rwmaBlend, lumenDist, hepaticVeinSegs } from './anatomy.js';
 import { clamp } from './mathutils.js';
 import { ALL_VIEWS } from './views.js';
@@ -51,6 +51,17 @@ const DB = {
   vwall: -26, vein: -52, soft: -46, lung: -48, medi: -38,
 };
 const AMP = Object.fromEntries(Object.entries(DB).map(([k, v]) => [k, Math.pow(10, v / 20)]));
+// distal shadow behind a calcific-AS nodule (per cm of calcium crossed; the
+// generic calcified-valve value is 2.4)
+const CALC_NODULE_ATT = 5.0;
+// amplitude gain of a calcific-AS nodule over the calcified-leaflet value (+6 dB:
+// the brightest reflector in the image) and of the sclerotic, thickened cusp
+// between the nodules over a normal cusp (+3 dB)
+const CALC_NODULE_GAIN = 2.0, SCLEROTIC_GAIN = 1.4;
+// coarse-sampling thin-valve guard: reach from the aortic / pulmonary valve
+// centre (cm, squared) — the cusps lie within ~1.5 cm of it (<= ~1 cm
+// downstream, <= the annular radius ~1.2 cm out)
+const THIN_GUARD_R2 = 1.7 * 1.7;
 // Spontaneous echo contrast: amplitude gain (x3..x27, mean ~x10, about +20 dB) of
 // LA blood in a smooth cloud pattern that swirls about the LA centre with the
 // cardiac phase, so the smoke drifts rather than flickering like the speckle.
@@ -143,7 +154,9 @@ const EXTRA_LABELS = [
 // cine is ~0.3-0.5 mm axial / 1-2 mm lateral. At depth 15 cm this buffer gives
 // ~0.36 mm/px axially, so endocardial borders and speckle grain resolve finely on
 // capable hardware; the FPS-adaptive stride (up to 3) coarsens the SAMPLING on slow
-// machines while the larger buffer still upscales less blockily than before.
+// machines while the larger buffer still upscales less blockily than before (the
+// sampler then also looks inside each block for semilunar-valve tissue thinner
+// than the block, so a shut aortic valve keeps its 'Y' at any stride).
 // The buffer is wide enough for the WHOLE sector at full depth (fan radius
 // SH * 0.94 px at a 0.66 rad half-angle, ~242 px either side of the apex), so the
 // fan keeps its curved bottom and is never cut off at the sides in deep views.
@@ -527,6 +540,8 @@ export class EchoView {
     this._NA = 128;                           // artifact beam count across the sector
     this._NS = 96;                            // depth samples per beam
     this._shadowGain = new Float32Array(this._NA * this._NS); // distal attenuation (shadowing)
+    this._nodShadow = new Float32Array(this._NA * this._NS);  // (its calcific-AS nodule part, before the lateral spread)
+    this._valveEnd = new Int16Array(this._NA);                 // per beam: the last depth sample in valve tissue (-1: none)
     this._enhGain = new Float32Array(this._NA * this._NS);    // attenuation x TGC (incl. enhancement)
     this._lungDepth = new Float32Array(this._NA);            // pleural-line depth per beam (or 1e9)
     this._lungSlope = new Float32Array(this._NA);            // its d(ln depth)/d(angle): incidence
@@ -781,7 +796,32 @@ export class EchoView {
           eOff = off;
         }
 
-        const t = classify(wx, wy, wz, G, path);
+        let t = classify(wx, wy, wz, G, path);
+        // Coarse sampling (stride 2-3, slow hardware) takes ONE sample per block,
+        // so a semilunar-valve structure thinner than the block (~1 mm: a shut
+        // cusp's coaptation seam, a thin cusp lying along the beam) can fall
+        // between samples and vanish — one arm of the closed aortic 'Y', a gap in
+        // a cusp. Where the block's sample is blood within reach of the aortic or
+        // pulmonary valve, also test the block's diagonal pixels for valve tissue
+        // (any 1-px line through the block, vertical or horizontal, crosses one)
+        // and keep what is found there: what full-resolution sampling would show.
+        if (st > 1 && (t.tissue === TISSUE.AORTA || t.tissue === TISSUE.LV || t.tissue === TISSUE.RV)) {
+          const va = Av.valves.aortic.c, vp = Av.valves.pulmonic.c;
+          const da = (wx - va[0]) ** 2 + (wy - va[1]) ** 2 + (wz - va[2]) ** 2;
+          const dp = (wx - vp[0]) ** 2 + (wy - vp[1]) ** 2 + (wz - vp[2]) ** 2;
+          if (da < THIN_GUARD_R2 || dp < THIN_GUARD_R2) {
+            const pd = probe.dir, pl = probe.lat;
+            for (let q = 1; q < st; q++) {
+              const ddx = sx + q - cx, ddy = sy + q - apexY;
+              const th2 = Math.atan2(ddx, ddy), r2 = Math.sqrt(ddx * ddx + ddy * ddy);
+              if (Math.abs(th2) > half || r2 > rMax) continue;
+              const d2 = r2 / pxPerCm, c2 = Math.cos(th2), s2 = Math.sin(th2);
+              const v2 = valveAt(P[0] + d2 * (c2 * pd[0] + s2 * pl[0]) + enx * eOff, P[1] + d2 * (c2 * pd[1] + s2 * pl[1]) + eny * eOff,
+                P[2] + d2 * (c2 * pd[2] + s2 * pl[2]) + enz * eOff, G, path);
+              if (v2) { t = v2; break; }
+            }
+          }
+        }
         const tissue = t.echo; // capture before velocityAt reuses singletons
         const kind = t.tissue;
 
@@ -811,7 +851,7 @@ export class EchoView {
         // Mean backscatter AMPLITUDE of the sampled tissue (see DB). No speckle
         // here: fully developed speckle multiplies the field AFTER the PSF, as
         // the interference of sub-resolution scatterers does on a real scanner.
-        const calc = t.calc === 1;
+        const calc = t.calc >= 1;
         let e;
         if (kind === TISSUE.MYO) {
           e = AMP.myo * Math.pow(10, 0.6 * (tissue - 0.55)); // papillaries/crista a touch brighter
@@ -839,7 +879,7 @@ export class EchoView {
             if (g > 0.05) e *= 1 + Math.min(1, g);
           }
         }
-        else if (kind === TISSUE.VALVE) e = calc ? AMP.calc : AMP.valve;
+        else if (kind === TISSUE.VALVE) e = calc ? AMP.calc * (t.calc === 2 ? CALC_NODULE_GAIN : 1) : AMP.valve * (tissue >= 1 ? SCLEROTIC_GAIN : 1);
         else if (kind === TISSUE.LV || kind === TISSUE.RV ||
                  kind === TISSUE.LA || kind === TISSUE.RA ||
                  kind === TISSUE.AORTA) {
@@ -1142,7 +1182,8 @@ export class EchoView {
   // classify() calls — far fewer than the Cartesian sampling loop.
   _marchArtifacts(G, path, probe, half) {
     const NA = this._NA, NS = this._NS;
-    const shadow = this._shadowGain, enh = this._enhGain, lungD = this._lungDepth;
+    const shadow = this._shadowGain, enh = this._enhGain, lungD = this._lungDepth, nodSh = this._nodShadow, vEnd = this._valveEnd;
+    let anyNod = false;
     const P = probe.pos;
     const dStep = this.depthCm / NS;
     // Attenuation is cumulative along each beam and tissue-specific; the TGC ramp
@@ -1158,17 +1199,27 @@ export class EchoView {
       const bd = this.beamDir(probe, theta);
       const bx = bd[0], by = bd[1], bz = bd[2];
       let sh = 1;            // persistent distal shadow behind calcium
+      let shN = 1;           // (a calcific-AS nodule's shadow, applied once the beam leaves it)
+      let shNod = 1;         // the nodule shadows applied so far on this beam
       let att = 0;           // accumulated attenuation (dB)
       let lastFluid = -1e9;  // depth of the last blood / effusion sample on this beam
       let runStart = -1e9, runLen = 0, runPeri = false;   // that fluid run: start, length, effusion?
       lungD[a] = 1e9;
+      vEnd[a] = -1;
       const base = a * NS;
       for (let s = 0; s < NS; s++) {
         const depth = (s + 0.5) * dStep;
         const t = classify(P[0] + depth * bx, P[1] + depth * by, P[2] + depth * bz, G, path);
         const kind = t.tissue;
         // strong reflector: calcified valve (AS/MS) casts a distal shadow
-        if (kind === TISSUE.VALVE && t.calc === 1) sh *= Math.exp(-2.4 * dStep);
+        // (calc 2: a dense calcium nodule of calcific AS — its leading echo stays
+        // bright, and everything beyond it lies in a deeper shadow)
+        if (kind === TISSUE.VALVE) vEnd[a] = s;
+        if (kind === TISSUE.VALVE && t.calc === 2) { shN *= Math.exp(-CALC_NODULE_ATT * dStep); anyNod = true; }
+        else {
+          shNod *= shN; shN = 1;
+          if (kind === TISSUE.VALVE && t.calc === 1) sh *= Math.exp(-2.4 * dStep);
+        }
         if (sh < 0.16) sh = 0.16; // shadow, not pure black
         // (the chest wall's near field is not lung, and a pleural surface must be a
         // real air interface: the lung continues at least 0.4 cm deeper)
@@ -1187,6 +1238,7 @@ export class EchoView {
         const al = ALPHA[kind];
         att += 0.5 * (al === undefined ? 0.5 : al) * kAtt;   // to the sample centre
         shadow[base + s] = sh;
+        nodSh[base + s] = shNod;
         if (kind === TISSUE.LV || kind === TISSUE.RV || kind === TISSUE.LA || kind === TISSUE.RA ||
             kind === TISSUE.AORTA || kind === TISSUE.VEIN || kind === TISSUE.PERICARDIUM) {
           if (depth - lastFluid > 1.5 * dStep) runStart = depth;   // a new fluid run starts
@@ -1203,6 +1255,21 @@ export class EchoView {
         const cap = past < 3 ? cNear : past > 5 ? cFar : cNear - (cNear - cFar) * (past - 3) * (past - 3) * (6 - past) / 4;
         enh[base + s] = Math.pow(10, Math.min(cap, kTgc * depth - att) / 20);
         att += 0.5 * (al === undefined ? 0.5 : al) * kAtt;
+      }
+    }
+    // Calcific-AS nodules: the beam is wider (~2-3 mm) than the ~1 mm slits
+    // between neighbouring nodules and the fibrous gaps between them, so a beam
+    // threading a gap is still shadowed by the nodules either side — beyond the
+    // valve, spread each nodule's shadow over the neighbouring beams (the darkest
+    // of the three), which keeps a lone unshadowed beam from drawing a bright
+    // radial streak behind the valve. (Within the valve each beam keeps its own.)
+    if (anyNod) {
+      for (let a = 0; a < NA; a++) {
+        const b0 = a * NS, bl = (a > 0 ? a - 1 : a) * NS, br = (a < NA - 1 ? a + 1 : a) * NS;
+        for (let s = 0; s < NS; s++) {
+          const n = s > vEnd[a] ? Math.min(nodSh[bl + s], nodSh[b0 + s], nodSh[br + s]) : nodSh[b0 + s];
+          shadow[b0 + s] = Math.max(0.16, shadow[b0 + s] * n);
+        }
       }
     }
     // the gain field varies across beams only as fast as the beam is wide: blur
