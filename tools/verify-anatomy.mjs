@@ -2710,13 +2710,7 @@ const FOLD_PHASES = [0, 0.1, 0.2, 0.3, 0.42, 0.62, 0.8];
   }
   for (const [tag, G] of [['ED', GED], ['ES', GES]]) {
     for (const v of ['MELAA', 'MEAVLAX', 'ME2C']) {
-      // KNOWN-FAIL pending tee (MEAVLAX at ED, ~0.04 cm2, present before review 12):
-      // the ME AV LAX plane runs tangent to the LA body (at ED ~70 % of its LA cells
-      // lie within 0.3 cm of the wall, none deeper than 0.6 cm), so it grazes the
-      // plain LA wall beside the appendage ostium as a dot; not a fold (the row above).
-      KNOWN = v === 'MEAVLAX' && tag === 'ED';
       check('TEE', `${v}: myocardium-like cells inside the LA not connected to the LA wall, any source (${tag})`, freeMyo(TEE_VIEWS[v], G, TISSUE.LA), [0, 0], 'cm2');
-      KNOWN = false;
     }
   }
   // the ridge itself: from the crotch where the LSPV and LAA lumens part (no blood
@@ -4578,10 +4572,10 @@ SECTION = 'Pathology';
   // the pericardial constraint produces, which the tamponade work item retunes
   KNOWN = true;
   check(g, 'tamponade HV: expiratory diastolic reversal peak / normal', hn.AR > 0 ? ht[0].diaRev / hn.AR : null, [2, 10], '', `pending tamp; exp ${ht[0].diaRev.toFixed(2)} vs normal AR ${hn.AR.toFixed(2)} m/s`);
-  // KNOWN-FAIL pending rv: the giant RA c-v wave that reverses systolic caval
-  // flow in severe TR comes from the TR right-atrial retune (right-heart work item)
-  assert(g, 'severe TR HV: systolic flow reversed (S < 0)', htr.Srev > htr.S, `pending rv; S fwd ${htr.S.toFixed(2)}, reversed ${htr.Srev.toFixed(2)} m/s`);
   KNOWN = false;
+  // the giant RA c-v wave of severe TR reverses systolic caval flow (the TR
+  // right-atrial retune of the right-heart work item)
+  assert(g, 'severe TR HV: systolic flow reversed (S < 0)', htr.Srev > htr.S, `S fwd ${htr.S.toFixed(2)}, reversed ${htr.Srev.toFixed(2)} m/s`);
   // pulmonary veins: velocity along a vein's axis ~1 cm up from its ostium,
   // sampled through the cycle (+ toward the LA)
   const pvTrace = (p) => {

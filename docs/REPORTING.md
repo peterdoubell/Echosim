@@ -426,17 +426,17 @@ your own write-up.
 | Case | Model conclusion |
 |---|---|
 | Normal | Structurally normal heart. Normal biventricular size and systolic function. No significant valve disease. |
-| Aortic stenosis | 1. Severe aortic stenosis (Vmax 4.4 m/s, mean gradient 47 mmHg, AVA 0.54 cm²). 2. LV concentric hypertrophy. 3. Dilated left atrium (LAVi 52 mL/m²). |
+| Aortic stenosis | 1. Severe aortic stenosis (Vmax 4.4 m/s, mean gradient 47 mmHg, AVA 0.54 cm²). 2. LV concentric hypertrophy. 3. Dilated left atrium (LAVi 50 mL/m²). |
 | Mitral regurgitation | 1. Severe mitral regurgitation (RF 54%, RVol 66 mL). 2. Moderately dilated LV (LVEDVi 102 mL/m²). 3. Dilated left atrium (LAVi 66 mL/m²). |
-| Mitral stenosis | 1. Severe mitral stenosis (MVA 1.00 cm², mean gradient 13.8 mmHg). 2. Dilated left atrium (LAVi 86 mL/m²). 3. High echocardiographic probability of pulmonary hypertension (TR Vmax 3.4 m/s, PASP ~55 mmHg). |
-| Dilated cardiomyopathy | 1. Severely impaired LV systolic function, LVEF 27%. 2. Severely dilated LV (LVEDVi 120 mL/m²). 3. Moderate functional mitral regurgitation (RF 33%). 4. Dilated left atrium (LAVi 68 mL/m²). 5. Impaired RV systolic function (TAPSE 12 mm, FAC 31%). |
-| Regional wall motion abnormality | 1. Borderline low LV systolic function, LVEF 50%. 2. Regional wall motion abnormality: septal and apical hypokinesis (LAD territory). |
+| Mitral stenosis | 1. Severe mitral stenosis (MVA 1.00 cm², mean gradient 13.8 mmHg). 2. Dilated left atrium (LAVi 85 mL/m²). 3. High echocardiographic probability of pulmonary hypertension (TR Vmax 3.5 m/s, PASP ~56 mmHg). 4. RV dilatation (RVD1 48 mm) with impaired RV systolic function (TAPSE 15 mm, FAC 34%). |
+| Dilated cardiomyopathy | 1. Severely impaired LV systolic function, LVEF 27%. 2. Severely dilated LV (LVEDVi 120 mL/m²). 3. Moderate functional mitral regurgitation (RF 33%). 4. Dilated left atrium (LAVi 67 mL/m²). 5. RV dilatation (RVD1 48 mm) with impaired RV systolic function (TAPSE 10 mm, FAC 20%). |
+| Regional wall motion abnormality | 1. Impaired LV systolic function, LVEF 41%. 2. Regional wall motion abnormality: septal and apical hypokinesis (LAD territory). |
 | Pericardial effusion | 1. Large pericardial effusion (2.3 cm). |
-| Cardiac tamponade | 1. Large pericardial effusion (2.4 cm) with echocardiographic features of tamponade (RA inversion, RV diastolic collapse, plethoric IVC, mitral E variation 34%, tricuspid E 48%). Tamponade is a clinical diagnosis. |
-| Tricuspid regurgitation | 1. Severe tricuspid regurgitation (TR Vmax 2.6 m/s). 2. RV dilatation (RVD1 58 mm). |
-| Pulmonary hypertension | 1. LV concentric remodelling. 2. High echocardiographic probability of pulmonary hypertension (TR Vmax 4.3 m/s, PASP ~90 mmHg). 3. RV dilatation (RVD1 55 mm) with impaired RV systolic function (TAPSE 14 mm, FAC 32%). |
-| Atrial septal defect | 1. Secundum ASD (Qp:Qs 1.7). 2. RV dilatation (RVD1 60 mm). |
-| Ventricular septal defect | 1. Mildly dilated LV (LVEDVi 83 mL/m²). 2. Dilated left atrium (LAVi 40 mL/m²). 3. Restrictive muscular VSD (Qp:Qs 1.3). |
+| Cardiac tamponade | 1. Large pericardial effusion (2.4 cm) with echocardiographic features of tamponade (RA inversion, RV diastolic collapse, plethoric IVC, mitral E variation 32%, tricuspid E 48%). Tamponade is a clinical diagnosis. |
+| Tricuspid regurgitation | 1. Severe tricuspid regurgitation (TR Vmax 2.4 m/s). 2. RV dilatation (RVD1 52 mm). |
+| Pulmonary hypertension | 1. High echocardiographic probability of pulmonary hypertension (TR Vmax 4.3 m/s, PASP ~89 mmHg). 2. RV dilatation (RVD1 48 mm) with impaired RV systolic function (TAPSE 15 mm, FAC 33%). |
+| Atrial septal defect | 1. Secundum ASD (Qp:Qs 1.7). 2. RV dilatation (RVD1 57 mm). |
+| Ventricular septal defect | 1. Mildly dilated LV (LVEDVi 84 mL/m²). 2. Dilated left atrium (LAVi 39 mL/m²). 3. Restrictive muscular VSD (Qp:Qs 1.3). |
 
 A few reporting points from these cases:
 
@@ -444,14 +444,14 @@ A few reporting points from these cases:
   report it with the HR. Severity rests on the valve area.
 - **Pulmonary hypertension.** The LV is small and under-filled, and the septum
   is flattened (comment on septal shape in the PSAX view). LV filling shows the
-  impaired-relaxation pattern (mitral E/A ~0.85, IVRT ~130 ms) and the tricuspid
+  impaired-relaxation pattern (mitral E/A ~0.85, IVRT ~120 ms) and the tricuspid
   inflow is A-dominant. The RVOT PW has a short acceleration time (~70 ms) with a
   mid-systolic notch, and the RV ejection time is ~50 ms shorter than normal.
 - **Tricuspid regurgitation.** In severe TR the RA v-wave blunts the RV–RA
   gradient: the CW envelope is dense, peaks early and is triangular, and its
   Vmax (2.4 m/s here) can underestimate PASP. Report the IVC and RAP estimate.
 - **Mitral stenosis, right heart.** Look for the secondary pulmonary hypertension: a TR jet
-  (Vmax 3.4 m/s), a dilated, hypokinetic RV (FAC ~33 %) and a dilated IVC. Measure the pressure
+  (Vmax 3.5 m/s), a dilated, hypokinetic RV (FAC ~34 %) and a dilated IVC. Measure the pressure
   half-time on the CW "ski slope" (MVA ≈ 220/PHT).
 - **Dilated cardiomyopathy.** With LAP ~18 mmHg the inflow is restrictive
   (E/A > 2, DT < 150 ms), not impaired relaxation.
@@ -460,13 +460,13 @@ A few reporting points from these cases:
   is grade I diastolic dysfunction, not a normal filling pattern.
 - **Cardiac tamponade.** Pericardial pressure (~13 mmHg) is transmitted to every
   chamber. The RA free wall inverts from late diastole into early systole (about
-  45% of the cycle) and the RV free wall is pushed in in early diastole. The IVC
+  40% of the cycle) and the RV free wall is pushed in in early diastole. The IVC
   is plethoric (RAP ~15 mmHg). The PW trace shows three beats across a breath:
-  mitral E falls about 27% in inspiration while tricuspid E rises about 47%.
+  mitral E falls about 32% in inspiration while tricuspid E rises about 48%.
 - **Right-heart pressures.** RV, PA and RA pressures are solved by the
   circulation, so the TR Vmax, the RAP behind the IVC and the VSD gradient all
   follow from the same right heart. In severe DCM the failing RV raises RAP to
-  ~13 mmHg (plethoric IVC). The drawn RV holds the solved RV volume and ejects
+  ~12 mmHg (plethoric IVC). The drawn RV holds the solved RV volume and ejects
   its ejection fraction, so its size, TAPSE and FAC, the tricuspid inflow and the
   RVOT envelope (acceleration time ~130 ms normally; a raised velocity with the
   ASD's increased Qp) all come from that solved right heart.
