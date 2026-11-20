@@ -755,15 +755,33 @@ function meBicavalProbe() {
 // ME RV inflow-outflow (~60-75 deg): RA and tricuspid on the left, the RV
 // wrapping round the aortic valve to the RVOT and pulmonary valve on the right.
 const MERVIO_S = 0;                                  // cm up the oesophageal path
+const MERVIO_AV_H = 0.3;                             // cm above the aortic annulus: under the cusps' coaptation at ED
 function meRvioProbe() {
-  // the plane through the oesophagus, the tricuspid and the pulmonary valve: the
-  // RV wraps from its inflow (screen-left) round the aortic valve to the outflow
+  // the plane from the oesophagus through the aortic valve at cusp level that
+  // passes closest to the tricuspid and the pulmonary valve centres: the RV wraps
+  // from its inflow (screen-left) round the aortic valve to the outflow, and the
+  // shut aortic cusps make their 'Y' in the middle of the sector. (The plane
+  // through the oesophagus and the two right-sided valve centres alone cuts the
+  // root ~0.9 cm above the annulus from the mid-oesophageal station, above the
+  // coaptation of one cusp pair (that arm of the 'Y' is missing at 0.9 cm, faint
+  // at 0.45-0.6 cm); holding the cusp level costs 0.7-0.8 cm of off-centre cut
+  // on each of the two valves, inside their annuli.)
   const ESO = teePathPoint(MERVIO_S);
-  const n = norm(vcross(vsub(T, ESO), vsub(LM.PV, ESO)));
+  const n0 = norm(vcross(vsub(T, ESO), vsub(LM.PV, ESO)));
+  const u = norm(vsub(vadd(A, vscale(LM.U_AO, MERVIO_AV_H)), ESO));
+  const e1 = norm(vcross(u, n0)), e2 = vcross(u, e1);
+  // n = e1 sin(th) + e2 cos(th), perpendicular to u, minimising the squared
+  // distances of the two valve centres from the plane
+  const a = [vdot(vsub(T, ESO), e1), vdot(vsub(T, ESO), e2)], b = [vdot(vsub(LM.PV, ESO), e1), vdot(vsub(LM.PV, ESO), e2)];
+  const mxx = a[0] * a[0] + b[0] * b[0], myy = a[1] * a[1] + b[1] * b[1], mxy = a[0] * a[1] + b[0] * b[1];
+  const th = 0.5 * Math.atan2(2 * mxy, mxx - myy) + Math.PI / 2;      // minor axis of the 2 x 2 form
+  let n = norm(vadd(vscale(e1, Math.cos(th)), vscale(e2, Math.sin(th))));
+  if (vdot(n, n0) < 0) n = vscale(n, -1);
   const tgt = vsub(A, vscale(n, vdot(vsub(A, ESO), n)));
   const dir = norm(vsub(tgt, ESO));
   let right = vsub(LM.PV, T);
   right = vsub(right, vscale(dir, vdot(right, dir)));
+  right = vsub(right, vscale(n, vdot(right, n)));
   return teeClear(probeFrom(tgt, dir, right, vdot(vsub(tgt, ESO), dir)));
 }
 // the tricuspid annulus descends ~1-2 cm in systole and this plane's normal runs
@@ -990,9 +1008,16 @@ const inPlaneAng = (p, q) => { const w = vsub(q, p.pos); return Math.atan2(vdot(
 // the heads and the mitral valve inside the sector (TG2C_W[3]: within 38 deg of the
 // beam, 1 cm to depth - 1 cm; a plane can hold them all behind or beside the
 // transducer): the muscles then read as columns on the wall with their chordal
-// fans, not as free head islands. (From the TG mid station, ~3 cm from the apex,
+// fans, not as free head islands. A head more than TG2C_HEAD cm off the plane
+// costs TG2C_W[4] times more. (With the anterolateral head under its commissure
+// the four head positions (two muscles, ED and ES) lie 0.36 cm from their best
+// common plane; with all of them and the mitral valve inside the sector the
+// floor is 0.41 cm, reached only with the valve on the sector edge and a quarter
+// of the chordae in plane at end-diastole. The search therefore holds the valve
+// 7 deg inside the edge and about half the chordae, with the heads at ~0.45 cm.)
+// (From the TG mid station, ~3 cm from the apex,
 // the LV spans more than the 90 deg sector: the apex lies off its left edge.)
-const TG2C_ADV = [-2, 3], TG2C_W = [0.5, 1.0, 0.1, 1.0], TG2C_DEPTH = 13;
+const TG2C_ADV = [-2, 3], TG2C_W = [0.5, 2.0, 0.1, 1.0, 4.0], TG2C_HEAD = 0.3, TG2C_DEPTH = 13;
 let _tg2cG = null;
 const tg2cGeo = () => _tg2cG || (_tg2cG = [geometryAt(0, {}), geometryAt(0.42, {})]);   // end-diastole, end-systole (as A0, A_ES)
 const tg2cProbe = cachedProbe(() => {
@@ -1007,13 +1032,13 @@ const tg2cProbe = cachedProbe(() => {
     const m = Math.max(...heads.map((h) => distToPlane(p, h))), mm = Math.max(...mids.map((h) => distToPlane(p, h)));
     const off = chords.reduce((n, q) => n + (distToPlane(p, q) > 0.3 ? 1 : 0), 0) / chords.length;
     const outside = (q) => { const a = Math.abs(inPlaneAng(p, q)) * 180 / Math.PI, z = vdot(vsub(q, p.pos), p.dir); return Math.max(0, a - 38) / 10 + Math.max(0, 1 - z) + Math.max(0, z - (TG2C_DEPTH - 1)); };
-    const s = m + TG2C_W[0] * mm + TG2C_W[1] * off + TG2C_W[2] * Math.max(0, distToPlane(p, APEX) - 0.5)
+    const s = m + TG2C_W[4] * Math.max(0, m - TG2C_HEAD) + TG2C_W[0] * mm + TG2C_W[1] * off + TG2C_W[2] * Math.max(0, distToPlane(p, APEX) - 0.5)
       + TG2C_W[3] * [...heads, M].reduce((a, q) => a + outside(q), 0)
       + 0.01 * (Math.abs(adv) + Math.abs(f) / 10 + Math.abs(rot) / 5);
     if (!best || s < best.s) best = { s, p, k: [adv, th, f, rot] };
   };
   // coarse grid, then a fine one about the best
-  for (let adv = TG2C_ADV[0]; adv <= TG2C_ADV[1]; adv += 1) for (let th = 40; th <= 140; th += 4) for (let f = -30; f <= 30; f += 6) for (const rot of [-20, -10, 0, 10, 20]) tryIt(adv, th, f, rot);
+  for (let adv = TG2C_ADV[0]; adv <= TG2C_ADV[1]; adv += 0.5) for (let th = 40; th <= 140; th += 4) for (let f = -30; f <= 30; f += 6) for (const rot of [-30, -20, -10, 0, 10, 20, 30]) tryIt(adv, th, f, rot);
   const [a0, t0, f0, r0] = best.k;
   for (let adv = a0 - 1; adv <= a0 + 1; adv += 0.5) for (let th = t0 - 4; th <= t0 + 4; th += 1) for (let f = f0 - 6; f <= f0 + 6; f += 2) for (let rot = r0 - 5; rot <= r0 + 5; rot += 2.5) tryIt(adv, th, f, rot);
   return best.p;
