@@ -3531,6 +3531,21 @@ SECTION = 'Pathology';
     const bc = add(pr.pos, add(mul(pr.dir, dc * Math.cos(tc)), mul(pr.lat, dc * Math.sin(tc))));
     const C0 = sub(C, mul(pr.normal, dot(sub(C, pr.pos), pr.normal)));
     check(ga, 'A4C: colour box centre to the defect', Math.hypot(...sub(bc, C0)), [0, 1.0], 'cm', `trace ${R.spec.site}, box ${((b.t1 - b.t0) / (2 * 0.66)).toFixed(2)} of the sector`);
+    {
+      // ... and the box holds the column: little of the shunt colour lies along the box's
+      // edges. (The reviewed build, its box centred on the mitral gate, cut the column
+      // with the box's straight edges: 25 % of the shunt colour lay along them. The
+      // column's slow far end still leaves the box toward the RA free wall, which is
+      // what the ~5 % left is; a column cut lengthwise by an edge gives far more.)
+      let edge = 0, tot = 0;
+      for (let j = 0; j < R.SH; j++) for (let i = 0; i < R.SW; i++) {
+        const k = j * R.SW + i; if (R.alpha[k] < 0.5 || shown(R, i, j, asd) !== FLOW.ASD_JET) continue;
+        tot++;
+        const th = Math.atan2(i - R.cx, j - R.apexY), d = Math.hypot(i - R.cx, j - R.apexY) / R.pxPerCm;
+        if (Math.min(Math.abs(th - b.t0), Math.abs(th - b.t1)) * d < 0.12 || Math.min(Math.abs(d - b.d0), Math.abs(d - b.d1)) < 0.12) edge++;
+      }
+      check(ga, 'A4C: shunt colour along the edges of the colour box / all shunt colour', tot ? 100 * edge / tot : null, [0, 8], '%', `${tot} px`);
+    }
     check(ga, 'secundum ASD: colour scale for the shunt study (Nyquist)', pre.nyquist, [0.4, 0.5], 'm/s', `box ${pre.box} of the sector`);
     assert(ga, 'normal heart: standard colour scale and box (62 cm/s, 0.45)', colourPreset('A4C', {}).nyquist === 0.62 && colourPreset('A4C', {}).box === 0.45);
   }

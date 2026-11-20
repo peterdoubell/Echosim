@@ -1476,11 +1476,12 @@ export function stenosisCw(flow, H, path = {}) {
 // converges on the defect only within ~1 cm of it; through the defect it runs
 // across the septum (IAS_N) with a blunt profile as wide as the hole; on the RA
 // side it streams on as a column that bends toward the tricuspid valve, slowing as
-// it goes and fading out by ASD_COL_END of the way to the valve. The column keeps
-// the oval defect's shape: across the hole's short axis it is held to ASD_COL_WU
-// (half-width ~0.5-0.65 cm), across its long axis it starts as wide as the hole
-// (~0.8 cm) and spreads to at most ASD_COL_WB (before review 12 it spread to ~1.8
-// cm half-width, 1.85x the hole across its short axis, and flooded the RA). Only
+// it goes and fading out by ASD_COL_END of the way to the valve. The column is a
+// tube round its own bending centreline that starts with the oval defect's shape
+// (half-widths ~0.47 x 0.8 cm) and widens as a free jet does (ASD_COL_SPREAD), to
+// at most ASD_COL_WU_MAX x ASD_COL_WB_MAX. (Before review 12 its section was taken
+// across the septum's fixed axes, so past the bend nothing bounded it along the
+// septal normal and it flooded the RA.) Only
 // the core of the column (about 1 m/s) aliases at a standard colour scale.
 // Variance stays low (laminar). Each part is held to its own lumen: the
 // convergence and the defect to the atrium on that side of the septum, the RA
@@ -1488,16 +1489,26 @@ export function stenosisCw(flow, H, path = {}) {
 // the RA (in the ME AV short axis the ungated column ran on into the closed root,
 // where diastolic colour reads as aortic regurgitation or a ruptured sinus).
 const ASD_BEND = 2.6;                   // cm along IAS_N to the stream's bend (Bezier control) point
-const ASD_COL_WU = 0.65, ASD_COL_WB = 1.3;    // cm, RA column half-width caps (across the defect's short / long axis)
+const ASD_COL_WU = 0.65, ASD_COL_WB = 1.3;    // cm, caps on the column's starting half-widths (across the defect's short / long axis)
+const ASD_COL_SPREAD = 0.2;             // cm of half-width per cm of path: a free jet's ~11 deg half-angle
+const ASD_COL_WU_MAX = 1.1, ASD_COL_WB_MAX = 1.5;   // cm, half-widths the column never exceeds
 const ASD_COL_END = 0.85;               // fraction of the defect -> TV path where the column has faded out
-// the column's spread (x its starting half-widths) and its centreline speed
-// (relative to the flow through the defect, ~1/width as a free jet slows) a
-// fraction f of the way from the defect to the valve
-const asdSpread = (f) => [1 + 0.5 * f, 1 + f];
-const asdSpeedK = (f) => {
+// the column's half-widths [short, long] `s` cm along the stream from the defect
+// and its centreline speed there (relative to the flow through the defect; it
+// slows as its cross-section grows, as a free jet does)
+const _asdG = [0, 0, 0];
+const asdSpread = (s) => {
+  const wu0 = Math.min(ASD_COL_WU, LM.IAS.asdR * 1.2), wb0 = Math.min(ASD_COL_WB, LM.IAS.asdRb * 0.8);
+  _asdG[0] = Math.min(ASD_COL_WU_MAX, wu0 + ASD_COL_SPREAD * s);
+  _asdG[1] = Math.min(ASD_COL_WB_MAX, wb0 + ASD_COL_SPREAD * s);
+  _asdG[2] = wu0 * wb0;
+  return _asdG;
+};
+const asdSpeedK = (s, L) => {
+  const f = s / L;
   if (f >= ASD_COL_END) return 0;
-  const g = asdSpread(f);
-  return 1 / Math.pow(g[0] * g[1], 0.6) * (f > ASD_COL_END - 0.15 ? (ASD_COL_END - f) / 0.15 : 1);
+  const g = asdSpread(s);
+  return Math.pow(g[2] / (g[0] * g[1]), 0.6) * (f > ASD_COL_END - 0.15 ? (ASD_COL_END - f) / 0.15 : 1);
 };
 const _asdCache = new WeakMap();
 function asdPath(G) {
@@ -1576,13 +1587,24 @@ function asdFlow(px, py, pz, G, H) {
   if (f >= ASD_COL_END) return;
   // the column spreads a little as it goes and slows as a free jet does (~1/width):
   // only its core near the defect is above a standard colour scale
-  const g = asdSpread(f);
-  const ru = (bx * U[0] + by * U[1] + bz * U[2]) / Math.min(ASD_COL_WU, Ru * 1.2 * g[0]);
-  const rb = (bx * Bk[0] + by * Bk[1] + bz * Bk[2]) / Math.min(ASD_COL_WB, Rb * 0.8 * g[1]);
+  const g = asdSpread(bs);
+  // The cross-section is taken across the stream where it is: its long axis stays
+  // the defect's (lb: asdB made perpendicular to the stream; the stream bends in the
+  // plane across it), its short axis (lu = lb x tangent) turns with the stream. (Taken
+  // across the septum's own axes U and B, as before review 12, nothing bounded the
+  // column along the septal normal once the stream had turned toward the valve, and
+  // the "column" spread over half the RA in the A4C and ME AV short axis.)
+  const kb = Bk[0] * bu[0] + Bk[1] * bu[1] + Bk[2] * bu[2];
+  let lx = Bk[0] - kb * bu[0], ly = Bk[1] - kb * bu[1], lz = Bk[2] - kb * bu[2];
+  const ll = Math.hypot(lx, ly, lz) || 1;
+  lx /= ll; ly /= ll; lz /= ll;
+  const ux = ly * bu[2] - lz * bu[1], uy = lz * bu[0] - lx * bu[2], uz = lx * bu[1] - ly * bu[0];
+  const ru = (bx * ux + by * uy + bz * uz) / g[0];
+  const rb = (bx * lx + by * ly + bz * lz) / g[1];
   const r2 = ru * ru + rb * rb;
   if (r2 >= 1.3) return;
   const prof = r2 < 1 ? 1 - 0.75 * r2 : 0.25 * (1.3 - r2) / 0.3;
-  const sp = av * prof * asdSpeedK(f);
+  const sp = av * prof * asdSpeedK(bs, P.L);
   // the RA lumen only (never the aortic root against it)
   if (sp > 0.01 && !(_velHasBest && sp <= _velResult.speed) &&
       lumenDist(px, py, pz, G.A, 'RA') < -0.05 && lumenDist(px, py, pz, G.A, 'AOROOT') > 0) {
@@ -1600,7 +1622,7 @@ export function asdStream(G, ds = 0.1, sMax = 1.6) {
     let g = P.segs[0];
     for (const h of P.segs) if (h.s0 <= s) g = h;
     const t = Math.min(s - g.s0, g.l);
-    out.push({ s, q: [g.a[0] + g.u[0] * t, g.a[1] + g.u[1] * t, g.a[2] + g.u[2] * t], ax: asdDir(g, t / g.l, [0, 0, 0]), k: asdSpeedK(s / P.L) });
+    out.push({ s, q: [g.a[0] + g.u[0] * t, g.a[1] + g.u[1] * t, g.a[2] + g.u[2] * t], ax: asdDir(g, t / g.l, [0, 0, 0]), k: asdSpeedK(s, P.L) });
   }
   return out;
 }
