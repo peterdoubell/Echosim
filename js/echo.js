@@ -2304,9 +2304,13 @@ export class EchoView {
     // (time across the strip: phaseOfTime; QRS alternans on alternate beats, from
     // the R of the beat ending each column's cycle)
     const ePath = (G && G.path) || {};
+    // The strip shows the breath the live beat (G.beat, the rhythm engine's count)
+    // belongs to, so its tall and small complexes are the main ECG's: the swing
+    // has a two-beat period and the breath three, so the parity flips each breath.
+    const b0 = G && G.beat != null && nb > 1 ? G.beat - (((G.beat % nb) + nb) % nb) : 0;
     for (let x = 0; x <= W; x += 1) {
       const u = x / W * nb, b = Math.min(nb - 1, Math.floor(u)), t = u - b, ph = phaseOfTime(t, ePath);
-      const y = mid - ecgAt(ph, alternansGain(ePath, ph > 0.5 ? b + 1 : b)) * amp;
+      const y = mid - ecgAt(ph, alternansGain(ePath, b0 + (ph > 0.5 ? b + 1 : b))) * amp;
       if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
     ctx.stroke();
