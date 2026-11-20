@@ -9,7 +9,7 @@
 import { classify, velocityAt, geometryAt, hemoSummary, hemodynamics, TISSUE, VALVE_DEFS, FLOW, AORTIC_CUSPS, shuntLabel, stenosisCw, FLOW_AXES, FLOW_SITES, membSite, valveAt } from './cardiac-model.js';
 import { LM, rapEstimate, diaphragmBelow, rwmaBlend, lumenDist, hepaticVeinSegs } from './anatomy.js';
 import { clamp } from './mathutils.js';
-import { ALL_VIEWS } from './views.js';
+import { ALL_VIEWS, sectorHalfOf } from './views.js';
 
 // Human-readable labels for the flow compartment that produced the frame's peak
 // velocity (surfaced to the UI as metrics.peakLabel for teaching context).
@@ -26,6 +26,7 @@ const FLOW_LABELS = {
   [FLOW.PV_FLOW]: 'pulmonary vein',
   [FLOW.HV_FLOW]: 'hepatic vein',
   [FLOW.AORTA]: 'aortic flow',
+  [FLOW.LAA_FLOW]: 'LA appendage',
 };
 
 // Echogenicity of the body wall at fractional depth f (0 = skin, 1 = pleura /
@@ -49,6 +50,12 @@ function chestWall(f, n, nn) {
 const DB = {
   blood: -60, myo: -28, valve: -15, calc: -4, peri: -24, liver: -32, fat: -36,
   vwall: -26, vein: -52, soft: -46, lung: -48, medi: -38,
+  // the posterior mediastinum round the oesophagus and descending aorta through a
+  // TEE sector (fat and loose connective tissue with fibrous septa, as the
+  // transthoracic medi, 2 dB brighter): the 90 deg sector's edge beams cross 5-8 cm
+  // of it beside the heart at 5.5 MHz, and it must read as tissue, never as a
+  // fluid-dark gap
+  mediTee: -36,
 };
 const AMP = Object.fromEntries(Object.entries(DB).map(([k, v]) => [k, Math.pow(10, v / 20)]));
 // distal shadow behind a calcific-AS nodule (per cm of calcium crossed; the
@@ -115,6 +122,8 @@ const PERI_K = TISSUE.PERI_LINE, PERI_GAIN = 8;      // pericardial interface: g
 // views whose extracardiac OUTSIDE tissue is all moderately echogenic mediastinal /
 // abdominal soft tissue (suprasternal and subcostal windows)
 const MEDI_VIEWS = { SSN: 1, SUBCOSTAL: 1, SC_IVC: 1 };
+// (TEE: the band above the diaphragm's dome sheet that reads as solid tissue, cm)
+const TEE_DIAPH_BAND = 3.0;
 // fluid labels (blood pools, venous blood, effusion), indexed by tissue kind
 const FLUID_K = new Uint8Array(16);
 for (const k of [TISSUE.LV, TISSUE.RV, TISSUE.LA, TISSUE.RA, TISSUE.AORTA, TISSUE.VEIN, TISSUE.PERICARDIUM]) FLUID_K[k] = 1;
@@ -162,6 +171,14 @@ const EXTRA_LABELS = [
 // fan keeps its curved bottom and is never cut off at the sides in deep views.
 const SW = 496;
 const SH = 420;
+// Display scale (px per cm): the sector's full depth fills 92 % of the buffer
+// height, unless the sector is then too wide for the buffer (the 90 deg TEE
+// sector: half-width depth x sin 45 deg = 273 px against 248), when the fan's far
+// corners (it runs 2 % past the displayed depth) are fitted inside the width
+// (4 px margin) instead. The TTE sectors (+/-0.66 rad) keep the height scale.
+export function sectorPxPerCm(depthCm, half) {
+  return Math.min((SH * 0.92) / depthCm, (SW / 2 - 4) / (depthCm * (0.94 / 0.92) * Math.sin(Math.min(half, Math.PI / 2))));
+}
 const WALL_FILTER = 0.06; // m/s colour dead-zone (suppresses near-zero flow)
 
 // Elevational (out-of-plane) beam geometry. A cardiac phased array focuses the
@@ -206,6 +223,11 @@ const hasMR = (path) => !!(path.mr || path.dilated);
 const _hvSeg = (A) => hepaticVeinSegs(A)[1];                 // the middle hepatic vein
 const _hvAt = (A) => { const v = _hvSeg(A); return _add(v.a, v.u, 1.6); };
 const _dtaAxis = (A) => { const d = A.ao.dta, u = [d.a[0] - d.top[0], d.a[1] - d.top[1], d.a[2] - d.top[2]], l = Math.hypot(...u); return [u[0] / l, u[1] / l, u[2] / l]; };
+const _pvVein = (A) => A.pv.veins.find((v) => v.name === 'LSPV') || A.pv.veins[0];
+const _pvAt = (A) => { const v = _pvVein(A), u = [v.b[0] - v.w[0], v.b[1] - v.w[1], v.b[2] - v.w[2]], l = Math.hypot(...u); return _add(v.w, [u[0] / l, u[1] / l, u[2] / l], 0.5); };
+// (the appendage axis out of the appendage: emptying flow is + along it)
+const _laaAxis = (A) => { const g = A.la.aa[0], u = [g.a[0] - g.b[0], g.a[1] - g.b[1], g.a[2] - g.b[2]], l = Math.hypot(...u); return [u[0] / l, u[1] / l, u[2] / l]; };
+const _laaAt = (A) => _add(A.la.aa[0].a, _laaAxis(A), -1.0);
 export const DOPPLER_SITES = {
   mvTips: { name: 'Mitral inflow', label: 'mitral inflow at the leaflet tips', mode: 'PW', ref: 'E',
     at: (A) => _add(A.valves.mitral.c, DAX.mitralIn, 0.5), axis: () => DAX.mitralIn, box: (A) => A.valves.mitral.c },
@@ -234,6 +256,14 @@ export const DOPPLER_SITES = {
     at: (A) => _add(A.valves.aortic.c, DAX.lvot, 1.5), axis: () => DAX.lvot, box: (A) => _add(A.valves.aortic.c, DAX.lvot, 1.5) },
   hvPw: { name: 'Hepatic vein PW', label: 'middle hepatic vein, ~1.5 cm from the IVC', mode: 'PW', ref: 'S', align: true,
     at: (A) => _hvAt(A), axis: (p, G) => { const u = _hvSeg(G.A).u; return [-u[0], -u[1], -u[2]]; }, box: (A) => _hvAt(A) },
+  // TEE venous / appendage sites (review 12): pulmonary-vein PW (S, D and the
+  // atrial reversal Ar) 0.5 cm inside the left upper vein's ostium, and the LAA
+  // emptying velocity ~1 cm inside the appendage ostium (normal > 0.4 m/s), both
+  // from the ME LAA view; the operator angles the beam down the vein / appendage.
+  pvPw: { name: 'Pulmonary vein PW', label: 'left upper pulmonary vein, 0.5 cm inside its ostium', mode: 'PW', ref: 'S', align: true,
+    at: (A) => _pvAt(A), axis: (p, G) => _pvVein(G.A).ax, box: (A) => _pvAt(A) },
+  laaPw: { name: 'LAA emptying PW', label: 'left atrial appendage, ~1 cm inside its ostium', mode: 'PW', ref: 'E', align: true,
+    at: (A) => _laaAt(A), axis: (p, G) => _laaAxis(G.A), box: (A) => _laaAt(A) },
   descAoPw: { name: 'Descending aorta PW', label: 'proximal descending aorta', mode: 'PW', ref: 'S',
     at: (A) => _add(A.ao.dta.top, _dtaAxis(A), 1.5), axis: (p, G) => _dtaAxis(G.A), box: (A) => _add(A.ao.dta.top, _dtaAxis(A), 1.5) },
 };
@@ -323,7 +353,10 @@ function siteCandidates(view, path) {
     case 'MEAVSAX': if (tr) L.push('tvCw'); if (path.asd) L.push('asd'); L.push('rvot'); break;
     case 'MEBICAVAL': if (path.asd) L.push('asd'); break;
     case 'MERVIO': if (tr) L.push('tvCw'); L.push('rvot'); break;
-    default: break;                  // PLAX, PSAX_MV, SUBCOSTAL, MELAA, TGSAX, DESCAO
+    case 'MELAA': L.push('laaPw', 'pvPw'); break;
+    // the TEE windows for the continuity equation: AV CW and LVOT PW both aligned
+    case 'TGLAX': case 'DTG5C': L.push('avCw', 'lvot'); break;
+    default: break;                  // PLAX, PSAX_MV, SUBCOSTAL, TGSAX, DESCAO
   }
   return L;
 }
@@ -342,7 +375,7 @@ export function defaultSiteGeometry(view, key, path = {}) {
     const probe = vw.probe();
     let P = probe.pos;
     if (vw.track) { const o = vw.track(Gr.A); P = [P[0] + o[0], P[1] + o[1], P[2] + o[2]]; }
-    r = siteGeometry(site, path, Gr, P, probe, 0.66, vw.depth || 16, !!site.align);
+    r = siteGeometry(site, path, Gr, P, probe, sectorHalfOf(vw), vw.depth || 16, !!site.align);
   }
   m.set(ck, r);
   return r;
@@ -356,6 +389,23 @@ export function dopplerDefault(view, path = {}) {
     if (g && !g.outside && g.through && g.angleDeg <= DOPPLER_MAX_ANGLE) return key;
   }
   return null;
+}
+// The spectral sites a TEE operator can put the PW gate or CW line on from each
+// TEE view (the probe panel's site selector), besides the view's standard site:
+// e.g. the pulmonary-vein S/D/Ar and the LAA emptying velocity from the ME LAA,
+// and the LVOT PW / AV CW continuity pair from the deep TG 5C. Each lies in that
+// view's sector, near its plane, and is met within DOPPLER_MAX_ANGLE of its flow
+// (once angled, for an `align` site): the RVOT from the ME RV inflow-outflow /
+// AV SAX and the LVOT from the TG LAX cross the beam at ~45 deg, so they are not
+// offered there. The list is the same in every case, so it never gives a hidden
+// diagnosis away. A picked site is recorded with the beam angled to its flow
+// (dopplerAlign) where the site allows it, as the standard site is.
+const TEE_SITE_CHOICES = {
+  ME4C: ['mvTips', 'mvCw', 'tvCw'], MECOMM: ['mvTips', 'mvCw'], ME2C: ['mvTips', 'mvCw'], MELAX: ['mvTips', 'mvCw'],
+  MERVIO: ['tvCw'], MELAA: ['laaPw', 'pvPw'], DTG5C: ['avCw', 'lvot'],
+};
+export function teeSiteChoices(view) {
+  return (TEE_SITE_CHOICES[view] || []).map((key) => { const s = DOPPLER_SITES[key]; return { key, name: s.name, mode: typeof s.mode === 'string' ? s.mode : '' }; });
 }
 // Phase a site is placed in: peak mitral inflow ('E') or peak ejection ('S').
 const _refPhaseCache = new WeakMap();
@@ -478,6 +528,7 @@ export class EchoView {
     // time axis. spectralData exposes the last sweep (per-column velocities,
     // mode, scale, aliasing) for the UI and the audits.
     this.dopplerSite = null;
+    this.dopplerAlign = false;          // (a picked site angled to its flow, as the standard site)
     this.dopplerMode = 'auto';
     this.pwNyquist = null;
     this.rrSec = 60 / 72;
@@ -671,7 +722,7 @@ export class EchoView {
     const data = this.img.data;
     const cx = SW * 0.5;
     const apexY = SH * 0.04;
-    const pxPerCm = (SH * 0.92) / this.depthCm;
+    const pxPerCm = sectorPxPerCm(this.depthCm, this.sectorHalf);
     const half = this.sectorHalf;
     const P = probe.pos;
     // subtle live speckle shimmer: rotate the noise lookup slowly over time
@@ -714,7 +765,9 @@ export class EchoView {
     // into the reflectivity + context buffers. The B-mode grey is NOT formed here:
     // reflectivity is first PSF-convolved, then display-processed (TGC, artifacts,
     // log compression) and finally composited with the crisp Doppler overlay.
-    const rMax = SH * 0.94;
+    // (the fan runs 2 % past the displayed depth: SH x 0.94 px when the depth fills
+    // 92 % of the height, proportionally less when a wide sector is fitted to the width)
+    const rMax = this.depthCm * pxPerCm * (0.94 / 0.92);
     const inFan = (x, y) => {
       const dy = y - apexY;
       if (dy <= 0) return false;
@@ -914,14 +967,25 @@ export class EchoView {
         else {
           // mediastinal / thoracic soft tissue: fat and loose connective tissue,
           // moderately echogenic, never fluid-dark. All of it in a TEE sector (the
-          // mediastinum around the oesophagus), and directly under a transthoracic
+          // mediastinum around the oesophagus: mediTee), and directly under a transthoracic
           // window (anterior mediastinal fat, the arch's concavity from the notch,
           // the abdominal wall over the liver), easing deeper to the darker
           // soft-tissue background beside and behind the heart. Below the diaphragm
           // (subcostal windows) it is abdominal wall / retroperitoneal tissue, and
           // from the notch the superior mediastinum round the arch, and through the
           // liver window the posterior mediastinum behind the heart: medi throughout.
-          if (this.nearFieldCm < 0.5 || MEDI_VIEWS[this.viewName] || diaphragmBelow(wx, wy, wz) > 0.5) e = AMP.medi;
+          // Through a TEE sector, the left hemidiaphragm and the soft tissue below
+          // it (gastric fundus wall, spleen) read as solid muscle / abdominal
+          // viscera, as echogenic as muscle, not as mediastinal fat: the 90 deg ME
+          // sector reaches them beyond the LV inferolateral wall and apex. So does
+          // the band TEE_DIAPH_BAND cm above the dome sheet behind and below the
+          // heart, where the muscular posterior slope of the hemidiaphragm and its
+          // crura rise behind the inferior pericardium: the far field beyond the
+          // heart is solid tissue all the way down, never a fluid-dark gap.
+          const db = diaphragmBelow(wx, wy, wz);
+          if (this.nearFieldCm < 0.5 && db > -TEE_DIAPH_BAND) e = AMP.myo;
+          else if (this.nearFieldCm < 0.5) e = AMP.mediTee;
+          else if (MEDI_VIEWS[this.viewName] || db > 0.5) e = AMP.medi;
           else {
             const u = clamp((depth - this.nearFieldCm - 2.5) / 2.5, 0, 1);
             e = AMP.medi + (AMP.soft - AMP.medi) * u;
@@ -1346,7 +1410,7 @@ export class EchoView {
   _psfBlur() {
     const w = SW, h = SH, refl = this._refl, tmp = this._tmp, depthBuf = this._depth;
     const mask = this._mask, kern = this._kern;
-    const pxPerCm = (SH * 0.92) / this.depthCm;
+    const pxPerCm = sectorPxPerCm(this.depthCm, this.sectorHalf);
     // Resolve the stochastic slice-thickness estimate locally first: a
     // [1,2,1] x [1,2,1] average exactly cancels the 2x2 elevation dither, so no
     // periodic hatch survives even where the PSF is narrow (the TEE near field).
@@ -1797,7 +1861,9 @@ export class EchoView {
     // the view's standard site is recorded aligned (angling to a modified window
     // where the jet needs it); a site the operator picks is taken as the beam
     // meets it, and flagged when that is too steep to measure
-    const sg = siteGeometry(site, path, Gr, P, probe, half, this.depthCm, !user && !!site.align);
+    // (a user-picked site is recorded as the beam meets it, unless dopplerAlign:
+    // the operator angles to a modified window, as for the standard site)
+    const sg = siteGeometry(site, path, Gr, P, probe, half, this.depthCm, (!user || !!this.dopplerAlign) && !!site.align);
     const modeDef = typeof site.mode === 'function' ? site.mode(path) : site.mode;
     const mode = this.dopplerMode === 'PW' || this.dopplerMode === 'CW' ? this.dopplerMode : modeDef;
     this._dGate = {

@@ -57,6 +57,7 @@ export const FLOW = {
   PV_FLOW: 10,    // pulmonary-vein flow into the LA (reverses in severe MR)
   HV_FLOW: 11,    // hepatic-vein flow toward the RA (reverses in systole in severe TR)
   AORTA: 12,      // ascending / arch / descending aortic flow beyond the root
+  LAA_FLOW: 13,   // left-atrial-appendage emptying (atrial systole) / filling (early systole)
 };
 
 // ---------------------------------------------------------------------------
@@ -1385,6 +1386,16 @@ function pvFlowSpeed(H) {
   return H && H.Qpv ? H.Qpv / (PV_AREA * 100) : 0;
 }
 
+// Left-atrial-appendage flow (m/s, + = out of the appendage into the LA body):
+// emptying with atrial contraction (normal peak ~0.5-0.6 m/s, > 0.4 in sinus
+// rhythm), filling back into it in early systole as the LA relaxes (~0.4-0.5 m/s),
+// and a small early-diastolic emptying wave as the mitral valve opens (Agmon Y et
+// al., JACC 1999;34:1867-77; ASE/EACVI cardiac sources of embolism).
+function laaFlowSpeed(phase) {
+  const a = pulse(0.86, 1.0, phase), f = pulse(0.02, 0.20, phase), e = pulse(0.50, 0.68, phase);
+  return 0.66 * a - 0.46 * f + 0.2 * e;
+}
+
 // Hepatic-vein flow speed (m/s, + toward the RA): the solved caval inflow of the
 // circulation (H.Qvr, mL/s, on the right heart's clock) over an effective vessel
 // area. The S wave is the RA's fall in pressure as the tricuspid annulus descends
@@ -2084,6 +2095,28 @@ export function velocityAt(px, py, pz, G, path = {}) {
           const dir = s >= 0 ? 1 : -1;                     // negative = retrograde
           considerFlow(true, v.ax[0] * dir, v.ax[1] * dir, v.ax[2] * dir,
             s < 0 ? -s : s, FLOW.PV_FLOW, false);
+        }
+      }
+    }
+  }
+  // --- left-atrial-appendage flow -----------------------------------------
+  // Along the appendage axis (tip -> ostium for emptying) inside its segments,
+  // strongest on the axis; gated to within ~5 cm of the ostium.
+  if (A && A.la && A.la.aa && A.la.aa.length) {
+    const aa = A.la.aa, o = aa[0].a, dx = px - o[0], dy = py - o[1], dz = pz - o[2];
+    if (dx * dx + dy * dy + dz * dz < 25) {
+      const sp = laaFlowSpeed(phase);
+      if (sp !== 0) {
+        for (let i = 0; i < aa.length; i++) {
+          const g = aa[i], ux = g.a[0] - g.b[0], uy = g.a[1] - g.b[1], uz = g.a[2] - g.b[2], L = Math.hypot(ux, uy, uz) || 1;
+          const u = [ux / L, uy / L, uz / L];
+          const perp = offAxisDist(px, py, pz, g.b, u), al = _axis.along;
+          if (al < -0.2 || al > L + 0.4) continue;
+          const t = al < 0 ? 0 : al > L ? 1 : al / L, r = g.r2 + (g.r1 - g.r2) * t;  // (b end: r2; a end: r1)
+          if (perp > r) continue;
+          const v = sp * (1 - 0.6 * (perp / r) * (perp / r));
+          const dir = v >= 0 ? 1 : -1;
+          considerFlow(true, u[0] * dir, u[1] * dir, u[2] * dir, v < 0 ? -v : v, FLOW.LAA_FLOW, false);
         }
       }
     }

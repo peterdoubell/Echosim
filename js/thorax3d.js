@@ -9,7 +9,7 @@
 // cuts through; the stomach and the diaphragm come from their shared SDFs.
 
 import { bodyClassify, BODY, BODY_AX, LM, diaphragmBelow, stomachDist, epiDist } from './anatomy.js';
-import { TEE_VIEWS } from './views.js';
+import { TEE_VIEWS, teePathPolyline, TEE_PATH_TOP, TEE_GEJ } from './views.js';
 
 const { L, P, S, A: AN } = BODY_AX;
 const MIDLINE = -2.0;                                   // p . L of the mid-sagittal plane (anatomy.js)
@@ -46,11 +46,13 @@ export const CONTEXT_BOX = (() => {
 // Oesophagus: the tube the TEE probe travels in, through the mid-oesophageal
 // and descending-aorta probe stations, down through the hiatus to the cardia
 // (and the transgastric probe station in the stomach); radius ~0.8 cm.
+// (review 12: the probe's own path, views.js teePathPolyline, from above the
+// arch down through the junction to the transgastric contact, so the drawn
+// oesophagus is the tube the probe and its shaft actually travel in)
 function oesophagusPath() {
-  const me = TEE_VIEWS.ME4C.probe().pos, da = TEE_VIEWS.DESCAO.probe().pos, tg = TEE_VIEWS.TGSAX.probe().pos;
-  const top = mad(me, S, 13);
-  const hiatus = mad(mad(da, S, -4.2), L, 0.6);
-  return [top, me, da, hiatus, tg];
+  const tg = TEE_VIEWS.TGSAX.probe().pos;
+  const pts = teePathPolyline(TEE_GEJ, TEE_PATH_TOP, 1.0);
+  return [mad(pts[0], S, 3), ...pts, tg];
 }
 function capsule(p, a, b, r) {
   const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], ap = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
@@ -180,3 +182,52 @@ export function cameraDir(name) {
   const b = CAMERA_PRESETS[name] || CAMERA_PRESETS.default;
   return unit([0, 1, 2].map((i) => b[0] * L[i] + b[1] * AN[i] + b[2] * S[i]));
 }
+// Oblique view cameras (review 12): the presets above look at most imaging planes
+// almost edge-on (PLAX 1 deg, subcostal 0, A4C 8). A view's camera is instead
+// placed CAMERA_PLANE_ANGLE off the imaging plane, on the side of the plane that
+// faces `side` (TTE: anterior, nudged superior and to the patient's right so the
+// SVC still projects right of the aorta; TEE: left-posterior, the probe side, so
+// the probe in the oesophagus behind the LA and the fan face the viewer).
+export const CAMERA_PLANE_ANGLE = 40;                  // deg between the camera axis and the plane
+export const TEE_CAMERA_SIDE = [0.4, -0.85, 0.35];      // body (l, a, s): left-posterior, a little superior
+const TTE_CAMERA_SIDE = [-0.45, 1, 0.3];
+// (the heart centre: the mean of the valve centres and the apex)
+export const HEART_CENTRE = [0, 1, 2].map((i) => (LM.M[i] + LM.T[i] + LM.A[i] + LM.apex[i]) / 4);
+export function cameraDirForPlane(normal, tee = false, probePos = null) {
+  const b = tee ? TEE_CAMERA_SIDE : TTE_CAMERA_SIDE;
+  let side = unit([0, 1, 2].map((i) => b[0] * L[i] + b[1] * AN[i] + b[2] * S[i]));
+  // a TEE camera also leans toward the transducer (behind the LA in the
+  // oesophagus, below the heart in the stomach), so the probe faces the viewer
+  if (tee && probePos) side = unit(side.map((v, i) => v + unit(probePos.map((q, k) => q - HEART_CENTRE[k]))[i]));
+  let n = unit(normal);
+  if (dot(n, side) < 0) n = n.map((v) => -v);
+  // the in-plane direction nearest `side`
+  const ip = side.map((v, i) => v - n[i] * dot(side, n));
+  const il = Math.hypot(...ip);
+  const t = il > 1e-6 ? ip.map((v) => v / il) : unit(S.map((v, i) => v - n[i] * dot(S, n)));
+  const a = CAMERA_PLANE_ANGLE * Math.PI / 180;
+  return unit(n.map((v, i) => v * Math.sin(a) + t[i] * Math.cos(a)));
+}
+// 3D label de-collision: project the labels onto the camera's screen plane (unit
+// camera direction `dir`, `up`) and drop any whose box (about 0.62 cm per
+// character x 1.15 cm, the sprite size) overlaps one already kept; `labels` are in
+// priority order. Returns the indices kept.
+// (`first`: label texts placed before the rest, e.g. the oesophagus in a TEE
+// view, the probe's own landmark, so a label it collides with is the one hidden)
+export function declutterLabels(labels, dir, up = S, pad = 0.15, first = []) {
+  const d = unit(dir);
+  let u = up.map((v, i) => v - d[i] * dot(up, d)); u = unit(u);
+  const r = [d[1] * u[2] - d[2] * u[1], d[2] * u[0] - d[0] * u[2], d[0] * u[1] - d[1] * u[0]];
+  const boxes = [], kept = [];
+  const order = labels.map((l, k) => k);
+  if (first.length) order.sort((a, b) => (first.includes(labels[b][0]) ? 1 : 0) - (first.includes(labels[a][0]) ? 1 : 0) || a - b);
+  for (const k of order) {
+    const [text, p] = labels[k];
+    const x = dot(p, r), y = dot(p, u), w = 0.62 * (String(text).length + 0.6) / 2 + pad, h = 0.575 + pad;
+    if (boxes.some((b) => Math.abs(b.x - x) < b.w + w && Math.abs(b.y - y) < b.h + h)) continue;
+    boxes.push({ x, y, w, h }); kept.push(k);
+  }
+  return kept;
+}
+// labels that a view's de-collision places first: in TEE views the oesophagus
+export const labelPriority = (tee) => (tee ? ['Oesophagus'] : []);

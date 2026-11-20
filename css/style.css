@@ -287,6 +287,8 @@ button.small { padding: 6px; font-size: 12px; margin-top: 8px; }
 .severity-ctl.hidden { display: none; }
 .modality-ctl { margin-bottom: 8px; }
 #teeBtns.hidden, #viewBtns.hidden { display: none; }
+/* the TEE probe panel (omniplane, advance, turn, flex, spectral site) only for TEE views */
+#teeProbeCtl.hidden, #teeSiteRow.hidden { display: none; }
 
 /* ---------- haemodynamics: PV loop + readout ---------- */
 .pv-wrap { background: var(--panel-2); border-radius: 8px; padding: 6px; margin-bottom: 8px; }
