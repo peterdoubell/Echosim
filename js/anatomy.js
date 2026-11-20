@@ -693,10 +693,14 @@ export function rightHeartLoad(path = {}) {
   // hardest — TAPSE falls to ~1.4 cm (the septal hinge still follows the LV)
   const rvL = path.rvpo ? 0.22 : rvC;
   // volume-overload septal pattern: severe TR, secundum ASD
+  // (severe TR 0.46: RV volume overload flattens the septum in diastole only —
+  // the LV eccentricity index is raised at end-diastole, ~1.2-1.3, and near 1 at
+  // end-systole (Ryan et al., JACC 1985;5:918-27); review 12: the RV drawn at its
+  // solved size needs 0.46 for an end-diastolic index of ~1.2)
   const vol = path.asd ? 1 : trVol;
-  const septum = path.rvpo ? (kR) => 0.32 + 0.22 * kR
+  const septum = path.rvpo ? (kR) => 0.34 + 0.22 * kR   // (review 12: 0.34 at ED — the RV drawn at its solved size is a little smaller than the old fixed 1.3x)
     : msPH ? (kR) => 0.06 + 0.12 * kR
-    : vol ? (kR) => (path.asd ? 0.42 : 0.36) * vol * (1 - kR) : null;   // (the ASD's larger diastolic RV load)
+    : vol ? (kR) => (path.asd ? 0.55 : 0.46) * vol * (1 - kR) : null;   // (the ASD's larger diastolic RV load)
   return { rvC, rvL, septum, msPH, trVol };
 }
 // Anterior systolic swing of the aortic root above its annulus (cm): gain x the LA reservoir filling
@@ -752,7 +756,11 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   // severe TR: a dilated RV (RVD1 > 4.1 cm) and RA; severe MS: the RV of its
   // secondary pulmonary hypertension
   const RH = rightHeartLoad(path);
-  const rvpoScale = (path.rvpo ? 1.3 : 1) * (path.asd ? 1.6 : path.tr && !path.rvpo ? 1.12 + 0.14 * RH.trVol : RH.msPH ? 1.15 : 1);
+  // RV size: coupled to the circulation (mech.rvSize, from the solved RV
+  // end-diastolic volume in cardiac-model) the drawn RV holds the solved RVEDV;
+  // standalone, the pathology flags give representative values
+  const rvpoScale = mech && mech.rvSize != null ? mech.rvSize
+    : (path.rvpo ? 1.3 : 1) * (path.asd ? 1.6 : path.tr && !path.rvpo ? 1.12 + 0.14 * RH.trVol : RH.msPH ? 1.15 : 1);
   const raScale = path.rvpo ? 1.3 : path.tr ? 1.35 + 0.05 * RH.trVol : path.asd ? 1.25 : RH.msPH ? 1.12 : 1;
 
   // LV cavity scale: volume-exact from the circulation when coupled.
@@ -797,17 +805,23 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   // septal rim, tethered to the fibrous skeleton, moves with the septal mitral
   // hinge (~1.2 cm) — so the annular plane tilts toward the free wall in systole.
   // (TAPSE is, by definition, the lateral-annulus excursion.)
-  // the right heart runs on its own, slightly offset clock (cardiac-model rvPhase:
-  // T1 after M1, RV ejection starting earlier and ending later than the LV's)
+  // the right heart follows its own solved volume (kR from the circulation's RV:
+  // delayed activation, T1 after M1, RV ejection starting earlier and ending later
+  // than the LV's)
+  // (kR: the solved RV's contraction fraction, (RVEDV - Vrv) / RV stroke volume)
   const kR = mech && mech.kRV != null ? mech.kRV : k;
-  const rvC = RH.rvC;                                      // RV contractility (rightHeartLoad)
+  // RV contractility (short-axis / FAC share) and its longitudinal (TAPSE) share:
+  // from the solved RV ejection fraction and afterload when coupled (mech.rvC,
+  // mech.rvL), else the representative rightHeartLoad values
+  const rvC = mech && mech.rvC != null ? mech.rvC : RH.rvC;
+  const rvL = mech && mech.rvL != null ? mech.rvL : RH.rvL;
   const rvS = 1 - kR * 0.34 * rvC;                         // RV short-axis shortening (FAC ~45-50 % normal)
-  const tapse = TAPSE_REF * kR * RH.rvL;
+  const tapse = TAPSE_REF * kR * rvL;
   const septFlat = RH.septum ? RH.septum(kR) : 0;          // phase-dependent septal flattening
   // tricuspid rims: septal on the fibrous skeleton (the septal mitral hinge's
   // descent, LV clock); lateral = septal + the free wall's own shortening (RV clock)
   const tvSep = -TV_SEPT_W * dM;
-  const tvLatDrop = tvSep + TV_FW * kR * RH.rvL;
+  const tvLatDrop = tvSep + TV_FW * kR * rvL;
   const tvDrop = 0.5 * (tvSep + tvLatDrop);                // annulus-centre (and RA floor) descent
   const Tlive = [T0[0], T0[1] - tvDrop, T0[2]];
   // The infundibulum and the pulmonary valve ride with the aortic root: they
@@ -1189,13 +1203,16 @@ function raFramePoint(ra, u, f) {
   const d = add(add(mul(ra.e1, u[0] * ra.r1), mul(ra.a, u[1] * ra.rl)), mul(ra.e2, u[2] * ra.r2));
   return mad(ra.c, d, f);
 }
+// (how far from the RA centre the wall search runs: a dilated, full atrium —
+// severe TR at its end-systolic reservoir peak — reaches beyond 4 cm)
+const CRISTA_REACH = 6.0;
 function buildCrista(A) {
   const ra = A.ra, c = ra.c;
   // the wall point along the ray from the RA centre through u (bisection on the lumen)
   const wall = (u) => {
     const dir = unit(sub(raFramePoint(ra, u, 1), c));
     let lo = 0, hi = 0.1;                   // march out to the first exit, then bisect
-    for (; hi < 4.0; lo = hi, hi += 0.1) {
+    for (; hi < CRISTA_REACH; lo = hi, hi += 0.1) {
       const q = mad(c, dir, hi);
       if (dRAlumen(q[0], q[1], q[2], A) >= 0) break;
     }
@@ -1215,7 +1232,7 @@ function buildCrista(A) {
   const seatFrom = (q) => {
     const o = mad(sv.a, sax, dot(sub(q, sv.a), sax)), dir = unit(sub(q, o));
     let lo = 0, hi = 0.1;
-    for (; hi < 4.0; lo = hi, hi += 0.1) { const r = mad(o, dir, hi); if (dRAlumen(r[0], r[1], r[2], A) >= 0) break; }
+    for (; hi < CRISTA_REACH; lo = hi, hi += 0.1) { const r = mad(o, dir, hi); if (dRAlumen(r[0], r[1], r[2], A) >= 0) break; }
     for (let i = 0; i < 12; i++) { const m = 0.5 * (lo + hi), r = mad(o, dir, m); if (dRAlumen(r[0], r[1], r[2], A) < 0) lo = m; else hi = m; }
     return mad(o, dir, lo - (CRISTA.proud - CRISTA.r));
   };
@@ -1225,14 +1242,14 @@ function buildCrista(A) {
   const bis = ra2 ? unit(add(sax, unit(sub(ra2.b, ra2.a)))) : unit(sub(IAS_N, mul(sax, dot(IAS_N, sax))));
   const o0 = mad(sv.a, sax, CRISTA.svcUp);
   let lo = 0, hi = 0.1;
-  for (; hi < 4.0; lo = hi, hi += 0.1) { const r = mad(o0, bis, hi); if (dRAlumen(r[0], r[1], r[2], A) >= 0) break; }
+  for (; hi < CRISTA_REACH; lo = hi, hi += 0.1) { const r = mad(o0, bis, hi); if (dRAlumen(r[0], r[1], r[2], A) >= 0) break; }
   for (let i = 0; i < 12; i++) { const m = 0.5 * (lo + hi), r = mad(o0, bis, m); if (dRAlumen(r[0], r[1], r[2], A) < 0) lo = m; else hi = m; }
   const rim = mad(o0, bis, lo - (CRISTA.proud - CRISTA.rSvc)), first = wall(CRISTA_U[CRISTA.from]);
   pts.push(rim);
   const seatC = (q) => {                    // (as wall(): on the ray from the RA centre through q)
     const dir = unit(sub(q, c));
     let lo = 0, hi = 0.1;
-    for (; hi < 4.0; lo = hi, hi += 0.1) { const r = mad(c, dir, hi); if (dRAlumen(r[0], r[1], r[2], A) >= 0) break; }
+    for (; hi < CRISTA_REACH; lo = hi, hi += 0.1) { const r = mad(c, dir, hi); if (dRAlumen(r[0], r[1], r[2], A) >= 0) break; }
     for (let i = 0; i < 12; i++) { const m = 0.5 * (lo + hi), r = mad(c, dir, m); if (dRAlumen(r[0], r[1], r[2], A) < 0) lo = m; else hi = m; }
     return mad(c, dir, lo - (CRISTA.proud - CRISTA.r));
   };

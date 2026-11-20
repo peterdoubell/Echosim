@@ -312,7 +312,10 @@ function siteCandidates(view, path) {
       break;
     case 'A5C': if (as) L.push('avCw'); L.push('lvot'); break;
     case 'A3C': if (as) L.push('avCw'); if (mr || ms) L.push('mvCw'); L.push('lvot'); break;
-    case 'A2C': case 'ME2C': if (mr || ms) L.push('mvCw'); L.push('mvTips'); break;
+    // (mitral inflow PW is recorded in the A4C, not part of the A2C dataset: the
+    // A2C keeps only CW through an MR / MS valve)
+    case 'A2C': if (mr || ms) L.push('mvCw'); break;
+    case 'ME2C': if (mr || ms) L.push('mvCw'); L.push('mvTips'); break;
     case 'RVIT': if (tr) L.push('tvCw'); L.push('tvTips'); break;
     case 'SC_IVC': L.push('hvPw'); break;
     case 'SSN': L.push('descAoPw'); break;
