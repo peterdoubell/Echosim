@@ -1930,7 +1930,8 @@ function dAppendage(x, y, z, segs, k) {
 // ridges ~LAA_PECT.period apart, standing up to LAA_PECT.h into the lumen (the
 // trabeculated appendage, against the smooth-walled LA body), ramping in over the
 // first lobe
-const LAA_PECT = { period: 0.65, h: 0.22, from: 0.45 };
+const LAA_LIP = 0.8;
+const LAA_PECT = { period: 0.65, h: 0.22, from: 0.45, clear: 0.25 };
 function laaPectinate(x, y, z, segs) {
   let best = 1e9, sArc = 0, acc = 0;
   for (const g of segs) {
@@ -1978,19 +1979,31 @@ function dLAlumen(x, y, z, A, body = false, folds = true) {
     const v = Math.min(e, dPV(x, y, z, A));
     return v > 1.5 ? v : clearRPA(ssub(v, dAOarchDTA(x, y, z, A) - A.ao.wall - 0.15, 0.2), x, y, z, A);
   }
+  const M = A.lv.M;                                                  // mitral orifice
+  const ym = y - mitralLift(x, y, z, A);                             // (saddle deepens in systole)
+  const fn = laInflow(x, ym, z, A);
   let d = e0;
   if (A.ias.lf) d = Math.min(d, laSeptFace(x, y, z, A.ias));         // (septal face along the caval axis)
   if (A.ias.hc) d = smin(d, asdFace(x, y, z, A.ias), 0.3);           // (secundum ASD: LA side of its rims)
   if (!body) {
     const dB = d;                                                    // (the body alone: the ridge's height datum)
-    d = smin(d, dAppendage(x, y, z, A.la.aa, 0.22) + laaPectinate(x, y, z, A.la.aa), 0.14);   // NARROW neck
+    // (a pectinate ridge stands on appendage wall: where a lobe lies against the
+    // body lumen or its inflow funnel the tissue between the two pools is thinner
+    // than the ridge is high, and a ridge there would be cut as a free muscle dot
+    // in the blood)
+    const pw = Math.max(0, Math.min(1, (smin(dB, fn, 0.6) - LAA_PECT.clear) / LAA_PECT.clear));
+    const dAp = dAppendage(x, y, z, A.la.aa, 0.22) + (pw > 0 ? pw * laaPectinate(x, y, z, A.la.aa) : 0);
+    d = smin(d, dAp, 0.14);                                          // NARROW neck
+    // the wall between the appendage ostium and the inflow funnel (the mitral
+    // isthmus side of the ostium) ends in a rounded lip, not in a web thinner than
+    // any atrial wall: a hair-thin edge is cut by a long-axis plane as a free dot
+    // (before the ridge is carved, so the lip never opens the ridge)
+    if (dAp < LAA_LIP) d = Math.min(d, smin(dAp, fn, LAA_LIP));
     d = smin(d, dPV(x, y, z, A), 0.4);                               // veins flare in
     // the coumadin ridge folds in from the wall (once seated; filleted into it)
     if (folds && A.pv.ridge.top0 !== undefined) d = smax(d, -dRidge(x, y, z, A, dB), RIDGE.k);
   }
-  const M = A.lv.M;                                                  // mitral orifice
-  const ym = y - mitralLift(x, y, z, A);                             // (saddle deepens in systole)
-  d = smin(d, laInflow(x, ym, z, A), 0.6);
+  d = smin(d, fn, 0.6);
   d = clipAtAnnulus(d, x, ym, z, M, MV_N, MV_R + 0.6);               // LA ends at the mitral annulus
   const s = iasAt(x, y, z, A);
   d = smax(d, s.s + s.t, 0.12);                                      // cut by the septum
