@@ -15,7 +15,7 @@
 // blood-flow field, and couples everything to the lumped-parameter circulation.
 
 import { clamp, smoothstep, pulse, unit } from './mathutils.js';
-import { anatomyParams, rightHeartLoad, hepaticVeinSegs, atrialFill, bodyClassify, visceralDist, lumenDist, mitralLift, tricuspidLift, buildRwma, rwmaWeight, BODY, CFG, LM, BODY_AX } from './anatomy.js';
+import { anatomyParams, rightHeartLoad, hepaticVeinSegs, ivcOfRap, atrialFill, bodyClassify, visceralDist, lumenDist, mitralLift, tricuspidLift, buildRwma, rwmaWeight, BODY, CFG, LM, BODY_AX } from './anatomy.js';
 import { hemodynamics, hemoSummary, pvLoop, gradeOf, eaRatio, MS_AREA, laPhasic } from './hemodynamics.js';
 import { DCM_SEVERITIES, dcmSeverityOf } from './scenarios.js';
 
@@ -235,7 +235,12 @@ export function rvPhase(phase, path = null) {
 // read their own solved flows (tricuspid Qtv, pulmonary Qpa).
 const OPEN_N = 960, OPEN_CYCLE = 0.833;                   // samples per cycle; reference cycle (s)
 const OPEN_TAU_OPEN = 0.008, OPEN_TAU_CLOSE = 0.008, OPEN_LEAD_O = 0.007, OPEN_LEAD = 0.011;   // s
-const OPEN_Q_AV = 0.2, OPEN_Q_SL = 0.12;                  // flow (x peak) for a fully open valve
+// (OPEN_Q_AO, the aortic cusps on the aortic flow: 0.2 of peak. Review 12 rounded
+// the aortic ejection, whose deceleration now ends steeply: at 0.12 the cusps
+// shut in ~20 ms, at the bottom of the 20-40 ms range, and only after the flow
+// had stopped. Floating toward closure a little earlier in the deceleration,
+// as the sinus vortices push them, they shut over ~27 ms as the flow ends.)
+const OPEN_Q_AV = 0.2, OPEN_Q_SL = 0.12, OPEN_Q_AO = 0.2;   // flow (x peak) for a fully open valve
 const _openCache = new WeakMap();
 function openTrace(path) {
   const sum = hemoSummary(path);
@@ -259,7 +264,7 @@ function openTrace(path) {
     }
     return out;
   };
-  tr = { av: build(qmv, OPEN_Q_AV * sum.QmvMax), sl: build(qao, OPEN_Q_SL * sum.QaoMax),
+  tr = { av: build(qmv, OPEN_Q_AV * sum.QmvMax), sl: build(qao, OPEN_Q_AO * sum.QaoMax),
     tv: build(qtv, OPEN_Q_AV * qtvMax), pv: build(qpa, OPEN_Q_SL * qpaMax) };
   // AV-valve events (10 % open): closure nearest the QRS, opening nearest
   // mid-cycle, for the mitral (left) and tricuspid (right) — rvPhase's anchors
@@ -298,6 +303,9 @@ function valveOpening(name, phase, tr, path) {
 // track physiology: AS = same SV forced through a small AVA -> high velocity.
 // ---------------------------------------------------------------------------
 const AVA_NORM = 3.0, AVA_AS = 0.6;   // aortic (LVOT/valve) effective orifice area
+// LVOT cross-section (cm2) for the LVOT PW velocity: the drawn LVOT measures
+// 2.15 cm in mid-systolic PLAX (verify-anatomy 'LVOT diameter'), pi (D/2)^2
+export const LVOT_CSA = Math.PI * 1.075 * 1.075;
 // mitral effective orifice area for the INSTANTANEOUS inflow velocity v = Qmv / A
 // (MS: hemodynamics.js MS_AREA, Bernoulli): the E and A peaks, their ratio and the
 // E-wave deceleration all come straight from the modelled transmitral flow
@@ -363,6 +371,15 @@ function hemoFrame(hd, path, rvd0, phaseRV) {
   // instantaneous 0..1 envelopes from the modelled flow waveform (carry E/A,
   // ejection and regurgitant timing) so velocityAt only multiplies scalars.
   const ejAo = s.QaoMax > 0 ? clamp(hd.Qao / s.QaoMax, 0, 1) : 0;
+  // AS jet speed in time, vAS(t) (m/s): Bernoulli on the instantaneous LV to
+  // ascending-aortic pressure drop while the valve is open, so the CW envelope
+  // traced by the learner gives the circulation's mean gradient (mean/peak
+  // gradient ~0.6) as well as its peak. The jet's spatial profile multiplies it.
+  const vAS = path.aorticStenosis && hd.Qao > 0.5 ? Math.min(vAoPeak, Math.sqrt(Math.max(0, hd.Plv - hd.Pao) / 4)) : 0;
+  const ejAS = vAoPeak > 0 ? vAS / vAoPeak : 0;
+  // LVOT PW velocity (m/s): the solved aortic flow over the LVOT area, so its
+  // VTI x LVOT area is the stroke volume
+  const vLvot = hd.Qao > 0 ? hd.Qao / (LVOT_CSA * 100) : 0;
   const ejMv = s.QmvMax > 0 ? clamp(hd.Qmv / s.QmvMax, 0, 1) : 0;
   const ejMr = hd.Qmr > 0.5 && vMRPeak > 0 ? clamp(Math.sqrt(Math.max(0, hd.Plv - hd.Pla) / 4) / vMRPeak, 0, 1) : 0;
   // right-heart velocities from the SOLVED right heart (review 12, MOT-4/PAT-10):
@@ -397,7 +414,7 @@ function hemoFrame(hd, path, rvd0, phaseRV) {
     EDV: s.EDV, ESV: s.ESV, SV: s.SV, EF: s.EF, forwardSV: s.forwardSV,
     regurgFraction: s.regurgFraction, gradient: s.gradient,
     PlvSys: s.PlvSys, PaoSys: s.PaoSys, PaoDia: s.PaoDia,
-    vAoPeak, vMitPeak, vMRPeak, vTRPeak, ejAo, ejMv, ejMr, ejTv, ejPv, ejTr, vMR, vTR,
+    vAoPeak, vMitPeak, vMRPeak, vTRPeak, vAS, ejAS, vLvot, ejAo, ejMv, ejMr, ejTv, ejPv, ejTr, vMR, vTR,
     vTv, vPv, Qtv: hd.Qtv, Qpa: hd.Qpa, aRvot, aTv,
     // shunt jets (m/s, + = left-to-right): Bernoulli on the modelled LA-RA / LV-RV
     // pressure difference, so the ASD signal is phasic and the VSD jet follows the
@@ -406,6 +423,12 @@ function hemoFrame(hd, path, rvd0, phaseRV) {
     // solved right heart: instantaneous RV / RA / PA and pericardial pressures,
     // and the case's RV systolic and mean RA pressure
     Prv: hd.Prv, Pra: hd.Pra, Ppa: hd.Ppa, Ppc: hd.Ppc || 0, RVSP: s.RVSP, RAP: s.RAP,
+    // solved venous inflow (mL/s, + toward the atrium): the caval return into the
+    // RA and the pulmonary-venous inflow into the LA. (The right heart is solved on
+    // its own activation clock, so the caval flow at the cycle phase IS on the
+    // right heart's clock.) The hepatic- and pulmonary-vein PW traces are these
+    // flows over a vessel area.
+    Qvr: hd.Qvr || 0, Qpv: hd.Qpv || 0,
   };
 }
 
@@ -532,7 +555,7 @@ export function geometryAt(phase, path = {}) {
   // anatomical SDF bundle (built once here so the chordae apparatus below can
   // hang off the same apex-anchored papillary tips + live valve planes).
   const A = anatomyParams(k, kick, path, { sShort, sLong, lvWall, lvScale, lvLong, laScale, kRV: kR, phaseRV, laAmp: laPhasic(path),
-    rvSize: RVD.rvSize * rvFit, rvC: RVD.rvC, rvL: RVD.rvL }, phase);
+    rvSize: RVD.rvSize * rvFit, rvC: RVD.rvC, rvL: RVD.rvL, laTiming: { mvo: hd.sum.mvoPhase, aAt: hd.sum.aAt } }, phase);
 
   // atria: coarse axis-aligned proxies of the live anatomical atria (which sit on
   // their moving annuli and follow the reservoir/conduit/booster curve), so flow
@@ -1288,28 +1311,41 @@ function valveTissue(px, py, pz, G, path) {
 // ---------------------------------------------------------------------------
 
 // Signed pulmonary-venous flow velocity (m/s): positive = forward, toward the
-// left atrium; negative = retrograde, back up the vein. Normal adults show S >= D;
-// the small late-diastolic 'a' reversal is the atrium contracting against open
-// vein mouths. Severe MR inverts the systolic component (systolic flow reversal).
-function pvFlowSpeed(phase, path) {
-  const s = pulse(0.05, 0.35, phase);        // systolic (S) wave
-  const d = pulse(0.50, 0.72, phase);        // early-diastolic (D) wave
-  const a = pulse(0.86, 1.0, phase);         // atrial reversal
-  const severeMR = !!path.mr && gradeOf(path) === 'severe';
-  const sComp = severeMR ? -0.55 * s : 0.48 * s;
-  return sComp + 0.42 * d - 0.20 * a;
+// left atrium; negative = retrograde, back up the vein. It is the solved
+// pulmonary-venous inflow of the circulation (H.Qpv, mL/s) over the vein-mouth
+// area, so the S wave (atrial relaxation and annular descent), the D wave (mitral
+// opening), any reversal (severe MR in systole; an atrial kick that lifts the LA
+// above the venous pressure) and their ratios follow the case's LA pressure.
+// PV_AREA (cm2, the effective total area the sampled vein carries) puts the
+// normal systolic peak at ~0.5 m/s. In the normal model the S and D peaks are
+// about equal (S/D ~0.95), as in young adults with an E-dominant mitral inflow
+// (E/A ~1.7); a raised LAP with restrictive filling (DCM) makes it D-dominant.
+const PV_AREA = 2.9;
+function pvFlowSpeed(H) {
+  return H && H.Qpv ? H.Qpv / (PV_AREA * 100) : 0;
 }
 
-// Hepatic-vein flow speed (m/s, + toward the RA) on the right heart's clock: a
-// systolic S and an early-diastolic D wave toward the heart, with a small atrial
-// reversal. Severe TR blunts and then REVERSES the S wave (the regurgitant
-// volume runs back into the liver) — the ASE-specific sign of severe TR; RV
-// pressure overload deepens the atrial reversal and blunts S.
-function hvFlowSpeed(phaseRV, path) {
-  const s = pulse(0.04, 0.42, phaseRV), d = pulse(0.52, 0.78, phaseRV), a = pulse(0.86, 1.0, phaseRV);
-  const w = path.tr && !path.rvpo ? rightHeartLoad(path).trVol : 0;
-  const sComp = (path.rvpo ? 0.25 : 0.42) * (1 - w) * s - 0.5 * w * s;
-  return sComp + (0.3 + 0.15 * w) * d - (path.rvpo ? 0.32 : 0.16) * a;
+// Hepatic-vein flow speed (m/s, + toward the RA): the solved caval inflow of the
+// circulation (H.Qvr, mL/s, on the right heart's clock) over an effective vessel
+// area. The S wave is the RA's fall in pressure as the tricuspid annulus descends
+// (x descent), the D wave its emptying once the tricuspid opens (y descent), and
+// a reversal wherever the RA pressure rises above the systemic venous pressure:
+// the atrial kick (AR, pushed back into the soft central veins of a normal RAP:
+// hemodynamics.js Csv), the regurgitant volume of severe TR (systolic reversal),
+// a stiff RA's tall a wave (pulmonary hypertension), and in tamponade the loss of
+// the y descent (blunted D) with expiratory diastolic reversal, each respiratory
+// beat read from its own solved circulation. HV_AREA (cm2) puts the normal S
+// peak at ~0.37 m/s. The veins are distensible: with a raised RA pressure the
+// IVC is plethoric and the hepatic veins dilated (ASE 2010 RA-pressure
+// estimation), so the area scales with the square of the IVC radius the anatomy
+// draws for the case's RAP (ivcOfRap: 0.9 cm at RAP <= 4.6, 1.25 cm at >= 9):
+// the same backward volume of a tall RA wave reads ~half as fast in the
+// plethoric veins of TR, PH, DCM or tamponade.
+const HV_AREA = 4.0;
+function hvFlowSpeed(H) {
+  if (!H || !H.Qvr) return 0;
+  const r = ivcOfRap(H.RAP || 0).r / 0.9;
+  return H.Qvr / (HV_AREA * r * r * 100);
 }
 const _hvCache = new WeakMap();
 
@@ -1590,7 +1626,7 @@ const _cw = { peak: 0, env: 0 };
 export function stenosisCw(flow, H, path = {}) {
   _cw.peak = 0; _cw.env = 0;
   if (!H) return _cw;
-  if (flow === FLOW.AS_JET && path.aorticStenosis) { _cw.peak = H.vAoPeak; _cw.env = H.ejAo; }
+  if (flow === FLOW.AS_JET && path.aorticStenosis) { _cw.peak = H.vAoPeak; _cw.env = H.ejAS; }
   else if (flow === FLOW.MITRAL_IN && path.mitralStenosis) { _cw.peak = H.vMitPeak; _cw.env = H.ejMv; }
   // a regurgitant jet is read the same way: CW through it gives the modelled
   // ventricle-atrium peak (MR; TR Vmax, behind the PASP estimate) along its
@@ -1837,7 +1873,15 @@ export function velocityAt(px, py, pz, G, path = {}) {
     // LVOT/aortic-valve jet peak from continuity (v = SV / (AVA·ET)): with the
     // SAME stroke volume forced through a reduced AVA, AS auto-scales to ~4 m/s
     // and normal sits ~1 m/s — severity now follows physiology, not a constant.
-    const lSpeed = H.vAoPeak * H.ejAo * gauss(lPerp, 0.7);
+    // (AS: the jet's speed in time, vAS(t), times its spatial profile. On the
+    // ventricular side of the orifice the flow converges on it (proximal
+    // acceleration, v ~ v_orifice (r0 / (r0 + d))^2 with r0 the radius of the
+    // ~0.6 cm2 orifice), so the jet speed is reached only at the valve and an
+    // LVOT PW gate the annulus swings toward late in systole reads the LVOT flow,
+    // not the jet)
+    const AS_R0 = 0.45;
+    const asConv = lAlong < 0 ? (AS_R0 / (AS_R0 - lAlong)) ** 2 : 1;
+    const lSpeed = (path.aorticStenosis ? H.vAS * asConv : H.vAoPeak * H.ejAo) * gauss(lPerp, 0.7);
     considerFlow(((inLV && py > G.lv.c[1]) || inAo) && lAlong > -0.25,
       AX_LVOT[0], AX_LVOT[1], AX_LVOT[2],
       lSpeed, path.aorticStenosis ? FLOW.AS_JET : FLOW.LVOT,
@@ -1849,9 +1893,8 @@ export function velocityAt(px, py, pz, G, path = {}) {
     // whether or not the valve beyond is stenotic (the PW-in-LVOT / CW-across-AV
     // pair of the continuity equation)
     if (lAlong <= -0.25 && lAlong > -2.2 && (inLV || (lPerp < 0.9 && !inRA)) && py > G.lv.c[1]) {
-      const vLvot = Math.min(H.vAoPeak, 1.56 * (H.forwardSV || 0) / (3.14 * 0.33) / 100);
       considerFlow(true, AX_LVOT[0], AX_LVOT[1], AX_LVOT[2],
-        vLvot * H.ejAo * gauss(lPerp, 0.8) * clamp((lAlong + 2.2) / 0.9, 0, 1), FLOW.LVOT, false);
+        H.vLvot * gauss(lPerp, 0.8) * clamp((lAlong + 2.2) / 0.9, 0, 1), FLOW.LVOT, false);
     }
   }
   // RV ejection: on the right heart's clock it starts ~10 ms before and ends
@@ -1966,8 +2009,11 @@ export function velocityAt(px, py, pz, G, path = {}) {
   const A = G.A;
   if (A && A.pv && pz < A.la.c[2] + 1.2) {
     const dcx = px - A.la.c[0], dcy = py - A.la.c[1], dcz = pz - A.la.c[2];
-    if (dcx * dcx + dcy * dcy + dcz * dcz < 16) {          // within 4 cm of the LA centre
-      const sp = pvFlowSpeed(phase, path);
+    // (within ~4 cm of the LA centre, further in a dilated atrium, whose vein
+    // mouths sit further out: the solved D wave of DCM was cut off otherwise)
+    const reach = Math.max(4, Math.max(G.la.r[0], G.la.r[1], G.la.r[2]) + 2);
+    if (dcx * dcx + dcy * dcy + dcz * dcz < reach * reach) {
+      const sp = pvFlowSpeed(H);
       if (sp !== 0) {
         const veins = A.pv.veins;
         for (let i = 0; i < veins.length; i++) {
@@ -1988,7 +2034,7 @@ export function velocityAt(px, py, pz, G, path = {}) {
     if (!hv) { hv = hepaticVeinSegs(A); _hvCache.set(A, hv); }
     const j = hv[0].a, dx = px - j[0], dy = py - j[1], dz = pz - j[2];
     if (dx * dx + dy * dy + dz * dz < 42) {               // within ~6.5 cm of the confluence
-      const sp = hvFlowSpeed(G.phaseRV != null ? G.phaseRV : phase, path);
+      const sp = hvFlowSpeed(H);
       if (sp !== 0) {
         for (let i = 0; i < hv.length; i++) {
           const v = hv[i];

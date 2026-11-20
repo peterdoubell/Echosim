@@ -159,10 +159,15 @@ export function measureModel(path = {}) {
   // mean gradient: the mean LV-aortic pressure difference over ejection (what a
   // traced CW envelope's mean 4v^2 estimates); AVA by continuity (SV / VTI)
   {
+    // (AS: the traced CW envelope is the Bernoulli velocity of the instantaneous
+    // pressure drop, vAS(t) = sqrt(dP/4), so its VTI integrates that)
     let dp = 0, s1 = 0, n = 0;
     for (let i = 0; i < 240; i++) {
       const h = hemodynamics(i / 240, path);
-      if (h.Qao > 1) { dp += Math.max(0, h.Plv - h.Pao); s1 += h.Qao / sum.QaoMax; n++; }
+      if (h.Qao > 1) {
+        dp += Math.max(0, h.Plv - h.Pao); n++;
+        s1 += path.aorticStenosis && H.vAoPeak > 0 ? Math.min(1, Math.sqrt(Math.max(0, h.Plv - h.Pao) / 4) / H.vAoPeak) : h.Qao / sum.QaoMax;
+      }
     }
     if (n) {
       m.avMeanGrad = dp / n;
