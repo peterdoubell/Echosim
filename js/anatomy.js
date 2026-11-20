@@ -182,13 +182,19 @@ const PV0 = avFrame(26.46, 3.05, 1.25);            // the same world point as be
 const PV_R = 1.1;                                    // annulus d 2.2
 // Main PA: from the pulmonary valve it courses POSTERIORLY along the left of the
 // aortic root (screen-right in PSAX-AV), a little up and to the left, to divide
-// in the concavity of the aortic arch, just above the LA roof and in front of the
-// left main bronchus (1.6 cm left of the midline): the PSAX-AV view of the trunk,
+// in the concavity of the aortic arch, above the LA roof and in front of the
+// left main bronchus (2.2 cm left of the midline): the PSAX-AV view of the trunk,
 // its bifurcation and the branch origins. Its LPA then passes under the arch,
 // in front of the descending aorta, and its RPA dips onto the LA roof and runs to
 // the right behind the ascending aorta and the SVC.
-const PA_BIF = bodyAt(1.6, -0.9, 3.8);
-const U_PA = unit(sub(PA_BIF, PV0));
+// The valve and the infundibulum face along U_PA (back, a little up and left);
+// above the sinuses the trunk bends ~17 deg further up and to the left, so it is
+// 4.2 cm long (adult 4-5 cm) and divides high in the arch concavity:
+// the apical two-chamber plane then cuts ONE oval of trunk beyond the appendage
+// (not the bifurcation and both branch origins), and the left AV groove between
+// the LV base and the trunk is free for the appendage.
+const PA_BIF = bodyAt(2.2, -1.2, 4.8);
+const U_PA = unit(sub(bodyAt(1.6, -0.9, 3.8), PV0));
 // The RPA leaves the underside of the bifurcation and dips back onto the LA roof
 // (RPA_M, where the suprasternal plane cuts it, the LA a few mm beneath), then
 // runs to the right hilum (RPA_E, 5.3 cm right of the midline) behind the
@@ -198,17 +204,19 @@ const U_PA = unit(sub(PA_BIF, PV0));
 // (Back onto the posterior LA roof, rather than straight to the right, it crosses
 // the apical two-chamber plane steeply, as one small round section.)
 const RPA_O = mad(PA_BIF, BS, -0.8);
-const RPA_M = bodyAt(0.6, -2.9, 2.8);
+const RPA_M = bodyAt(1.2, -2.5, 2.7);
 const RPA_E = bodyAt(-5.6, -2.8, 4.6);
 const U_RPA = unit(sub(RPA_M, RPA_O));
-// The LPA's first 1.9 cm runs in the root's short-axis plane (left and back,
-// U_LPA taken perpendicular to the root axis): the trunk divides in its own
-// plane, so the standard PSAX-AV shows both branch origins ('trousers') without
-// tipping the probe. It then runs to the left hilum (LPA_E) over the left main
-// bronchus, under the distal arch and in front of the descending aorta.
-const U_LPA = (() => { const u = unit(add(add(mul(BL, 0.6), mul(BP, 0.7)), mul(BS, 0.25))); return unit(sub(u, mul(U_AO, dot(u, U_AO)))); })();
+// The LPA's first 1.9 cm runs close to the root's short-axis plane (to the left
+// and a little back; U_LPA is taken perpendicular to the root axis and then
+// tipped 19 deg caudally, the short-axis plane itself climbing steeply to the
+// left and back): the standard PSAX-AV shows both branch origins ('trousers')
+// without tipping the probe, and the branch stays ~0.2 cm clear of the underside
+// of the arch. It then arches over the left main bronchus and descends to the
+// left hilum (LPA_E), under the distal arch and in front of the descending aorta.
+const U_LPA = (() => { const u = unit(add(add(mul(BL, 0.9), mul(BP, 0.3)), mul(BS, 0.1))); return unit(mad(unit(sub(u, mul(U_AO, dot(u, U_AO)))), U_AO, -0.35)); })();
 const LPA_K = mad(PA_BIF, U_LPA, 1.9);
-const LPA_E = bodyAt(4.6, -1.2, 3.6);
+const LPA_E = bodyAt(5.2, -1.8, 4.4);
 // (the infundibulum is separated from the LVOT / aortic root by the muscular
 // outlet septum, so on PLAX its centre lies ~3.4 cm in front of the aortic-root
 // centre, clear of the basal LV)
@@ -1118,31 +1126,35 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
 }
 
 // Left atrial appendage: an oval ostium on the anterolateral LA opening into a
-// short neck, then a broad windsock body (one dominant lobe, its wall ridged by
+// neck, then a tubular, finger-like body (one dominant lobe, its wall ridged by
 // pectinate muscles) in the left AV groove over the circumflex. The neck is why
 // it is THE site of thrombus in atrial fibrillation.
 function laaSegs(la) {
   // ostium on the ANTEROLATERAL LA wall, ~1-1.5 cm in front of the LSPV across
-  // the warfarin ridge; a short neck, then a broad windsock body (~2 cm wide)
-  // running forward, down and laterally in the left AV groove over the
-  // circumflex, beside (not against) the aortic root, tapering to its tip.
-  // Ostium ~1.6 cm, depth ~3.6 cm (normal adult 1.5-2.5 cm, 2.5-4.5 cm).
+  // the warfarin ridge. Ostium ~1.6 cm, depth ~3.8 cm (normal adult 1.5-2.5 cm,
+  // 2.5-4.5 cm). (The ME LAA and ME two-chamber planes are aimed at this ostium
+  // and at the lumen beyond it, so it stays where those views were tuned: its
+  // centre lies 0.1 cm from the apical two-chamber plane at end-diastole and is
+  // carried 0.4 cm across it by the filling LA wall at end-systole.)
   const u = unit(add(add(mul(la.e1, 0.55), mul(la.e2, 0.75)), mul(la.a, -0.45)));
   const w = laWall(la, laIn(la), u);
-  // The ostium sits in the wall; the neck (~1.4 cm) leaves the LA body square to
-  // its anterior wall, so the appendage stands off the body (its own wall between
-  // them) beyond the first ~1 cm: a finger-like pouch at the screen-right of the
-  // LA, beside the anterior mitral annulus, in the TTE A2C and the ME2C.
+  // The neck (1.3 cm, narrowing to 1.35 cm) leaves the LA body square to its
+  // anterior wall, so the appendage stands off the body (its own wall between
+  // them); the body (1.4 cm long, ~1.5 cm wide) and the tapering tip then turn
+  // forward and down along the left AV groove, under the LV base and 0.3 cm or
+  // more clear of the pulmonary trunk: a tubular, finger-like pouch ~3.8 cm long
+  // at the screen-right of the LA, beside the anterior mitral annulus, in the
+  // TTE A2C and the ME2C. (The tip runs forward more than down: it ends at the
+  // AV-groove level, above the mitral leaflets, so the PSAX mitral-level plane
+  // stays clear of it.)
   const o = mad(w, u, -0.1);
-  const p1 = mad(o, unit([0.36, 0.02, 0.93]), 1.2);
-  const p2 = mad(p1, unit([0.35, -0.7, 0.6]), 1.4);
-  // (the tip runs forward more than down: it ends at the AV-groove level, above
-  // the mitral leaflets, so the PSAX mitral-level plane stays clear of it)
-  const p3 = mad(p2, unit([0.25, -0.75, 0.6]), 1.0);
+  const p1 = mad(o, [0.3445, 0, 0.9388], 1.3);
+  const p2 = mad(p1, [0.3424, -0.6971, 0.63], 1.4);
+  const p3 = mad(p2, [0.2403, -0.7413, 0.6267], 1.1);
   return [
-    { a: o, b: p1, r1: 0.8, r2: 0.68, w },
-    { a: p1, b: p2, r1: 0.68, r2: 0.82 },
-    { a: p2, b: p3, r1: 0.82, r2: 0.45 },
+    { a: o, b: p1, r1: 0.8, r2: 0.67, w },
+    { a: p1, b: p2, r1: 0.67, r2: 0.78 },
+    { a: p2, b: p3, r1: 0.78, r2: 0.49 },
   ];
 }
 // Right atrial appendage: BROAD-BASED and triangular, wide-mouthed — the key
