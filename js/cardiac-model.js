@@ -866,7 +866,9 @@ function tamponadeDent(G) {
   const uRa = LM.IAS_N;
   let uRv = [A.rv.c[0] - A.lv.c[0], 0, A.rv.c[2] - A.lv.c[2]];
   const L = Math.hypot(uRv[0], uRv[2]) || 1; uRv = [uRv[0] / L, 0, uRv[2] / L];
-  t = { dRa, dRv, uRa, uRv, wRa: dRa > 0 ? wallOf(A.ra.c, uRa, 'RA') : null, wRv: dRv > 0 ? wallOf([A.lv.c[0], A.rv.c[1], A.lv.c[2]], uRv, 'RV') : null };
+  // (the RA free wall itself: the crista terminalis is a fold carved from the
+  // lumen, and the march must not stop on it)
+  t = { dRa, dRv, uRa, uRv, wRa: dRa > 0 ? wallOf(A.ra.c, uRa, 'RA_NOFOLD') : null, wRv: dRv > 0 ? wallOf([A.lv.c[0], A.rv.c[1], A.lv.c[2]], uRv, 'RV') : null };
   _tampCache.set(G, t);
   return t;
 }

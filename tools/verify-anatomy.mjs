@@ -21,7 +21,7 @@
 // Usage: node tools/verify-anatomy.mjs [--verbose]     (exit 0 = all pass)
 import { geometryAt, classify, TISSUE, hemoSummary, hemodynamics, longitudinalStrain, regionalStrain, membSite, MEMB_T, VSD_RADIUS, shuntLabel, stenosisCw, FLOW, eaRatio, trEnvelope } from '../js/cardiac-model.js';
 import { measureModel } from '../js/report.js';
-import { LM, REF, lumenDist, mitralLift, BODY_AX, diaphragmBelow, rwmaBlend, stomachDist, rapEstimate } from '../js/anatomy.js';
+import { LM, REF, lumenDist, mitralLift, tricuspidLift, RIDGE, BODY_AX, diaphragmBelow, rwmaBlend, stomachDist, rapEstimate } from '../js/anatomy.js';
 import { MS_AREA } from '../js/hemodynamics.js';
 import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, ALL_VIEWS as ALL_V, teePathDist, teeManipulate, teeOmni, sectorHalfOf } from '../js/views.js';
 import { renderBmode, beamSample, speckleAxis, renderDoppler } from './bmode.mjs';
@@ -317,10 +317,16 @@ check('LA', 'LA volume (voxel, ES)', laV, [30, 70], 'mL', 'LAVI 16-34 mL/m2 x BS
     if (inCapsule(p, GES.A.svc) || inCapsule(p, GES.A.ivc)) continue;
     if (classify(p[0], p[1], p[2], GES, {}).tissue === TISSUE.RA) n++;
   }
-  // KNOWN-FAIL (marginal, from combining the review-9 fixes): the A4C plane now tilts with the root and the RA floor drops with the annulus centre; area 18.5 vs the 18 cm2 ASE limit
-  KNOWN = true;
   check('RA', 'RA area (A4C, ES)', n * h * h, REF.raAreaNormal, 'cm2');
-  KNOWN = false;
+  // the normal RA reads visibly smaller than the LA in the A4C: LA body area on
+  // the same plane (the appendage and the pulmonary veins beyond their ostia
+  // excluded, as the ASE trace does)
+  let nl = 0; const cl = GES.A.la.c;
+  for (let i = -5; i <= 5; i += h) for (let j = -5; j <= 5; j += h) {
+    const p = add(add(add(cl, mul(u, i)), mul(v, j)), mul(a4c.normal, dot(sub(a4c.pos, cl), a4c.normal)));
+    if (classify(p[0], p[1], p[2], GES, {}).tissue === TISSUE.LA && lumenDist(p[0], p[1], p[2], GES.A, 'LA_BODY') <= 0) nl++;
+  }
+  check('RA', 'RA area / LA area (A4C, ES)', n / Math.max(1, nl), [0.7, 0.92], '', `LA ${(nl * h * h).toFixed(1)} cm2`);
 }
 
 // ============================================================================
@@ -861,12 +867,14 @@ for (const [nm, G] of [['ED', GED], ['ES', GES]]) {
 for (const [nm, G] of [['ED', GED], ['ES', GES]]) {
   const g = sectorGrid(EXTRA_VIEWS.RVIT, G, {}, 0.1);
   let cs = 9, eu = 9;
-  const e = G.A.eustachian;
   for (const c of g.cells.values()) {
     cs = Math.min(cs, lumenDist(c.q[0], c.q[1], c.q[2], G.A, 'CS'));
-    eu = Math.min(eu, segDist(c.q, e.a, e.b) - e.r);
+    for (const e of G.A.eustachianRim) eu = Math.min(eu, segDist(c.q, e.a, e.b) - e.r);   // (any band of the crescentic flap)
   }
   assert('RV inflow', `coronary sinus lumen in the plane (${nm})`, cs < 0, `${cs.toFixed(2)} cm`);
+  // (the valve's medial horn, the Eustachian ridge running from the IVC rim past
+  // the CS ostium, is what this plane cuts between the two ostia; measured with
+  // the band-tip radius r, the thinner end of each tapered band)
   assert('RV inflow', `Eustachian (IVC) valve in the plane (${nm})`, eu < 0, `${eu.toFixed(2)} cm`);
   assert('RV inflow', `RA and RV both shown (${nm})`, g.area(TISSUE.RA) > 5 && g.area(TISSUE.RV) > 5 && g.area(TISSUE.LV) < 0.5);
 }
@@ -2299,7 +2307,8 @@ SECTION = 'TEE';
     check('TEE', `MEBICAVAL: RA width across the caval line / SVC diameter (${ph})`, wMax / (2 * A.svc.r), [1.3, 5], '');
     const tot = cellsWhere(S, () => true).length, lung = cellsWhere(S, (l) => l === TISSUE.LUNG).length;
     check('TEE', `MEBICAVAL: lung share of the sector (${ph})`, 100 * lung / tot, [0, 3], '%');
-    const crosses = (g) => { const da = dot(sub(g.a, p.pos), p.normal), db = dot(sub(g.b, p.pos), p.normal); return Math.min(Math.abs(da), Math.abs(db)) < g.r || da * db < 0; };
+    // (a tapered capsule — the Eustachian flap is thicker at its base — has radius g.ra at a)
+    const crosses = (g) => { const da = dot(sub(g.a, p.pos), p.normal), db = dot(sub(g.b, p.pos), p.normal); return Math.abs(da) < (g.ra ?? g.r) || Math.abs(db) < g.r || da * db < 0; };
     assert('TEE', `MEBICAVAL: crista terminalis crosses the plane (${ph})`, A.crista.some(crosses));
     assert('TEE', `MEBICAVAL: Eustachian valve crosses the plane (${ph})`, [A.eustachian, ...A.eustachianRim].some(crosses));
   }
@@ -2634,7 +2643,8 @@ for (const [vn, view, vessels] of [['SC_IVC', EXTRA_VIEWS.SC_IVC, ['ivc']], ['ME
   for (const key of Object.keys(PATHS)) for (const ph of [0, esOf(key)]) {
     const A = geo(ph, key).A;
     for (const sg of A.crista) {
-      const d = lumenDist(...mul(add(sg.a, sg.b), 0.5), A, 'RA');
+      // (the ridge is carved from the lumen: measured against the wall without it)
+      const d = lumenDist(...mul(add(sg.a, sg.b), 0.5), A, 'RA_NOFOLD');
       if (Math.abs(d) > Math.abs(worst.val)) worst = { val: d, tag: `${key} ${ph === 0 ? 'ED' : 'ES'}` };
     }
   }
@@ -2658,6 +2668,222 @@ for (const [vn, view, vessels] of [['SC_IVC', EXTRA_VIEWS.SC_IVC, ['ivc']], ['ME
     }
     check('RA', `A4C: muscle islands floating in the RA (${tag})`, isl, [0, 0], 'cm2');
   }
+}
+
+// ---- atrial wall structures: folds of the wall, never free bodies (review 12) --
+// The coumadin ridge, the crista terminalis and the Eustachian valve are carved
+// from the atrial lumen, so in any plane their muscle is continuous with the
+// wall: no myocardial island may sit in an atrial blood pool. Islands = MYO
+// components whose every 4-neighbour (0.05 cm grid) is MYO or that atrium's blood.
+// `fold`: count only islands that are part of a fold (a cell inside the lumen
+// as it would be without the folds), not the chamber wall itself cut tangentially.
+// Sampled through the cycle (a fold cut at mid-height by a plane that runs along
+// the wall shows only at some phases).
+const FOLD_PHASES = [0, 0.1, 0.2, 0.3, 0.42, 0.62, 0.8];
+{
+  const sec0 = SECTION;
+  const freeMyo = (view, G, blood, fold = null) => {
+    const S = planeSample(view, G, {}, 0.05);
+    const { comps } = components(S, (l) => l === TISSUE.MYO);
+    let isl = 0;
+    for (const cells of comps) {
+      let free = true;
+      for (const k of cells) {
+        const i = k % S.nx;
+        for (const kk of [i + 1 < S.nx ? k + 1 : -1, i > 0 ? k - 1 : -1, k + S.nx, k - S.nx]) {
+          const l = kk >= 0 && kk < S.lab.length ? S.lab[kk] : -1;
+          if (l !== TISSUE.MYO && l !== blood) { free = false; break; }
+        }
+        if (!free) break;
+      }
+      if (free && fold && !cells.some((k) => { const q = ptK(S, k); return lumenDist(q[0], q[1], q[2], G.A, fold) < -0.02; })) free = false;
+      if (free) isl += cells.length * S.step * S.step;
+    }
+    return isl;
+  };
+  SECTION = 'TEE';
+  const geoF = FOLD_PHASES.map((ph) => geometryAt(ph, {}));
+  for (const v of ['MELAA', 'MEAVLAX', 'ME2C']) {
+    let worst = 0, at = 0;
+    FOLD_PHASES.forEach((ph, i) => { const a = freeMyo(TEE_VIEWS[v], geoF[i], TISSUE.LA, 'LA_NOFOLD'); if (a > worst) { worst = a; at = ph; } });
+    check('TEE', `${v}: coumadin-ridge cells inside the LA not connected to the LA wall (worst of phases ${FOLD_PHASES.join(', ')})`, worst, [0, 0], 'cm2', worst > 0 ? `phase ${at}` : '');
+  }
+  for (const [tag, G] of [['ED', GED], ['ES', GES]]) {
+    for (const v of ['MELAA', 'MEAVLAX', 'ME2C']) {
+      // KNOWN-FAIL pending tee (MEAVLAX at ED, ~0.04 cm2, present before review 12):
+      // the ME AV LAX plane runs tangent to the LA body (at ED ~70 % of its LA cells
+      // lie within 0.3 cm of the wall, none deeper than 0.6 cm), so it grazes the
+      // plain LA wall beside the appendage ostium as a dot; not a fold (the row above).
+      KNOWN = v === 'MEAVLAX' && tag === 'ED';
+      check('TEE', `${v}: myocardium-like cells inside the LA not connected to the LA wall, any source (${tag})`, freeMyo(TEE_VIEWS[v], G, TISSUE.LA), [0, 0], 'cm2');
+      KNOWN = false;
+    }
+  }
+  // the ridge itself: from the crotch where the LSPV and LAA lumens part (no blood
+  // on both sides of the blade any more) to its tip, along its axis; the bulb
+  // width across the blade one bulb radius below the tip
+  for (const [tag, G] of [['ED', GED], ['ES', GES]]) {
+    const A = G.A, g = A.pv.ridge, inLA = (q) => lumenDist(q[0], q[1], q[2], A, 'LA') < 0;
+    let tip = null, crotch = null;
+    for (let t = 2; t > -2; t -= 0.01) if (!inLA(add(g.root, mul(g.n, t)))) { tip = t; break; }
+    for (let t = tip; t > -2.5; t -= 0.01) {
+      const c = add(g.root, mul(g.n, t));
+      if (!(inLA(add(c, mul(g.e, 0.4))) && inLA(add(c, mul(g.e, -0.4))))) { crotch = t; break; }
+    }
+    let w = 0; const sc = tip - RIDGE.rb;
+    for (let a = -1; a <= 1; a += 0.01) if (!inLA(add(add(g.root, mul(g.n, sc)), mul(g.e, a)))) w += 0.01;
+    check('LA', `coumadin ridge length from the wall (${tag})`, tip - crotch, [0.8, 1.5]);
+    check('LA', `coumadin ridge tip width (${tag})`, w, [0.4, 0.7]);
+  }
+  SECTION = 'Normal';
+  for (const [v, vw] of [['RVIT', EXTRA_VIEWS.RVIT], ['SUBCOSTAL', TTE_VIEWS.SUBCOSTAL], ['MEBICAVAL', TEE_VIEWS.MEBICAVAL], ['A4C', TTE_VIEWS.A4C]]) {
+    let worst = 0, at = 0;
+    FOLD_PHASES.forEach((ph, i) => { const a = freeMyo(vw, geoF[i], TISSUE.RA); if (a > worst) { worst = a; at = ph; } });
+    check('RA', `${v}: crista / Eustachian cells not connected to the RA wall (worst of phases ${FOLD_PHASES.join(', ')})`, worst, [0, 0], 'cm2', worst > 0 ? `phase ${at}` : '');
+  }
+  // the Eustachian valve rises from the IVC's anterior rim: outward from the root
+  // of its middle band (just beyond the flap), the RA wall
+  for (const [tag, G] of [['ED', GED], ['ES', GES]]) {
+    const A = G.A, iv = A.ivc, ax = unit(sub(iv.b, iv.a)), e = A.eustachian;
+    const c0 = add(iv.a, mul(ax, dot(sub(e.a, iv.a), ax))), out = unit(sub(e.a, c0));
+    let gap = null;
+    for (let t = e.ra ?? e.r; t < 2; t += 0.01) { const q = add(e.a, mul(out, t)); if (lumenDist(q[0], q[1], q[2], A, 'RA') >= 0) { gap = t - (e.ra ?? e.r); break; } }
+    check('RA', `Eustachian valve base to the IVC anterior rim (${tag})`, gap, [0, 0.1]);
+  }
+  SECTION = 'TEE';
+  // ME bicaval: the septum in profile, a thin fibrous fossa between the thick
+  // limbus. Along the septal line (the septal plane's trace through the fossa
+  // centre), the wall between LA and RA blood perpendicular to it: at the fossa
+  // centre, and the limbus 1.2-2 cm from it
+  const bic = (G) => {
+    const p = TEE_VIEWS.MEBICAVAL.probe(), D = TEE_VIEWS.MEBICAVAL.depth;
+    const T = (x, d) => { if (d <= 0 || Math.hypot(x, d) > D || Math.abs(Math.atan2(x, d)) > 0.66) return -1; const q = add(add(p.pos, mul(p.dir, d)), mul(p.lat, x)); return classify(q[0], q[1], q[2], G, {}).tissue; };
+    const r = sub(LM.IAS.fossaC, p.pos), f0 = [dot(r, p.lat), dot(r, p.dir)];
+    const n2 = [dot(LM.IAS_N, p.lat), dot(LM.IAS_N, p.dir)], nl = Math.hypot(...n2), un = [n2[0] / nl, n2[1] / nl], us = [-un[1], un[0]];
+    const out = { fossa: null, limbus: 0, raDepth: 0 };
+    for (let st = -2; st <= 2.001; st += 0.1) {
+      const c = [f0[0] + us[0] * st, f0[1] + us[1] * st];
+      let prev = null, t0 = null, wall = null;
+      for (let h = -2; h <= 2; h += 0.01) {
+        const t = T(c[0] + un[0] * h, c[1] + un[1] * h);
+        if (t === TISSUE.LA) { t0 = null; prev = 'LA'; } else if (t === TISSUE.RA) { if (prev === 'LA' && t0 != null) { wall = [t0, h]; break; } prev = 'RA'; } else if (prev === 'LA' && t0 == null) t0 = h;
+      }
+      if (!wall) continue;
+      const th = wall[1] - wall[0];
+      if (Math.abs(st) < 0.05) out.fossa = th;
+      if (Math.abs(st) >= 1.2 && th < 1.0) out.limbus = Math.max(out.limbus, th);
+      let ra = 0, gp = 0;
+      for (let h = wall[1]; h < wall[1] + 8; h += 0.02) { const t = T(c[0] + un[0] * h, c[1] + un[1] * h); if (t === TISSUE.RA) { ra = h - wall[1]; gp = 0; } else if ((gp += 0.02) > 0.4) break; }
+      out.raDepth = Math.max(out.raDepth, ra);
+    }
+    return out;
+  };
+  for (const [tag, G] of [['ED', GED], ['ES', GES]]) {
+    const b = bic(G);
+    check('TEE', `MEBICAVAL: fossa / limbus thickness on the image (${tag})`, b.fossa / b.limbus, [0.15, 0.5], '', `fossa ${b.fossa?.toFixed(2)} cm, limbus ${b.limbus.toFixed(2)} cm`);
+    // KNOWN-FAIL (review 12, TEE-13; open, pending a move of the caval line — the
+    // SVC orifice is the root group's, the IVC orifice this group's): the RA reads
+    // 2.54 (ED) / 2.46 (ES) cm deep across the septum. The plane is pinned by the
+    // oesophageal station (within 0.5 cm of the centreline), the SVC axis point and
+    // the IVC axis point, and the RA centre lies 0.85 (ED) / 1.5 (ES) cm off it,
+    // anterior-left of the caval line. The root group's SVC re-course (wi12/root)
+    // keeps the caval line: merged in a scratch copy, 2.54 / 2.46 again. Tried
+    // here: RA_POST 1.4 / 1.8 (+0.1 / +0.2 cm; A4C RA area 18.8 / 18.5 > 18),
+    // CAVA.ivcSd 1.2 / 1.45 (+0.06 / +0.12 cm; the IVC leaves the RV inflow plane),
+    // RA_POST 0-0.55 (worse), BICAVAL_T 0.5-2.5 / 0.25-1.5 cm (<= 3.4). Even through
+    // the RA centre the normal end-diastolic RA is only ~3.0 cm deep along the
+    // septal normal (3.8 at ES); the ASE normal RA minor axis is 3.5 +- 0.4 (women)
+    // / 3.9 +- 0.4 cm (men) at end-systole (Lang et al., JASE 2015).
+    KNOWN = true;
+    check('TEE', `MEBICAVAL: RA depth perpendicular to the septum (${tag})`, b.raDepth, [3.5, 5]);
+    KNOWN = false;
+  }
+  // RV inflow: no septum or LV, the CS ostium in plane, the RA chamber inside the
+  // sector, and the open tricuspid orifice one blood pool (RV abutting RA)
+  SECTION = 'Normal';
+  for (const [tag, G] of [['ED', GED], ['ES', GES]]) {
+    const S = planeSample(EXTRA_VIEWS.RVIT, G, {}, 0.1), A = G.A;
+    let tot = 0, lvm = 0, raMax = 0;
+    for (let k = 0; k < S.lab.length; k++) {
+      const l = S.lab[k]; if (l < 0) continue; tot++;
+      const q = ptK(S, k);
+      if (l === TISSUE.LV || (l === TISSUE.MYO && lumenDist(q[0], q[1], q[2], A, 'LV_EPI') < 0)) lvm++;
+      // (beyond a caval orifice plane, within its flared mouth, is cava, not chamber)
+      const beyond = (v) => { const ab = sub(v.b, v.a), t = dot(sub(q, v.a), ab) / dot(ab, ab); return t > 0 && t < 1 && Math.hypot(...sub(q, add(v.a, mul(ab, t)))) < v.r + 0.5; };
+      if (l === TISSUE.RA && !beyond(A.ivc) && !beyond(A.svc)) raMax = Math.max(raMax, Math.hypot(...xd(S, k)));
+    }
+    check('RV inflow', `RVIT: LV + septal myocardium share of the sector (${tag})`, 100 * lvm / tot, [0, 5], '%');
+    const cs = A.cs[A.cs.length - 1].b;
+    check('RV inflow', `RVIT: CS ostium to plane (${tag})`, Math.abs(dot(sub(cs, S.p.pos), S.p.normal)), [0, 0.5]);
+    check('RV inflow', `RVIT: deepest RA point (cavae beyond their orifices excluded) (${tag})`, raMax, [0, EXTRA_VIEWS.RVIT.depth - 1]);
+    // KNOWN-FAIL (review 12, TTE-6/ANA-9; open): the RV inflow view is a tilted
+    // parasternal long-axis plane — its normal, like the PLAX's, has a ~0.6
+    // superior component — and the IVC runs near vertically (14 deg off the body's
+    // S-I axis), so it crosses the plane at ~40 deg: within half a radius of the
+    // plane its axis can run at most 0.9 / sin 40 = 1.4 cm, and [2, 6] needs a
+    // crossing <= 27 deg. The planes that hold the IVC axis are near parallel to
+    // the septum and cut the aortic root (~9 cm2) and the septum; moving the IVC
+    // orifice off the septum (CAVA.ivcSd 1.2 / 1.45) takes it further from this
+    // plane (orifice 0.61 -> 0.72 / 0.83 cm off at ED). The plane cuts the IVC
+    // mouth (orifice centre 0.54-0.61 cm off, within its 0.9 cm radius) and the
+    // Eustachian ridge beside it.
+    let run = 0; const iv = A.ivc, ax = unit(sub(iv.b, iv.a));
+    for (let t = 0; t <= 8; t += 0.1) { const q = add(iv.a, mul(ax, t)); if (Math.abs(dot(sub(q, S.p.pos), S.p.normal)) < 0.5 * iv.r) run += 0.1; }
+    KNOWN = true;
+    check('RV inflow', `RVIT: IVC lumen run along its axis in the plane (${tag})`, run, [2, 6]);
+    KNOWN = false;
+  }
+  {
+    // the plane must not graze the convex septum: no island of septal (LV
+    // epicardium) myocardium inside the RV, which reads as an RV mass, and no
+    // large myocardial island at all (the anterior papillary muscle's section,
+    // ~0.4-0.7 cm2, is the one the view shows)
+    let sep = 0, any = 0, atS = 0, atA = 0;
+    for (const ph of [0, 0.1, 0.2, 0.3, 0.42, 0.5, 0.62, 0.7, 0.8, 0.9, 0.95]) {
+      const G = geometryAt(ph, {}), S = planeSample(EXTRA_VIEWS.RVIT, G, {}, 0.05);
+      const { comps } = components(S, (l) => l === TISSUE.MYO);
+      let s = 0, a = 0;
+      for (const cells of comps) {
+        let free = true;
+        for (const k of cells) {
+          const i = k % S.nx;
+          for (const kk of [i + 1 < S.nx ? k + 1 : -1, i > 0 ? k - 1 : -1, k + S.nx, k - S.nx]) {
+            const l = kk >= 0 && kk < S.lab.length ? S.lab[kk] : -1;
+            if (l !== TISSUE.MYO && l !== TISSUE.RV) { free = false; break; }
+          }
+          if (!free) break;
+        }
+        if (!free) continue;
+        a += cells.length * S.step * S.step;
+        for (const k of cells) { const q = ptK(S, k); if (lumenDist(q[0], q[1], q[2], G.A, 'LV_EPI') < 0) s += S.step * S.step; }
+      }
+      if (s > sep) { sep = s; atS = ph; }
+      if (a > any) { any = a; atA = ph; }
+    }
+    check('RV inflow', 'RVIT: septal (LV epicardium) myocardium island inside the RV (worst of phases 0-0.95)', sep, [0, 0], 'cm2', sep > 0 ? `phase ${atS}` : '');
+    check('RV inflow', 'RVIT: myocardial islands inside the RV (worst of phases 0-0.95)', any, [0, 1], 'cm2', `phase ${atA}`);
+  }
+  {
+    // diastole (peak E and diastasis): inside the open TV orifice ring (0.65 of the
+    // annular radius, within 0.25 cm of the annular plane, the septal dip
+    // followed), every cell is blood or leaflet
+    let bad = 0;
+    for (const ph of [0.62, 0.75]) {
+      const G = geometryAt(ph, {}), A = G.A, C = A.valves.tricuspid.c, nv = A.valves.tricuspid.n;
+      for (const vw of [EXTRA_VIEWS.RVIT, TTE_VIEWS.A4C, TTE_VIEWS.SUBCOSTAL]) {
+        const S = planeSample(vw, G, {}, 0.05);
+        for (let k = 0; k < S.lab.length; k++) {
+          const l = S.lab[k];
+          if (l < 0 || l === TISSUE.RV || l === TISSUE.RA || l === TISSUE.VALVE) continue;
+          const q = ptK(S, k), r = sub([q[0], q[1] - tricuspidLift(q[0], q[1], q[2], A), q[2]], C), hh = dot(r, nv);
+          if (Math.abs(hh) > 0.25 || Math.sqrt(Math.max(0, dot(r, r) - hh * hh)) > 0.65 * LM.TV_R) continue;
+          bad += S.step * S.step;
+        }
+      }
+    }
+    check('RV inflow', 'RVIT, A4C and SUBCOSTAL in diastole: non-blood cells inside the open TV orifice ring, leaflets excluded', bad, [0, 0], 'cm2');
+  }
+  SECTION = sec0;
 }
 
 // ---- no pericardial slab inside the LA (apical views, whole cycle) ----------
@@ -3833,6 +4059,19 @@ SECTION = 'Pathology';
     for (let c = 0; c < sp.cols; c++) { const ph = c / sp.cols, v = sp.vs[c] * fwd; if (ph < 0.42) S = Math.max(S, v); if (ph > 0.84) AR = Math.max(AR, -v); }
     check(g, 'SC IVC hepatic vein: S-wave peak', S, [0.3, 0.6], 'm/s');
     check(g, 'SC IVC hepatic vein: atrial reversal (AR) present', AR, [0.05, 0.4], 'm/s');
+  }
+  {
+    // tricuspid inflow from the RV inflow view: the beam meets it within 15 deg, so
+    // the view's standard trace is PW at the leaflet tips; in tamponade that trace
+    // carries the respiratory E variation (three beats: exp / insp / exp)
+    const k = dopplerDefault('RVIT', PATHS.normal), gR = k && defaultSiteGeometry('RVIT', k, PATHS.normal);
+    check(g, 'normal RVIT: default site is tvTips, angle', k === 'tvTips' ? gR.angleDeg : null, [0, 15], 'deg', `${k}`);
+    const TP = { effusion: true, tamponade: true }, sp = renderDoppler('RVIT', 0.3, TP, { color: false }).spec, sT = hemoSummary(TP);
+    const nb = sp.beats || 1, env = sp.peakSign < 0 ? sp.envNeg : sp.envPos, E = [];
+    for (let b = 0; b < nb; b++) { let m = 0; for (let c = Math.floor((b + 0.4) * sp.cols / nb); c < Math.floor((b + 0.85) * sp.cols / nb); c++) m = Math.max(m, env[c]); E.push(m); }
+    const eIn = E[1], eEx = 0.5 * (E[0] + E[2]), vr = nb === 3 ? 100 * (Math.max(eIn, eEx) - Math.min(eIn, eEx)) / Math.max(eIn, eEx) : null;
+    assert(g, 'tamponade RVIT: default is tricuspid-inflow PW over three beats', sp.site === 'tvTips' && sp.mode === 'PW' && nb === 3, `${sp.mode} ${sp.site}, ${nb} beats`);
+    check(g, 'tamponade RVIT default PW: tricuspid E variation on the trace minus tvEResp', vr == null ? null : vr - sT.tvEResp, [-5, 5], 'points', `trace ${vr?.toFixed(1)} % (E ${E.map((v) => v.toFixed(2)).join(' / ')} m/s), model ${sT.tvEResp.toFixed(1)} %`);
   }
   {
     const sp = renderDoppler('SSN', 0.2, {}, { color: false }).spec;
