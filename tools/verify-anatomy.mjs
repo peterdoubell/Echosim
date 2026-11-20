@@ -1909,7 +1909,26 @@ function yArmRow(grp, vn, tag, ph, st = 3, path = {}, label = '') {
     // gave ~11.5 cm2; the PA bifurcation still shows in section beside the roof)
     const S2 = planeSample(TTE_VIEWS.A2C, G, {}, 0.1);
     const gv = cellsWhere(S2, (l, k) => l === T.AORTA && xd(S2, k)[1] > 9);
-    check(PL, `A2C: great-artery lumen beyond the mitral annulus (${tag})`, areaOf(S2, gv), [0, 8], 'cm2');
+    // (review 12: the bifurcation was lifted into the arch concavity, so the
+    // '8' of two branch lumina beside the roof is gone; what is left is ONE oval
+    // section of the pulmonary trunk, which crosses the A2C plane on its way from
+    // the valve, anterior to the LA, to the arch: 5.7/6.2 cm2 at 15 cm, more at
+    // 15.5 cm because the sector is deeper. Limit set to that single section.)
+    check(PL, `A2C: great-artery lumen beyond the mitral annulus (${tag})`, areaOf(S2, gv), [0, 7.5], 'cm2');
+    const gvc = components(S2, (l, k) => l === T.AORTA && xd(S2, k)[1] > 9).comps.filter((c) => areaOf(S2, c) >= 0.3);
+    // two separate round sections, not the figure-of-8 of a bifurcation: the
+    // trunk beside the LA and, at 15.5 cm, the RPA just beyond the LA roof
+    check(PL, `A2C: great-artery sections >= 0.3 cm2 beyond the mitral annulus (${tag})`, gvc.length, [0, 2], '',
+      gvc.map((c) => `${areaOf(S2, c).toFixed(1)} cm2 at x ${(c.reduce((m, k) => m + xd(S2, k)[0], 0) / c.length).toFixed(1)}, d ${(c.reduce((m, k) => m + xd(S2, k)[1], 0) / c.length).toFixed(1)}`).join('; '));
+    // the whole LA, roof included, inside the sector (biplane LA volume)
+    const laDeep = (SS) => cellsWhere(SS, (l) => l === T.LA).reduce((m, k) => Math.max(m, Math.hypot(...xd(SS, k))), 0);
+    check(PL, `A2C: sector depth minus the deepest LA lumen (${tag})`, TTE_VIEWS.A2C.depth - laDeep(S2), [0.5, 3], 'cm');
+    // A3C: the SVC lies in the A3C plane just beyond the LA roof (near edge at
+    // 14.7 cm), so a deeper sector adds a second great-vessel section; the depth
+    // stays 15 cm until the SVC leaves that plane
+    KNOWN = true;
+    check(PL, `A3C: sector depth minus the deepest LA lumen (${tag})`, EXTRA_VIEWS.A3C.depth - laDeep(S), [0.5, 3], 'cm');
+    KNOWN = false;
   }
   {
     // PSAX-AV: the PA trunk dividing ('trousers'): both branch origins in plane

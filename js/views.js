@@ -305,7 +305,9 @@ export const TTE_VIEWS = {
   A4C: { probe: a4cProbe, depth: 17, track: a4cTrack },
   // (15 cm deep: the LA and its roof; the PA bifurcation and the right PA lie
   // just beyond the LA roof in this plane and run along the beam to 17 cm)
-  A2C: { probe: a2cProbe, depth: 15, track: APICAL_TRACK },
+  // (review 12: 15.5 cm so the LA roof, 14.6 cm from the apex, lies inside the
+  // sector with a 0.9 cm margin for the biplane LA trace)
+  A2C: { probe: a2cProbe, depth: 15.5, track: APICAL_TRACK },
   SUBCOSTAL: { probe: subcostalProbe, depth: 18 },
 };
 // RV inflow (parasternal, tilted from the PLAX toward the right hip): the RV
