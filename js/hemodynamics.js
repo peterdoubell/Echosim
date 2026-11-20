@@ -102,6 +102,26 @@ const LA_LEGACY = { ElaMin: 0.20, aWave: 1.1, kLa: 0, Rpv: 0.040, laDesc: 20, V0
 
 // Per-pathology circulation parameters. Normal values are calibrated to
 // EDV≈121, ESV≈47, EF≈61%, aortic ~125/76, LVEDP≈8.
+// RWMA: the infarcted territory no longer ejects, so the global end-systolic
+// elastance is the remote myocardium's alone. Set per territory so the solved
+// LVEF is what the drawn LV (territory frozen, remote walls compensating) ejects:
+// a large LAD infarct (septal, apex) ~40 %, a smaller circumflex/RCA one a little
+// higher (typical post-infarct LVEF 35-50 %). Scaled with the severity (0.85 =
+// the default, akinetic scar).
+const RWMA_EMAX = { septal: 1.3, anteroseptal: 1.3, anterior: 1.35, apical: 1.35, lateral: 1.4, inferior: 1.4, inferolateral: 1.45, posterior: 1.45 };
+function rwmaEmax(path) {
+  const spec = typeof path.rwma === 'object' ? path.rwma : {};
+  const name = spec.region || (typeof path.rwma === 'string' ? path.rwma : 'septal');
+  const sev = spec.severity != null ? Math.max(0, Math.min(1, spec.severity)) : 0.85;
+  const e = RWMA_EMAX[name] || RWMA_EMAX.septal;
+  return 2.7 - (2.7 - e) * sev / 0.85;
+}
+// the RWMA territory and severity change the solved loop: part of the cache key
+function rwmaSig(path) {
+  if (!path.rwma) return '';
+  return ':' + (typeof path.rwma === 'object' ? (path.rwma.region || 'septal') + '/' + (path.rwma.severity ?? '') : path.rwma);
+}
+
 function circParams(path) {
   const p = {
     Emax: 2.7,   // end-systolic elastance (contractility)
@@ -364,7 +384,7 @@ function circParams(path) {
     // small, stiff LA that empties late, by its booster
     Object.assign(p, { Pla0: 8, Emin: 0.15, TR: 0.26, kVI: 0.5, aWave: 7, ElaMin: 0.24, kLa: 0.0068, V0la: 20 });
   }
-  if (path.rwma) { p.Emax = Math.min(p.Emax, 1.8); }              // regional dysfunction → low global contractility
+  if (path.rwma) { p.Emax = Math.min(p.Emax, rwmaEmax(path)); }  // regional dysfunction → low global contractility
   // secundum ASD: the defect makes the two atria one chamber in practice; the
   // systolic capacity the descending annuli open is shared through it, and the
   // LA's (laDesc) already decompresses that common atrium. A separate RA descent
@@ -859,7 +879,7 @@ function sig(path) {
     + ':' + (path.dilated ? dcmSeverityOf(path) : '') + ':' + (path.tamponade && path.resp ? path.resp : '');
 }
 function solved(path) {
-  const key = sig(path);
+  const key = sig(path) + rwmaSig(path);
   let r = _cache.get(key);
   if (!r) {
     r = simulate(path);
@@ -928,7 +948,7 @@ export function hemoSummary(path = {}) { return solved(path).sum; }
 // moves; a failing DCM atrium loses its booster). {c: 1, b: 1} for a normal heart.
 const _laCache = new Map();
 export function laPhasic(path = {}) {
-  const key = sig(path);
+  const key = sig(path) + rwmaSig(path);
   let r = _laCache.get(key);
   if (!r) {
     // (the remodelled-LA lesions are calibrated against the earlier normal LA,
