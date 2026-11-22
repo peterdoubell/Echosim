@@ -7,7 +7,7 @@
 // labels, live measurements, and a scrolling spectral-Doppler trace.
 
 import { classify, velocityAt, geometryAt, hemoSummary, hemodynamics, TISSUE, VALVE_DEFS, FLOW, AORTIC_CUSPS, shuntLabel, stenosisCw, FLOW_AXES, FLOW_SITES, membSite, valveAt } from './cardiac-model.js';
-import { LM, rapEstimate, diaphragmBelow, rwmaBlend, lumenDist, hepaticVeinSegs } from './anatomy.js';
+import { LM, rapEstimate, diaphragmBelow, rwmaBlend, lumenDist, hepaticVeinSegs, mitralLift, setIvcBreath, ivcBreath } from './anatomy.js';
 import { clamp } from './mathutils.js';
 import { ALL_VIEWS, sectorHalfOf } from './views.js';
 
@@ -1946,7 +1946,18 @@ export class EchoView {
       ctx.textAlign = 'left';
       ctx.fillText(`CF ±${Math.round(b.nyq * 100)} cm/s  PRF ${(b.prf / 1000).toFixed(1)} kHz  ${Math.round(b.fps)} Hz`, 6, 14);
     }
-    const dg = this._dGate;
+    const mm = this._mmOverlay;
+    if (mm) {
+      // the M-mode cursor (or the tissue-Doppler sample) in the sector
+      const [x0, y0] = toXY(mm.a[0], mm.a[1]), [x1, y1] = toXY(mm.b[0], mm.b[1]);
+      ctx.strokeStyle = 'rgba(255,225,140,0.85)';
+      ctx.setLineDash([5, 3]);
+      ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+      ctx.setLineDash([]);
+      if (mm.gate) { const [xg, yg] = toXY(mm.gate[0], mm.gate[1]); ctx.strokeRect(xg - 4, yg - 3, 8, 6); }
+    }
+    const dg = (this.traceMode === 'mmode' || this.traceMode === 'tdi') ? null : this._dGate;
     if (dg && this.showDopplerCursor !== false) {
       const [x0, y0] = toXY(dg.theta, 0.2), [x1, y1] = toXY(dg.theta, this.depthCm * 0.94);
       ctx.strokeStyle = 'rgba(235,235,235,0.55)';
@@ -2128,6 +2139,10 @@ export class EchoView {
   // window under it, turbulent flow and CW fill toward the baseline.
   _spectral(G, path, probe) {
     if (!this.sctx) return;
+    // the trace panel's other modes: M-mode and tissue Doppler
+    this._mmOverlay = null;
+    if (this.traceMode === 'mmode') { this._mmode(G, path, probe); return; }
+    if (this.traceMode === 'tdi') { this._tdi(G, path, probe); return; }
     const ctx = this.sctx;
     const W = this.spectral.width, H = this.spectral.height;
     const plotH = Math.max(20, Math.round(H * 0.84));
@@ -2383,6 +2398,159 @@ export class EchoView {
     };
   }
 
+  // Sector coordinates (angle, depth) of a world point for the overlays.
+  _polar(probe, q) {
+    const P = probe.pos, r0 = q[0] - P[0], r1 = q[1] - P[1], r2 = q[2] - P[2];
+    const al = r0 * probe.dir[0] + r1 * probe.dir[1] + r2 * probe.dir[2], la = r0 * probe.lat[0] + r1 * probe.lat[1] + r2 * probe.lat[2];
+    return [Math.atan2(la, al), Math.hypot(al, la)];
+  }
+
+  // M-mode: depth (down) against time (two beats; three with a sniff for the IVC)
+  // along the view's chosen line, in the trace panel. The sweep is cached like a
+  // spectral sweep. Readouts: annular excursion (TAPSE / MAPSE) or the IVC's
+  // maximum and minimum diameter and collapse, each read off the trace itself
+  // (mmodeRead), and a two-point caliper (depth and time differences).
+  _mmode(G, path, probe) {
+    const ctx = this.sctx, W = this.spectral.width, H = this.spectral.height;
+    const plotH = Math.max(20, Math.round(H * 0.84));
+    const lines = MMODE_LINES[this.viewName] || [];
+    const pick = lines.find((l) => l[0] === this.mmodeKey) || lines[0] || ['beam', 'central beam'];
+    const key = pick[0], ck = [this.viewName, key, this.depthCm, W, plotH].join('|');
+    let S = this._mmCache;
+    const moved = !S || Math.hypot(probe.pos[0] - S.pp[0], probe.pos[1] - S.pp[1], probe.pos[2] - S.pp[2]) > 1.0 ||
+      probe.dir[0] * S.pd[0] + probe.dir[1] * S.pd[1] + probe.dir[2] * S.pd[2] < 0.99966;
+    if (!S || S.ck !== ck || S.path !== path || moved) {
+      const ln = mmodeLine(this.viewName, key, path, probe);
+      const win = key === 'ivc' || ln.anatomical;            // a window about the landmark, or the whole beam
+      const d0 = win ? Math.max(0, ln.depth - 3.2) : 0.5, d1 = win ? ln.depth + 3.2 : this.depthCm;
+      const cols = Math.max(40, Math.min(240, W >> 1)), rows = Math.max(40, Math.min(260, plotH));
+      S = mmodeSweep(ln, path, cols, rows, d0, d1);
+      S.read = key === 'tapse' || key === 'mapse' || key === 'ivc' ? mmodeRead(S) : null;
+      S.ck = ck; S.path = path; S.pp = probe.pos.slice(); S.pd = probe.dir.slice(); S.line = ln; S.img = null;
+      this._mmCache = S;
+    }
+    const ln = S.line, { cols, rows, d0, d1, nb } = S;
+    this._mmOverlay = { a: this._polar(probe, [ln.P[0] + ln.dir[0] * Math.max(d0, 0.2), ln.P[1] + ln.dir[1] * Math.max(d0, 0.2), ln.P[2] + ln.dir[2] * Math.max(d0, 0.2)]),
+      b: this._polar(probe, [ln.P[0] + ln.dir[0] * d1, ln.P[1] + ln.dir[1] * d1, ln.P[2] + ln.dir[2] * d1]) };
+    if (!S.img || S.img.width !== W || S.img.height !== plotH) {
+      const img = ctx.createImageData(W, plotH), px = img.data;
+      for (let y = 0; y < plotH; y++) {
+        const r = Math.min(rows - 1, (y * rows / plotH) | 0);
+        for (let x = 0; x < W; x++) {
+          const c = Math.min(cols - 1, (x * cols / W) | 0), t = S.t[c * rows + r];
+          // streaky speckle: the scatterers of a line persist from sweep to sweep
+          let h = (Math.imul(y + 1, 374761393) ^ Math.imul((x >> 3) + 7, 668265263) ^ Math.imul(t + 3, 2246822519)) >>> 0;
+          h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0;
+          const n = (h & 1023) / 1023, g0 = MM_GREY[t] ?? 0.3;
+          const g = Math.max(0, Math.min(255, 255 * g0 * (g0 < 0.1 ? 0.5 + n : 0.55 + 0.9 * n)));
+          const o = (y * W + x) * 4;
+          px[o] = g; px[o + 1] = g; px[o + 2] = g * 0.96; px[o + 3] = 255;
+        }
+      }
+      S.img = img;
+    }
+    ctx.putImageData(S.img, 0, 0);
+    const yOf = (d) => (d - d0) / (d1 - d0) * plotH, rr = this.rrSec || 0.833;
+    // depth scale (cm) on the right
+    ctx.font = '9px monospace'; ctx.textAlign = 'right';
+    for (let d = Math.ceil(d0); d < d1; d++) {
+      const y = yOf(d);
+      ctx.fillStyle = 'rgba(200,225,245,0.8)'; ctx.fillRect(W - 5, y, 5, 1);
+      if ((d - Math.ceil(d0)) % 2 === 0 && y > 12 && y < plotH - 4) ctx.fillText(String(ln.anatomical || key === 'ivc' ? d - Math.ceil(d0) : d), W - 7, y + 3);
+    }
+    const label = (t, x, y, col, font = '9px monospace', align = 'left') => {
+      ctx.font = font; ctx.textAlign = align;
+      const w = ctx.measureText ? (ctx.measureText(t).width || 0) : 0;
+      ctx.fillStyle = 'rgba(4,6,10,0.72)';
+      ctx.fillRect(align === 'right' ? x - w - 2 : x - 2, y - 9, w + 4, 11);
+      ctx.fillStyle = col; ctx.fillText(t, x, y);
+    };
+    label(`M-mode  ${pick[1]}${ln.anatomical ? '  (anatomical line)' : ''}  cm`, 4, 10, 'rgba(170,215,245,0.95)');
+    const R = S.read;
+    let readout = null;
+    if (R && key === 'ivc') {
+      readout = `IVC max ${(R.dMax * 10).toFixed(0)} mm  min ${(R.dMin * 10).toFixed(0)} mm  collapse ${Math.round(R.collapse * 100)}%`;
+      label('sniff', W * 0.5, plotH - 4, 'rgba(150,200,240,0.9)', '9px monospace', 'center');
+    } else if (R) {
+      for (const d of [R.min, R.max]) {
+        ctx.strokeStyle = 'rgba(255,210,90,0.6)'; ctx.setLineDash([3, 3]);
+        ctx.beginPath(); ctx.moveTo(0, yOf(d)); ctx.lineTo(W - 30, yOf(d)); ctx.stroke(); ctx.setLineDash([]);
+      }
+      readout = `${key === 'tapse' ? 'TAPSE' : 'MAPSE (lateral)'} ${(R.excursion * 10).toFixed(0)} mm`;
+    }
+    if (readout) label(readout, W - 34, 21, 'rgba(255,225,140,0.95)', '600 10px monospace', 'right');
+    // caliper: two points placed on the trace
+    let caliper = null;
+    const cal = this.mmodeCal;
+    if (cal && cal.length) {
+      ctx.strokeStyle = 'rgba(120,255,160,0.95)'; ctx.lineWidth = 1;
+      for (const q of cal) { ctx.beginPath(); ctx.moveTo(q.x - 4, q.y); ctx.lineTo(q.x + 4, q.y); ctx.moveTo(q.x, q.y - 4); ctx.lineTo(q.x, q.y + 4); ctx.stroke(); }
+      if (cal.length > 1) {
+        caliper = { dDepth: Math.abs(cal[1].y - cal[0].y) / plotH * (d1 - d0), dT: Math.abs(cal[1].x - cal[0].x) / W * nb * rr };
+        label(`caliper ${(caliper.dDepth * 10).toFixed(0)} mm  ${Math.round(caliper.dT * 1000)} ms`, 4, 21, 'rgba(150,255,180,0.95)', '600 10px monospace');
+      }
+    }
+    this._drawEcg(ctx, W, H, plotH, G, nb);
+    this.mmodeData = { key, label: pick[1], d0, d1, plotH, W, nb, rrSec: rr, cols, rows, read: R, caliper, anatomical: !!ln.anatomical,
+      excursion: R && key !== 'ivc' ? R.excursion : null, ivc: R && key === 'ivc' ? { dMax: R.dMax, dMin: R.dMin, collapse: R.collapse } : null };
+    this.spectralData = { mode: 'M', site: null, cols: 0, vs: new Float32Array(0) };
+  }
+
+  // Tissue Doppler (PW-TDI) of an annular site in the apical four-chamber view:
+  // two beats of the annulus velocity along the beam on a low scale, with s', e',
+  // a' and (mitral sites) E/e'.
+  _tdi(G, path, probe) {
+    const ctx = this.sctx, W = this.spectral.width, H = this.spectral.height;
+    const plotH = Math.max(20, Math.round(H * 0.84));
+    ctx.fillStyle = '#04060a'; ctx.fillRect(0, 0, W, H);
+    this.spectralData = { mode: 'TDI', site: null, cols: 0, vs: new Float32Array(0) };
+    if (this.viewName !== 'A4C') {
+      ctx.fillStyle = 'rgba(150,200,240,0.6)'; ctx.font = '10px monospace'; ctx.textAlign = 'left';
+      ctx.fillText('Tissue Doppler: use the apical four-chamber view', 6, plotH * 0.5);
+      ctx.fillText('(the annulus moves along the beam from the apex)', 6, plotH * 0.5 + 13);
+      this._drawEcg(ctx, W, H, plotH, G);
+      this.tdiData = null;
+      return;
+    }
+    const pick = TDI_SITES.find((l) => l[0] === this.tdiSite) || TDI_SITES[0], site = pick[0], rr = this.rrSec || 0.833;
+    let T = this._tdiCache;
+    if (!T || T.path !== path || T.site !== site || T.rrSec !== rr || Math.hypot(probe.pos[0] - T.pp[0], probe.pos[1] - T.pp[1], probe.pos[2] - T.pp[2]) > 1.0) {
+      T = tdiTrace(site, path, probe.pos, rr);
+      T.path = path; T.pp = probe.pos.slice();
+      this._tdiCache = T;
+    }
+    const q = annulusPoint(G.A, site), pq = this._polar(probe, q);
+    this._mmOverlay = { a: [pq[0], 0.2], b: [pq[0], Math.min(this.depthCm * 0.94, pq[1] + 1.5)], gate: pq };
+    const full = Math.max(15, Math.ceil(Math.max(T.s, T.e, T.a) * 1.35 / 5) * 5), zeroY = plotH * 0.5, k = (plotH * 0.5 - 4) / full;
+    ctx.strokeStyle = 'rgba(150,200,240,0.35)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, zeroY); ctx.lineTo(W, zeroY); ctx.stroke();
+    ctx.font = '9px monospace'; ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(200,225,245,0.8)';
+    for (let v = -full; v <= full; v += 5) { if (!v) continue; const y = zeroY - v * k; ctx.fillRect(W - 5, y, 5, 1); if (v % 10 === 0 && y > 12 && y < plotH - 3) ctx.fillText(String(v), W - 7, y + 3); }
+    // the trace: a narrow bright band (tissue moves as one, so the spectrum is thin)
+    const n = T.v.length;
+    for (let x = 0; x < W - 30; x++) {
+      const u = (x / (W - 30)) * 2 % 1, v = T.v[Math.min(n - 1, (u * n) | 0)], y = zeroY - v * k;
+      let h = Math.imul(x + 11, 668265263) >>> 0; h = (Math.imul(h ^ (h >>> 15), 2246822519) >>> 0) & 255;
+      const bw = 1.5 + 0.12 * Math.abs(v) * k / 4 + (h / 255);
+      ctx.fillStyle = `rgba(${225 + (h >> 4)},${215 + (h >> 4)},${190 + (h >> 3)},0.92)`;
+      ctx.fillRect(x, y - bw, 1, 2 * bw);
+      ctx.fillStyle = 'rgba(200,190,160,0.22)';
+      ctx.fillRect(x, Math.min(y, zeroY), 1, Math.abs(y - zeroY));
+    }
+    const label = (t, x, y, col, font = '9px monospace', align = 'left') => {
+      ctx.font = font; ctx.textAlign = align;
+      const w = ctx.measureText ? (ctx.measureText(t).width || 0) : 0;
+      ctx.fillStyle = 'rgba(4,6,10,0.72)';
+      ctx.fillRect(align === 'right' ? x - w - 2 : x - 2, y - 9, w + 4, 11);
+      ctx.fillStyle = col; ctx.fillText(t, x, y);
+    };
+    label(`TDI  ${pick[1]}  cm/s`, 4, 10, 'rgba(170,215,245,0.95)');
+    const f1 = (x) => x.toFixed(1);
+    label(`s' ${f1(T.s)}   e' ${f1(T.e)}   a' ${f1(T.a)}${T.EoverE ? `   E/e' ${f1(T.EoverE)}` : ''}`, W - 34, 21, 'rgba(255,225,140,0.95)', '600 10px monospace', 'right');
+    this._drawEcg(ctx, W, H, plotH, G, 2);
+    this.tdiData = { site, label: pick[1], s: T.s, e: T.e, a: T.a, E: T.E, EoverE: T.EoverE, scale: full };
+  }
+
   // One cycle of Doppler samples on the gate beam: PW, a 7-point (3 mm) sample volume
   // around the gate; CW, every 0.12 cm along the whole beam. Velocities are the
   // components toward the transducer (positive = toward, above the baseline);
@@ -2509,4 +2677,182 @@ export function dopplerColor(los, nyq, variance, jitter) {
     g = Math.min(255, g + 180 * vr);
   }
   return [r, g, b];
+}
+
+// ---------------------------------------------------------------------------
+// M-mode and tissue Doppler (the trace panel's two other modes).
+//
+// M-mode: one scan line of the current sector, sampled at every phase and laid
+// out as depth against time. Each view offers its standard lines: PLAX through
+// the LV at the mitral leaflet tips and through the aortic root and LA; A4C
+// through the lateral tricuspid annulus (TAPSE) and the lateral mitral annulus
+// (MAPSE); the subcostal IVC view across the IVC 2 cm from the RA, where the
+// trace spans three beats with a sniff in the middle one. Any other view takes
+// the central beam.
+export const MMODE_LINES = {
+  PLAX: [['lv', 'LV at the MV tips'], ['ao', 'Aortic root / LA']],
+  A4C: [['tapse', 'TV lateral annulus (TAPSE)'], ['mapse', 'MV lateral annulus (MAPSE)']],
+  SC_IVC: [['ivc', 'IVC with sniff']],
+};
+// Tissue Doppler sites (apical four-chamber view): the annular hinge points.
+export const TDI_SITES = [['mvLat', 'MV lateral annulus'], ['mvSep', 'MV septal annulus'], ['tvLat', 'TV lateral annulus']];
+// A point on the live AV annuli: the tricuspid free-wall rim (the TAPSE point),
+// or the mitral rim on the side away from (lateral) or toward (septal) the right
+// heart, at its own share of the annular excursion (mitralLift).
+export function annulusPoint(A, site) {
+  if (site === 'tvLat') return A.valves.tricuspid.lat;
+  const c = A.lv.M, T = A.valves.tricuspid.c;
+  let ux = c[0] - T[0], uz = c[2] - T[2];
+  const l = Math.hypot(ux, uz) || 1, r = (A.lv.mvR || LM.MV_R) * (site === 'mvSep' ? -1 : 1);
+  const x = c[0] + ux / l * r, z = c[2] + uz / l * r;
+  return [x, c[1] + mitralLift(x, c[1], z, A), z];
+}
+// The M-mode line of a view: the in-plane beam through the line's landmark at
+// end-diastole. Returns the beam (origin P, unit dir), its sector angle and the
+// landmark's depth along it.
+// MM_RIM: annular lines pass this far inside the rim, through the leaflet base
+// (the bright annular echo whose excursion is measured). MM_ANAT: length of an
+// anatomical line before its landmark. MM_IVC: the IVC is measured this far
+// along its axis from the caval point in the RA floor, which is ~2 cm below the
+// RA junction and just caudal to the hepatic veins' entry (ASE 2015: the maximum,
+// end-expiratory diameter 1-2 cm from the RA junction, perpendicular to the vein).
+export const MM_RIM = 0.4, MM_ANAT = 5, MM_IVC = 4.0;
+export function mmodeLine(view, key, path, probe) {
+  const A = geometryAt(0.99, path).A, P = probe.pos;
+  let q = null;
+  const out = (q, c, d) => { const x = q[0] - c[0], z = q[2] - c[2], l = Math.hypot(x, z) || 1; return [q[0] + x / l * d, q[1], q[2] + z / l * d]; };
+  if (key === 'tapse') q = out(annulusPoint(A, 'tvLat'), A.valves.tricuspid.c, -MM_RIM);
+  else if (key === 'mapse') q = out(annulusPoint(A, 'mvLat'), A.lv.M, -MM_RIM);
+  else if (key === 'lv') q = [A.lv.M[0], A.lv.M[1] - 1.6, A.lv.M[2]];
+  else if (key === 'ao') q = _add(A.valves.aortic.c, LM.U_AO, 0.9);
+  else if (key === 'ivc') { const v = A.ivc, l = Math.hypot(v.b[0] - v.a[0], v.b[1] - v.a[1], v.b[2] - v.a[2]); q = _add(v.a, [(v.b[0] - v.a[0]) / l, (v.b[1] - v.a[1]) / l, (v.b[2] - v.a[2]) / l], MM_IVC); }
+  // The line is aimed at the landmark itself (the operator angles the cursor, and
+  // tilts a degree or two, to put it through the structure); theta is where that
+  // falls in the sector. Without a landmark it is the central beam.
+  let theta = 0, depth = 8, dir = probe.dir.slice();
+  if (q) {
+    const r = [q[0] - P[0], q[1] - P[1], q[2] - P[2]];
+    const al = r[0] * probe.dir[0] + r[1] * probe.dir[1] + r[2] * probe.dir[2], la = r[0] * probe.lat[0] + r[1] * probe.lat[1] + r[2] * probe.lat[2];
+    theta = Math.atan2(la, al); depth = Math.hypot(r[0], r[1], r[2]);
+    dir = [r[0] / depth, r[1] / depth, r[2] / depth];
+  }
+  // Annular lines are anatomical M-mode lines (a cursor laid along the annulus's
+  // own path in the image, not through the sector apex): from a standard apical
+  // window the lateral tricuspid annulus travels ~40 deg off the beam, and a beam
+  // through the apex would read only the cosine of its excursion. The line runs
+  // base-ward along the end-systole -> end-diastole direction of the landmark.
+  if (key === 'tapse' || key === 'mapse') {
+    const site = key === 'tapse' ? 'tvLat' : 'mvLat';
+    const Gs = geometryAt(hemoSummary(path).tMinVol || 0.42, path).A, a = annulusPoint(A, site), b = annulusPoint(Gs, site);
+    const d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]], l = Math.hypot(d[0], d[1], d[2]);
+    if (l > 0.05) {
+      dir = [d[0] / l, d[1] / l, d[2] / l]; depth = MM_ANAT;
+      return { P: _add(q, dir, -depth), dir, theta, depth, key, anatomical: true, q };
+    }
+  }
+  return { P: P.slice(), dir, theta, depth, key };
+}
+// The breath across the IVC trace (u in beats, 0..3): quiet breathing with one
+// sniff over the middle beat.
+export function mmodeBreath(u) {
+  const quiet = 0.25 * 0.5 * (1 - Math.cos(2 * Math.PI * u / 3)), x = (u - 1.5) / 0.42, x2 = x * x;
+  return Math.max(quiet, Math.exp(-x2 * x2));
+}
+// One M-mode sweep: the tissue class of every (time, depth) cell. Depth runs
+// from d0 to d1 (cm) in `rows` cells, time over nb beats in `cols` columns.
+export function mmodeSweep(line, path, cols, rows, d0, d1) {
+  const nb = line.key === 'ivc' ? 3 : 2, t = new Uint8Array(cols * rows), dz = (d1 - d0) / rows, P = line.P, u = line.dir;
+  const breath0 = ivcBreath({});
+  for (let c = 0; c < cols; c++) {
+    const b = c * nb / cols, ph = b - Math.floor(b);
+    if (line.key === 'ivc') setIvcBreath(mmodeBreath(b));
+    const G = geometryAt(ph, path);
+    for (let r = 0; r < rows; r++) {
+      const d = d0 + (r + 0.5) * dz;
+      t[c * rows + r] = classify(P[0] + u[0] * d, P[1] + u[1] * d, P[2] + u[2] * d, G, path).tissue;
+    }
+  }
+  setIvcBreath(breath0);
+  return { t, cols, rows, d0, d1, dz, nb, key: line.key, depth: line.depth };
+}
+const MM_ATR = new Set([TISSUE.LA, TISSUE.RA]);
+// M-mode grey level of each tissue class (0..1)
+const MM_GREY = { [TISSUE.OUTSIDE]: 0.3, [TISSUE.MYO]: 0.42, [TISSUE.LV]: 0.03, [TISSUE.RV]: 0.03, [TISSUE.LA]: 0.03, [TISSUE.RA]: 0.03,
+  [TISSUE.AORTA]: 0.03, [TISSUE.VALVE]: 0.88, [TISSUE.PERICARDIUM]: 0.015, [TISSUE.LUNG]: 0.5, [TISSUE.PERI_LINE]: 0.95, [TISSUE.LIVER]: 0.36,
+  [TISSUE.VEIN]: 0.03, [TISSUE.FAT]: 0.6, [TISSUE.VWALL]: 0.72 };
+// Read an M-mode sweep the way a caliper does. For an annular line: the depth of
+// the annulus echo (where the line passes the leaflet base into the atrium, the
+// edge nearest the landmark, followed from column to column) and its excursion, deepest minus shallowest. For the IVC
+// line: the lumen's width in every column, its maximum and minimum and the
+// collapse 1 - min/max.
+export function mmodeRead(S) {
+  const { t, cols, rows, d0, dz } = S;
+  if (S.key === 'ivc') {
+    // the lumen (drawn as caval blood continuous with the RA) around the line's
+    // landmark, which lies on the vein's axis
+    const r0 = Math.round((S.depth - d0) / dz), lum = (c, r) => { const x = t[c * rows + r]; return x === TISSUE.RA || x === TISSUE.VEIN; };
+    let dMax = 0, dMin = 1e9;
+    const w = new Float32Array(cols);
+    for (let c = 0; c < cols; c++) {
+      let a = r0, b = r0;
+      if (!lum(c, r0)) { w[c] = 0; dMin = 0; continue; }
+      while (a > 0 && lum(c, a - 1)) a--;
+      while (b < rows - 1 && lum(c, b + 1)) b++;
+      w[c] = (b - a + 1) * dz;
+      if (w[c] > dMax) dMax = w[c];
+      if (w[c] < dMin) dMin = w[c];
+    }
+    return { width: w, dMax, dMin, collapse: dMax > 0 ? 1 - dMin / dMax : 0 };
+  }
+  const edge = new Float32Array(cols), atr = (c, r) => MM_ATR.has(t[c * rows + r]);
+  let prev = S.depth, lo = 1e9, hi = -1e9;
+  for (let c = 0; c < cols; c++) {
+    let best = -1, bd = 1e9;
+    for (let r = 1; r < rows; r++) {
+      if (!atr(c, r - 1) && atr(c, r)) {
+        const d = d0 + r * dz, e = Math.abs(d - prev);
+        if (e < bd) { bd = e; best = d; }
+      }
+    }
+    if (best < 0) best = prev;
+    edge[c] = best; prev = best;
+    if (best < lo) lo = best;
+    if (best > hi) hi = best;
+  }
+  return { edge, min: lo, max: hi, excursion: hi - lo };
+}
+// Tissue Doppler of an annular site from the probe at P: the annulus velocity
+// along the beam, d(position)/dt by central differences of the live annulus
+// point, in cm/s and positive toward the probe (s' up; e' and a' down, as on an
+// apical trace). e' is the early-diastolic peak, a' the late one (after the P
+// wave), s' the systolic peak after isovolumic contraction. E is the peak of
+// the early mitral inflow at the leaflet tips (m/s).
+export function tdiTrace(site, path, P, rrSec = 0.833, n = 240) {
+  const A0 = geometryAt(0.99, path).A, q0 = annulusPoint(A0, site);
+  let dx = q0[0] - P[0], dy = q0[1] - P[1], dz = q0[2] - P[2];
+  const l = Math.hypot(dx, dy, dz); dx /= l; dy /= l; dz /= l;
+  const v = new Float32Array(n);
+  let prev = annulusPoint(geometryAt(0, path).A, site);
+  for (let i = 0; i < n; i++) {
+    const cur = annulusPoint(geometryAt((i + 1) / n % 1, path).A, site);
+    v[i] = -((cur[0] - prev[0]) * dx + (cur[1] - prev[1]) * dy + (cur[2] - prev[2]) * dz) / (rrSec / n);
+    prev = cur;
+  }
+  const s = hemoSummary(path), tES = s.tMinVol || 0.42;
+  let sp = 0, ep = 0, ap = 0;
+  for (let i = 0; i < n; i++) {
+    const ph = (i + 0.5) / n;
+    if (ph > 0.06 && ph < tES) sp = Math.max(sp, v[i]);
+    else if (ph >= tES && ph < 0.76) ep = Math.max(ep, -v[i]);
+    else if (ph >= 0.8) ap = Math.max(ap, -v[i]);
+  }
+  let E = 0;
+  if (site !== 'tvLat') {
+    const ax = DAX.mitralIn;
+    for (let ph = 0.4; ph < 0.74; ph += 0.01) {
+      const G = geometryAt(ph, path), q = _add(G.A.valves.mitral.c, ax, 0.5), w = velocityAt(q[0], q[1], q[2], G, path);
+      if (w) E = Math.max(E, Math.abs(w.vx * ax[0] + w.vy * ax[1] + w.vz * ax[2]));
+    }
+  }
+  return { v, s: sp, e: ep, a: ap, E, EoverE: ep > 0 && E > 0 ? E * 100 / ep : null, site, rrSec };
 }

@@ -678,16 +678,25 @@ function anchorToSeptum(E, sgn, pen) {
 // diameter <= 2.1 cm collapsing > 50 % on sniff -> 3 mmHg; > 2.1 cm collapsing
 // < 50 % -> 15 mmHg; anything in between -> 8 mmHg.
 export function rapEstimate(ivc) {
-  const d = 2 * ivc.r, small = d <= 2.1, collapses = (ivc.collapse != null ? ivc.collapse : 0.55) > 0.5;
+  const d = 2 * (ivc.rMax != null ? ivc.rMax : ivc.r), small = d <= 2.1, collapses = (ivc.collapse != null ? ivc.collapse : 0.55) > 0.5;
   return small && collapses ? 3 : !small && !collapses ? 15 : 8;
 }
 // IVC radius (cm) and sniff collapse (fraction) for a mean RA pressure (mmHg), the
 // inverse of rapEstimate: <= ~5 mmHg a 1.8 cm IVC halving on sniff (RAP 3); 7-9
 // a dilated (> 2.1 cm) IVC that still collapses (RAP 8); >= ~10 a plethoric
 // 2.5 cm IVC collapsing < 50 % (RAP 15).
+// Respiration. The IVC narrows as the intrathoracic pressure falls: by its sniff
+// collapse fraction on a full sniff (breath 1) and by about a quarter of that in
+// quiet inspiration (ASE 2010/2015 RA-pressure estimate: the maximum, expiratory
+// diameter 1-2 cm from the RA and its percentage collapse on a sniff). The UI's
+// respiratory clock sets the breath with setIvcBreath (0 = end expiration);
+// path.sniff (0..1) overrides it, so a case can be drawn at a stated breath.
+let _ivcBreath = 0;
+export function setIvcBreath(s) { _ivcBreath = Math.max(0, Math.min(1, +s || 0)); }
+export function ivcBreath(path = {}) { return path.sniff != null ? Math.max(0, Math.min(1, +path.sniff || 0)) : _ivcBreath; }
 export function ivcOfRap(rap) {
   const t = (x, a, b) => Math.max(0, Math.min(1, (x - a) / (b - a)));
-  return { r: 0.9 + 0.35 * t(rap, 4.6, 9), collapse: 0.55 - 0.35 * t(rap, 9.4, 11) };
+  return { r: 0.9 + 0.35 * t(rap, 4.6, 9), collapse: 0.55 - 0.4 * t(rap, 9.4, 10.6) };
 }
 // Right-heart loading per pathology (shared by the anatomy and the coarse proxies
 // in cardiac-model). rvC scales RV contractility — TAPSE, free-wall (FAC) and
@@ -1056,7 +1065,9 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
       svc: { a: sa, ...course(sa), r: CAVA.svcR },     // d 1.6
       // sniff: the IVC halves in calibre with normal RA pressure; plethoric with
       // raised RA pressure it barely collapses (< 50 %)
-      ivc: { a: add(ia, tether), b: mad(add(ia, tether), unit(mad(BODY_AX.I, SEPT_V, CAVA.ivcTilt)), 11.0), r: ivcR,
+      ivc: { a: add(ia, tether), b: mad(add(ia, tether), unit(mad(BODY_AX.I, SEPT_V, CAVA.ivcTilt)), 11.0),
+        // r is the calibre now (it breathes); rMax the expiratory one that is reported
+        r: ivcR * (1 - ivcS.collapse * ivcBreath(path)), rMax: ivcR,
         collapse: ivcS.collapse },
     };
   })();

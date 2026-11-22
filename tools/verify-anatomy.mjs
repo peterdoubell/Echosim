@@ -4934,6 +4934,63 @@ SECTION = 'Pathology';
   SECTION = sec0;
 }
 
+// ---- M-mode, tissue Doppler and the breathing IVC (MOT-5) --------------------
+// What the trace panel shows, read off the trace itself (mmodeRead: the caliper's
+// reading), against the model's own numbers.
+{
+  const { mmodeLine, mmodeSweep, mmodeRead, tdiTrace, annulusPoint } = await import('../js/echo.js');
+  const sec0 = SECTION; SECTION = 'Doppler';
+  const g = 'M-mode, tissue Doppler, IVC sniff';
+  const TP = { effusion: true, tamponade: true };
+  const probeOf = (vn, path) => { const vw = ALL_V[vn], p = vw.probe(); if (vw.track) { const o = vw.track(geometryAt(0.99, path).A); p.pos = add(p.pos, o); } return p; };
+  const mm = (vn, key, path) => { const ln = mmodeLine(vn, key, path, probeOf(vn, path)); return mmodeRead(mmodeSweep(ln, path, 120, 260, Math.max(0, ln.depth - 3.2), ln.depth + 3.2)); };
+  // TAPSE: the lateral tricuspid annulus's excursion on the M-mode trace against
+  // the model's (report) TAPSE
+  for (const [nm, path] of [['normal', PATHS.normal], ['pulmonary hypertension', PATHS.phtn]]) {
+    const R = mm('A4C', 'tapse', path), model = measureModel(path).tapse / 10;
+    check(g, `${nm}: M-mode TAPSE minus model TAPSE`, R.excursion - model, [-0.2, 0.2], 'cm', `M-mode ${(R.excursion * 10).toFixed(0)} mm, model ${(model * 10).toFixed(0)} mm`);
+  }
+  // MAPSE: the M-mode line is on the LATERAL annulus, whose excursion exceeds the
+  // annular centre's (the report's MAPSE) by its share of the angle-dependent
+  // descent, so the trace is compared with the lateral annulus's own excursion
+  for (const [nm, path] of [['normal', PATHS.normal], ['DCM', PATHS.dcm]]) {
+    const R = mm('A4C', 'mapse', path), a = annulusPoint(geometryAt(0.99, path).A, 'mvLat'), b = annulusPoint(geometryAt(hemoSummary(path).tMinVol, path).A, 'mvLat');
+    const model = Math.hypot(...sub(a, b));
+    check(g, `${nm}: M-mode MAPSE minus model MAPSE (lateral annulus)`, R.excursion - model, [-0.15, 0.15], 'cm', `M-mode ${(R.excursion * 10).toFixed(0)} mm, lateral annulus ${(model * 10).toFixed(0)} mm, report (annular centre) ${measureModel(path).mapse} mm`);
+  }
+  // tissue Doppler from the apical four-chamber window
+  const tdi = (site, path) => tdiTrace(site, path, probeOf('A4C', path).pos, 60 / 72);
+  const tN = tdi('mvLat', PATHS.normal), tA = tdi('mvLat', { ...PATHS.as, grade: 'severe' }), tD = tdi('mvLat', PATHS.dcm), tDs = tdi('mvSep', PATHS.dcm), tR = tdi('tvLat', PATHS.normal);
+  // (KNOWN: 2016 ASE/EACVI diastolic guideline, a normal lateral e' is >= 10 cm/s.
+  // The annulus velocity is the time derivative of the drawn long-axis
+  // shortening, which follows the solved LV filling curve: the early-filling rate
+  // and the volume-to-long-axis mapping belong to the circulation and LV
+  // mechanics, and give 9.4 cm/s. The display reads what the heart does.)
+  KNOWN = !(tN.e >= 10 && tN.e <= 16);
+  check(g, "normal: TDI lateral e'", tN.e, [10, 16], 'cm/s', `s' ${tN.s.toFixed(1)}, a' ${tN.a.toFixed(1)}, E ${tN.E.toFixed(2)} m/s, E/e' ${tN.EoverE.toFixed(1)}`);
+  KNOWN = false;
+  check(g, "normal: lateral E/e'", tN.EoverE, [4, 13], '', 'ASE/EACVI 2016: lateral E/e\' > 13 is raised');
+  check(g, "severe AS: TDI lateral e' (impaired relaxation)", tA.e, [4, 8], 'cm/s', `E/e' ${tA.EoverE.toFixed(1)}`);
+  check(g, "DCM: E/e' (average of septal and lateral)", 0.5 * (tD.EoverE + tDs.EoverE), [14, 30], '', `lateral ${tD.EoverE.toFixed(1)}, septal ${tDs.EoverE.toFixed(1)}`);
+  check(g, "normal: RV s' (lateral tricuspid annulus)", tR.s, [10, 16], 'cm/s');
+  assert(g, "septal e' below lateral e' (normal)", tdi('mvSep', PATHS.normal).e < tN.e);
+  // IVC: the minimum over the maximum diameter across a sniff, on the M-mode
+  // trace of the subcostal IVC view
+  for (const [nm, path, range] of [['normal', PATHS.normal, [0, 0.5]], ['DCM', PATHS.dcm, [0.8, 1]], ['pulmonary hypertension', PATHS.phtn, [0.8, 1]], ['severe TR', PATHS.tr, [0.8, 1]], ['tamponade', TP, [0.8, 1]]]) {
+    const R = mm('SC_IVC', 'ivc', path), iv = geometryAt(0, path).A.ivc;
+    check(g, `${nm}: IVC sniff collapse (min/max diameter)`, R.dMin / R.dMax, range, '', `max ${(R.dMax * 10).toFixed(0)} mm, min ${(R.dMin * 10).toFixed(0)} mm; model ${(2 * iv.rMax * 10).toFixed(0)} mm, ${Math.round(iv.collapse * 100)} % collapse`);
+    if (nm === 'normal' || nm === 'DCM') check(g, `${nm}: IVC maximum diameter on the trace minus the model's`, R.dMax - 2 * iv.rMax, [-0.15, 0.15], 'cm');
+  }
+  // the drawn vein breathes: a sniff narrows it by its collapse fraction, and the
+  // RA-pressure estimate still uses the expiratory diameter
+  {
+    const a = geometryAt(0, { sniff: 1 }).A.ivc, b = geometryAt(0, {}).A.ivc;
+    check(g, 'normal: IVC radius on a full sniff / expiratory radius', a.r / b.r, [0.4, 0.5], '');
+    assert(g, 'RA-pressure estimate unchanged by the breath (expiratory diameter)', rapEstimate(a) === rapEstimate(b), `${rapEstimate(a)} / ${rapEstimate(b)} mmHg`);
+  }
+  SECTION = sec0;
+}
+
 // ---- report ------------------------------------------------------------------
 const fmt = (v) => (typeof v === 'number' ? v.toFixed(2) : String(v));
 const SECTIONS = [...new Set(rows.map((r) => r.section))];

@@ -10,7 +10,8 @@ import { buildReport, reportText, fillTemplate, TEMPLATES, TEMPLATE_FOR, DEFAULT
 import { initFeedback } from './feedback.js';
 import { initPathway } from './pathway-ui.js';
 import { Heart3D } from './heart3d.js';
-import { EchoView, colourDefault, dopplerColor, teeSiteChoices } from './echo.js';
+import { EchoView, colourDefault, dopplerColor, teeSiteChoices, MMODE_LINES, TDI_SITES } from './echo.js';
+import { setIvcBreath } from './anatomy.js';
 import { MeasureTool } from './measure.js';
 import { vadd, vsub, vscale, vdot, vcross, norm, vrot } from './mathutils.js';
 import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, makeProbe, teeManipulate, teeOmni, sectorHalfOf, nearestTeePreset } from './views.js';
@@ -337,6 +338,8 @@ let lastBannerT = 0;   // throttle for the probe-banner frame-rate readout
 // Treat hidden tabs as suspended playback rather than queuing stale images or
 // fast-forwarding a lesson when the learner comes back.
 document.addEventListener('visibilitychange', () => { state.lastT = performance.now(); });
+// respiratory clock (seconds of running time) and the time of the last sniff
+const resp = { t: 0, sniffAt: null };
 function loop(now) {
   // rAF's timestamp can predate other expensive callbacks in the same frame.
   // Read the clock here, and never clamp away elapsed foreground time.
@@ -357,6 +360,19 @@ function loop(now) {
     scrub.setAttribute('aria-valuetext', Math.round(state.phase * 100) + '% — ' + phaseName(state.phase));
   }
 
+  // Respiration: quiet breathing (a 4 s cycle) and, on the Sniff button, one
+  // brisk inspiration over ~1.6 s. Only the IVC's calibre follows it.
+  if (advancing) resp.t += dt;
+  {
+    const quiet = 0.25 * 0.5 * (1 - Math.cos(2 * Math.PI * resp.t / 4));
+    let sn = 0;
+    if (resp.sniffAt != null) {
+      const x = (resp.t - resp.sniffAt - 0.8) / 0.62, x2 = x * x;
+      sn = Math.exp(-x2 * x2);
+      if (resp.t - resp.sniffAt > 1.8) resp.sniffAt = null;
+    }
+    setIvcBreath(Math.max(quiet, sn));
+  }
   const G = geometryAt(state.phase, state.path);
   const probe = effectiveProbe(G.A);
 
@@ -663,6 +679,7 @@ function publishMeasure(r) {
 function setView(name) {
   state.viewName = name;
   if (echo) echo.viewName = name; // let the echo label whitelist know the current view
+  if (echo) queueMicrotask(() => { if (typeof refreshTrace === 'function') refreshTrace(); });
   const tee = TEE_VIEWS[name];
   if (tee) {
     state.baseProbe = tee.probe();
@@ -1011,6 +1028,36 @@ function pickTeeSite(k) {
   if (lab) lab.textContent = `Spectral Doppler (${name || 'standard site for the view'} · 1 cardiac cycle)`;
 }
 document.getElementById('teeSite')?.addEventListener('change', (e) => pickTeeSite(e.target.value || null));
+// Trace panel: spectral Doppler, M-mode or tissue Doppler. The second selector
+// lists the M-mode lines of the view (or the tissue Doppler sites).
+function refreshTrace() {
+  const mode = document.getElementById('traceMode'), sel = document.getElementById('traceLine'), cv = document.getElementById('spectral');
+  if (!mode || !sel) return;
+  const m = mode.value, list = m === 'mmode' ? (MMODE_LINES[state.viewName] || [['beam', 'Central beam']]) : m === 'tdi' ? TDI_SITES : [];
+  const keep = sel.value;
+  sel.innerHTML = '';
+  for (const [k, name] of list) { const o = document.createElement('option'); o.value = k; o.textContent = name; sel.appendChild(o); }
+  if (list.some((l) => l[0] === keep)) sel.value = keep;
+  sel.classList.toggle('hidden', !list.length);
+  echo.traceMode = m === 'doppler' ? null : m;
+  echo.mmodeKey = m === 'mmode' ? sel.value : null;
+  echo.tdiSite = m === 'tdi' ? sel.value : null;
+  echo.mmodeCal = [];
+  echo.mmodeData = null; echo.tdiData = null;      // (stale readouts of the previous line)
+  if (cv) cv.classList.toggle('mm-cal', m === 'mmode');
+  const lab = document.getElementById('spLabel');
+  if (lab && m !== 'doppler') lab.textContent = m === 'mmode' ? 'M-mode (depth against time · click two points on the trace to measure)' : 'Tissue Doppler of the annulus (apical four-chamber view · 2 cardiac cycles)';
+  else if (lab) pickTeeSite(echo.dopplerSite || null);
+}
+document.getElementById('traceMode')?.addEventListener('change', refreshTrace);
+document.getElementById('traceLine')?.addEventListener('change', refreshTrace);
+document.getElementById('sniffBtn')?.addEventListener('click', () => { resp.sniffAt = resp.t; });
+document.getElementById('spectral')?.addEventListener('click', (e) => {
+  if (echo.traceMode !== 'mmode') return;
+  const cv = e.currentTarget, r = cv.getBoundingClientRect();
+  const q = { x: (e.clientX - r.left) * cv.width / r.width, y: (e.clientY - r.top) * cv.height / r.height };
+  echo.mmodeCal = (echo.mmodeCal || []).length >= 2 ? [q] : [...(echo.mmodeCal || []), q];
+});
 bind('gain', 'gainOut', (v) => (echo.gain = v));
 bind('nyq', 'nyqOut', (v) => (echo.nyquist = v), '', ' m/s');
 bind('pers', 'persOut', (v) => (echo.persistence = v));
@@ -1425,7 +1472,7 @@ function lockForCase(on) {
       '<div class="quiz"><b>🎓 Pathway case</b><br>Answer the question in the pathway. The diagnosis stays hidden until you answer.</div>';
   }
 }
-function simLoad({ path: key = 'normal', grade = 'severe', view, rwma, dcmSeverity, hidden = false, hideView = false } = {}) {
+function simLoad({ path: key = 'normal', grade = 'severe', view, rwma, dcmSeverity, hidden = false, hideView = false, trace, line } = {}) {
   if (challenge.active) challengeBtn.click();
   if (hidden && !pathwayCase.prev) pathwayCase.prev = { key: state.pathKey || 'normal', view: state.viewName, grade: state.path.grade || 'severe', rwma: state.path.rwma, dcmSeverity: state.path.dcmSeverity };
   state.pathKey = key;
@@ -1433,6 +1480,11 @@ function simLoad({ path: key = 'normal', grade = 'severe', view, rwma, dcmSeveri
   if (key === 'rwma' && RWMA_SCENARIOS[rwma]) state.path.rwma = rwma;
   if (key === 'dcm' && DCM_SEVERITIES[dcmSeverity]) state.path.dcmSeverity = dcmSeverity;
   setView(view || PATHOLOGY[key].view);
+  // the trace panel: a task may ask for M-mode or tissue Doppler on a given line
+  {
+    const tm = document.getElementById('traceMode'), tl = document.getElementById('traceLine');
+    if (tm && tl) { tm.value = trace === 'mmode' || trace === 'tdi' ? trace : 'doppler'; refreshTrace(); if (line) { tl.value = line; refreshTrace(); } }
+  }
   setGradeButtons(grade);
   if (hidden) {
     pathwayCase.active = true;
