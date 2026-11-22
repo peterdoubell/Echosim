@@ -4296,10 +4296,29 @@ SECTION = 'Pathology';
     check(g2, 'severe AS: LA AP diameter (PLAX, ES)', len(r), [4.0, 5.5]);   // (impaired relaxation: the AS LA is mildly dilated, LAVi ~57)
   }
   {
-    // severe MS: spontaneous echo contrast in the LA
-    const lag = (path) => { const R = renderBmode('A4C', 0.3, path); let s = 0, n = 0; for (let k = 0; k < R.SW * R.SH; k++) if (R.kind[k] === TISSUE.LA) { s += R.grey[k]; n++; } return n ? s / n : 0; };
-    const ms = lag(PATHS.ms), nl = lag({});
-    check(g2, 'severe MS: mean LA blood grey (A4C) / normal (spontaneous echo contrast)', ms / Math.max(1, nl), [1.5, 8], '', `${ms.toFixed(1)} vs ${nl.toFixed(1)}`);
+    // severe MS: spontaneous echo contrast in the LA — faint smoke, clearly darker
+    // than myocardium, with crisp LA walls (review 12, PAT-6).
+    // Measured in PLAX, mid-diastole. (The row used to compare the A4C LA with the
+    // normal A4C LA; that only passed because the smoke was +20 dB, near tissue
+    // echogenicity. From the apex the beams reach the LA through the calcified
+    // mitral leaflets, so the MS LA lies in their acoustic shadow: without any
+    // smoke its mean grey is 0.27 of the normal LA's, and with smoke of realistic
+    // density 0.4. The apical LA grey therefore measures the shadow, not the
+    // smoke; SEC is graded where the LA is not shadowed — Fatkin et al., JACC
+    // 1994;23:961: faint swirling echoes, graded on the unshadowed LA — here the
+    // parasternal long axis, with the same [1.5, 8] range against the normal LA.)
+    const stat = (R, pick) => { const v = []; for (let k = 0; k < R.SW * R.SH; k++) if (pick(k)) v.push(R.grey[k]); v.sort((p, q) => p - q); const n = v.length; return { mean: n ? v.reduce((p, q) => p + q, 0) / n : 0, med: n ? v[n >> 1] : 0, p90: n ? v[Math.floor(n * 0.9)] : 0 }; };
+    const R = renderBmode('PLAX', 0.62, PATHS.ms), Rn = renderBmode('PLAX', 0.62, {});
+    const isK = (Rr, t) => (k) => Rr.kind[k] === t;
+    const la = stat(R, isK(R, TISSUE.LA)), myo = stat(R, isK(R, TISSUE.MYO)), lan = stat(Rn, isK(Rn, TISSUE.LA));
+    check(g2, 'severe MS: mean LA blood grey (PLAX) / normal (spontaneous echo contrast)', la.mean / Math.max(1, lan.mean), [1.5, 8], '', `${la.mean.toFixed(1)} vs ${lan.mean.toFixed(1)}`);
+    // the smoke at its densest against the myocardium: the LA interior only (>= 0.4 cm from any pixel of another
+    // tissue, so the point-spread bloom of the walls and of the calcified
+    // leaflets, which is there without any smoke, is not counted as smoke)
+    const m = Math.round(0.4 * R.pxPerCm);
+    const inner = (t) => (k) => { if (R.kind[k] !== t) return false; const i = k % R.SW, j = (k - i) / R.SW; if (i < m || j < m || i >= R.SW - m || j >= R.SH - m) return false; for (const [di, dj] of [[m, 0], [-m, 0], [0, m], [0, -m], [m, m], [-m, -m], [m, -m], [-m, m]]) if (R.kind[(j + dj) * R.SW + i + di] !== t) return false; return true; };
+    const li = stat(R, inner(TISSUE.LA));
+    check(g2, 'MS PLAX: LA interior p90 grey / myocardium median grey (smoke darker than muscle)', li.p90 / Math.max(1, myo.med), [0, 0.6], '', `${li.p90} vs ${myo.med}`);
   }
   {
     // chronic septal infarct: a thinned, echo-bright scar
