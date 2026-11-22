@@ -5489,18 +5489,22 @@ SECTION = 'Pathology';
 // ---- review 12: venous and outflow Doppler from the solved circulation ------
 {
   SECTION = 'Doppler';
-  const { LVOT_CSA } = await import('../js/cardiac-model.js');
+  const { LVOT_CSA, phaseOfTime: hvPhase } = await import('../js/cardiac-model.js');
   const g = 'Venous Doppler from the solved caval / pulmonary-venous inflow';
   // hepatic vein (SC IVC default PW): forward = toward the RA = away from the
   // subcostal transducer (vs < 0). Per beat: S = forward peak in systole (beat
   // phase < 0.45), D = forward peak in 0.45-0.8, reversal = retrograde peak.
+  // (The trace runs in time and the windows are cardiac phases, phaseOfTime, as
+  // for the tamponade tips traces: at the tamponade case's 110 bpm systole lasts
+  // to 0.56 of the beat's duration, and a window cut at 0.45 of the time read the
+  // second half of the S wave as the D wave. The identity at 72 bpm.)
   const hvBeats = (p) => {
     const sp = renderDoppler('SC_IVC', 0.2, p, { color: false }).spec, nb = sp.beats || 1, out = [];
     for (let b = 0; b < nb; b++) {
       let S = 0, D = 0, Srev = 0, Drev = 0, AR = 0, cS = -1, cD = -1;
       for (let c = 0; c < sp.cols; c++) {
         const u = c * nb / sp.cols; if (Math.floor(u) !== b) continue;
-        const ph = u - b, f = -sp.vs[c];
+        const ph = hvPhase(u - b, p), f = -sp.vs[c];
         if (ph < 0.45) { if (f > S) { S = f; cS = c; } Srev = Math.max(Srev, -f); } else if (ph < 0.8) { if (f > D) { D = f; cD = c; } Drev = Math.max(Drev, -f); } else AR = Math.max(AR, -f);
       }
       // v point: the slowest forward flow between the S and D peaks
@@ -5528,10 +5532,16 @@ SECTION = 'Pathology';
   for (const [nm, bs] of [['normal', [hn]], ['severe TR', [htr]], ['PH', hvBeats(PATHS.phtn)], ['severe DCM', hvBeats(PATHS.dcm)], ['tamponade', ht]]) {
     check(g, `${nm} HV PW: peak reversal velocity (all beats)`, Math.max(...bs.map((b) => Math.max(b.Srev, b.Drev, b.AR))), [0, 0.8], 'm/s', bs.map((b) => `S ${b.S.toFixed(2)} D ${b.D.toFixed(2)} rev ${Math.max(b.Srev, b.Drev, b.AR).toFixed(2)}`).join('; '));
   }
-  // KNOWN-FAIL pending tamp: this ratio depends on the expiratory caval reversal
-  // the pericardial constraint produces, which the tamponade work item retunes
+  // KNOWN-FAIL (open after the tamponade retune on the merged model): the
+  // expiratory hepatic-vein reversal comes from the RA kick alone and is about
+  // the size of the normal AR (~0.13 m/s). A kick strong enough to double it
+  // (an a wave ~2.5 mmHg above the mean RAP against the stiff, plethoric veins)
+  // makes the tricuspid A exceed the E in both respiratory phases, which the
+  // QtvA / QtvE rows forbid; the model has no separate mechanism for the
+  // expiratory diastolic reversal (the expiratory fall in venous return is a
+  // steady state here, not a transient).
   KNOWN = true;
-  check(g, 'tamponade HV: expiratory diastolic reversal peak / normal', hn.AR > 0 ? ht[0].diaRev / hn.AR : null, [2, 10], '', `pending tamp; exp ${ht[0].diaRev.toFixed(2)} vs normal AR ${hn.AR.toFixed(2)} m/s`);
+  check(g, 'tamponade HV: expiratory diastolic reversal peak / normal', hn.AR > 0 ? ht[0].diaRev / hn.AR : null, [2, 10], '', `open: the RA kick alone, see comment; exp ${ht[0].diaRev.toFixed(2)} vs normal AR ${hn.AR.toFixed(2)} m/s`);
   KNOWN = false;
   // the giant RA c-v wave of severe TR reverses systolic caval flow (the TR
   // right-atrial retune of the right-heart work item)

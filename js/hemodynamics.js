@@ -568,9 +568,23 @@ function rightHeartParams(path, g) {
     // each respiratory phase. The RA wall buckles once it has emptied, after its
     // contraction, and stays in until it refills in systole. Equalised diastolic
     // pressures ~15 mmHg (RAP 15, LA 18); the swing between expiration and
-    // inspiration (aortic ~111/69 vs ~84/52) is a pulsus paradoxus of ~27 mmHg, with
-    // the mitral E falling ~28 % and the tricuspid E rising ~46 % in inspiration)
-    Object.assign(r, { Ppc: 14, Kpc: 0.07, Era: 0.123, V0ra: 11.6, Ermin: 0.013, V0rv: 20, laOff: 3.7, respLa: 0.58, septShift: 0.33, V0la: 15, aWave: 9.4, aRa: 5.5 });
+    // inspiration (aortic ~113/69 vs ~85/52) is a pulsus paradoxus of ~28 mmHg, with
+    // the mitral E falling ~27 % and the tricuspid E rising ~45 % in inspiration)
+    // (with the annular descent and the compliant caval bed of the merged model:
+    // raDesc 10, not the normal 38 — the small, underfilled RV inside a tense sac
+    // ejects ~30 mL and its annulus travels little, so the RA gains only a small
+    // systolic capacity; the full descent kept the RA below its buckling pressure
+    // for 0.7 of the cycle and, returned by the atrial kick, made the tricuspid A
+    // twice the E. Kpc 0.125, between the 0.07 of the tachycardic retune and the
+    // 0.20 tuned with the descent at 72 bpm: the tense sac holds the diastolic
+    // caval inflow down, and with the plethoric, low-resistance cavae and hepatic
+    // veins (Rsv 0.009, as in severe TR) the hepatic-vein flow is systolic-dominant,
+    // D/S < 0.4 in every breath, while E and A still stand apart on both valves.
+    // A slightly stiffer RV (Ermin 0.018) ends the short E sooner and the RA
+    // booster (aRa 4.8) is retuned to the larger atrial preload the descent leaves:
+    // tricuspid A/E ~0.9-0.95, the A 7-13 % above the E-wave trough.)
+    Object.assign(r, { Ppc: 14, Kpc: 0.125, Era: 0.123, V0ra: 11.6, Ermin: 0.018, V0rv: 20, laOff: 3.7, respLa: 0.58, septShift: 0.33, V0la: 15, aWave: 9.4, aRa: 4.8,
+      raDesc: 10, Rsv: 0.009 });
     // (vr: the venous return, up in inspiration as the pleural pressure falls)
     if (path.resp === 'insp') r.vr = 1.47;
     if (path.resp === 'exp') r.vr = 0.75;
