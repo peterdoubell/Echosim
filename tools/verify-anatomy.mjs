@@ -1608,17 +1608,7 @@ const worstOf = (xs) => xs.reduce((m, v) => (v.val > m.val ? v : m), { val: -1e9
   for (const [G, ph] of [[GED, 'ED'], [GES, 'ES']]) {
     for (const vn of ['A2C', 'A4C', 'A3C', 'MECOMM']) {
       const S = planeSample(TTE_VIEWS[vn] || EXTRA_VIEWS[vn] || TEE_VIEWS[vn], G, {}, 0.05);
-      // (merge of the LV papillary repair with the TEE plane rebuild: the ME
-      // commissural plane is now the ME4C transducer turned +60 deg at the common
-      // mid-oesophageal station, and it runs along both muscles' free flanks from
-      // 0.57 of their height (the TG SAX level, where the TGSAX rows need a
-      // 1.5-6 mm gap all round) down to ~0.25, so the lower 40 % shows the same
-      // cleft as the lower 70 % (0.85 cm; 0.00 on the plane the papillary repair
-      // was fitted to). The attached-base rows of the TTE planes and the ES rows
-      // hold. Same cause as the lower-70 % row below.)
-      KNOWN = ph === 'ED' && vn === 'MECOMM';
-      check('Papillary', `${vn} (${ph}): blood cleft between a papillary muscle and the wall over its lower 40 %`, cleft(S, G, 0.4), [0, 0.15], 'cm', KNOWN ? 'merge lv x tee: the rebuilt ME commissural plane runs along both muscles\' free flanks' : '');
-      KNOWN = false;
+      check('Papillary', `${vn} (${ph}): blood cleft between a papillary muscle and the wall over its lower 40 %`, cleft(S, G, 0.4), [0, 0.15]);
       // KNOWN-FAIL at ED in A2C and ME commissural (A4C and A3C pass): the TG
       // mid SAX (a short-axis plane 3.6 cm below the annulus) cuts both muscles
       // at ~0.57 of their base-to-head height, where the TGSAX rows require a
@@ -1632,9 +1622,10 @@ const worstOf = (xs) => xs.reduce((m, v) => (v.val > m.val ? v : m), { val: -1e9
       // rows at 2.8 / 6.6 h and the TGSAX posteromedial gap at 0.11 cm. The A4C
       // passes because the anterolateral body runs anterior of that plane above
       // its fillet (anatomy.js PAP). The posteromedial muscle lies along both ME
-      // commissural planes (0.70 cm here, 0.40 in the ME4C + 60 deg rebuild)
-      // and the A2C cuts its upper body (0.40). At ES all four pass (systolic
-      // fillet rise).
+      // commissural plane (0.55 cm on the ME4C + 65 deg preset with its
+      // MECOMM_TURN turn, views.js; 0.70 on the plane the papillary repair was
+      // fitted to, 0.85 with the beam left on the ME4C line) and the A2C cuts
+      // its upper body (0.40). At ES all four pass (systolic fillet rise).
       KNOWN = ph === 'ED' && (vn === 'A2C' || vn === 'MECOMM');
       check('Papillary', `${vn} (${ph}): blood cleft between a papillary muscle and the wall over its lower 70 %`, cleft(S, G, 0.7), [0, 0.15]);
       KNOWN = false;
@@ -1673,16 +1664,15 @@ const worstOf = (xs) => xs.reduce((m, v) => (v.val > m.val ? v : m), { val: -1e9
     return tot ? Math.max(...sz) / tot : 0;
   };
   check('Papillary', 'MECOMM: LV blood pool in one piece at ED (largest component share)', lvShare(GED), [0.97, 1], '');
-  // KNOWN-FAIL: at ES the closed leaflets sit below the LA/LV label boundary
-  // (normal systolic tenting), so the LV-labelled blood on their atrial side,
-  // between the annulus and the leaflet bodies, is a separate 0.5-0.7 cm2
-  // component (share 0.953). No papillary tissue bounds it, and the ME4C +
-  // 60 deg plane of the TEE probe rebuild cuts the same pocket (share 0.953),
-  // so that rebuild does not fix it: it is a mitral tenting / label-boundary
-  // issue, not the papillary column.
-  KNOWN = true;
+  // At ES the closed leaflets sit below the LA/LV label boundary (normal
+  // systolic tenting), so the LV-labelled blood on their atrial side, between
+  // the annulus and the leaflet bodies, can be a separate small component: no
+  // papillary tissue bounds it. It was 0.5-0.7 cm2 (share 0.953) on the plane
+  // the papillary repair was fitted to; with the beam on the ME4C line the
+  // + 60 deg plane also ran between the two muscle columns (a slit and a
+  // detached pocket, share 0.83). The preset's turn (views.js MECOMM_TURN)
+  // leaves a single pool.
   check('Papillary', 'MECOMM: LV blood pool in one piece at ES (largest component share)', lvShare(GES), [0.97, 1], '');
-  KNOWN = false;
   // The one-piece share misses a papillary column that stands free along the
   // wall, because the channel behind it opens into the main cavity at its top,
   // and a head the plane cuts as an island. Along each scan line (constant
@@ -1724,17 +1714,19 @@ const worstOf = (xs) => xs.reduce((m, v) => (v.val > m.val ? v : m), { val: -1e9
     }
     return area;
   };
-  // KNOWN-FAIL (TEE-8): the posteromedial muscle stands free along both ME
-  // commissural planes above its fillet (1.0 cm here, 1.6 cm in the ME4C +
-  // 60 deg rebuild; see the 70 % rows), and the anterolateral head, which sits
-  // under its commissure, is cut as an island (1.1 / 1.4 cm2): those planes
-  // pass through the commissures but meet the anterolateral wall at ~1-2
-  // o'clock at the papillary base level, while the PSAX clock row puts the
-  // anterolateral base at 3 o'clock or later
+  // KNOWN-FAIL (TEE-8), double barrel: the posteromedial muscle stands free
+  // along the ME commissural plane above its fillet (see the 70 % rows): 1.00 cm
+  // on the ME4C + 65 deg preset with its turn (views.js MECOMM_TURN), 0.95 cm on
+  // the plane the papillary repair was fitted to, 2.15 cm with the beam left on
+  // the ME4C line. The island row passes: the turned plane runs just clear of
+  // the anterolateral head, which the earlier planes cut as an island
+  // (1.1 cm2; 2.7 cm2 with both heads in the unturned + 60 deg plane) because
+  // they met the anterolateral wall at ~1-2 o'clock at the papillary base level
+  // while the PSAX clock row puts the anterolateral base at 3 o'clock or later.
   KNOWN = true;
   check('Papillary', 'MECOMM (ED): papillary column standing free with an LV channel behind it (double barrel), length', barrel(mecommS, GED), [0, 0.5]);
-  check('Papillary', 'MECOMM (ED): papillary section floating free of the wall (island), area', islandArea(mecommS, GED), [0, 0.1], 'cm2');
   KNOWN = false;
+  check('Papillary', 'MECOMM (ED): papillary section floating free of the wall (island), area', islandArea(mecommS, GED), [0, 0.1], 'cm2');
 }
 // LAA in the TTE A2C and the ME2C (ED): a finger-like pouch standing off the LA
 // body at the screen-right, beside the anterior mitral annulus. Appendage cells
@@ -2555,6 +2547,14 @@ for (const [vn, view, vessels] of [['SC_IVC', EXTRA_VIEWS.SC_IVC, ['ivc']], ['ME
     const apexEpi = [0, LM.LV.apexY - LM.LV.wall * LM.LV.apexWallFrac, 0];
     for (const k of ['MECOMM', 'ME2C', 'MELAX']) {
       const q = TEE_VIEWS[k].probe();
+      // (the commissural preset adds a turn of the shaft of a few degrees to its
+      // omniplane angle, views.js MECOMM_TURN: the transducer stays put and the
+      // beam is held within 5 deg of the ME4C line)
+      if (k === 'MECOMM') {
+        check('TEE', 'MECOMM: same transducer as the ME4C (cm)', Math.hypot(...sub(q.pos, p4.pos)), [0, 1e-6], '');
+        check('TEE', 'MECOMM: beam within 5 deg of the ME4C beam (probe turn only)', Math.acos(Math.min(1, dot(q.dir, p4.dir))) * 180 / Math.PI, [0, 5], 'deg');
+        continue;
+      }
       check('TEE', `${k}: same transducer and beam as the ME4C (cm + rad)`, Math.hypot(...sub(q.pos, p4.pos)) + Math.hypot(...sub(q.dir, p4.dir)), [0, 1e-6], '');
     }
     for (const d of [60, 90, 130]) {
@@ -2562,7 +2562,7 @@ for (const [vn, view, vessels] of [['SC_IVC', EXTRA_VIEWS.SC_IVC, ['ivc']], ['ME
       check('TEE', `ME4C + ${d} deg omniplane: LV apex distance from the plane`, Math.abs(dot(sub(apexEpi, q.pos), q.normal)), [0, 1.0]);
     }
     const S6 = planeSample(TEE_VIEWS.MECOMM, GED, {}, 0.1);
-    check('TEE', 'MECOMM (ME4C + 60): RV area (ED)', areaOf(S6, cellsWhere(S6, (l) => l === TISSUE.RV)), [0, 1], 'cm2');
+    check('TEE', 'MECOMM (ME4C + 65, turned): RV area (ED)', areaOf(S6, cellsWhere(S6, (l) => l === TISSUE.RV)), [0, 1], 'cm2');
     // the preset readouts (main.js shows the preset's omniplane angle, 0-180)
     const shown = (k) => Math.round(Math.min(180, Math.max(0, teeOmni(TEE_VIEWS[k].probe()))));
     check('TEE', 'omniplane readout: ME4C', shown('ME4C'), [0, 15], 'deg');

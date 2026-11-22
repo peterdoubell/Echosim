@@ -567,17 +567,40 @@ function meOmniThrough(q, lo, hi) {
 // the aortic root through systole: from the station behind the right half of the
 // LA, 1.75 deg leaves the RV lumen ending ~0.9 cm short of the LV apex at end-
 // systole, where 0.75 deg left it 0.82 cm short, against the audit's 0.8).
-// MECOMM = ME4C + 60 (P3-A2-P1 and both papillary muscles), ME2C = ME4C + 90
+// MECOMM = ME4C + 65 with a small turn (P3-A2-P1 and the papillary muscles; below), ME2C = ME4C + 90
 // (the inferior wall and CS on the left, the anterior wall and LAA on the right),
 // MELAX = the angle that brings the aortic-valve centre into the plane (~150 deg:
 // the LVOT, cusps and root to the screen-right, the inferolateral wall on the left).
 const ME4C_TRIM = 1.75;                                // deg
+// The commissural preset is the omniplane at ME4C + MECOMM_OMNI with a small turn
+// of the shaft, MECOMM_TURN (as the view is found at the bedside: omniplane to
+// ~60-70 deg, then the probe turned a few degrees until the muscles sit on the
+// walls). The transducer does not move. With the beam left on the ME4C line the
+// + 60 deg plane holds both papillary heads (0.02 / 0.06 cm off) while their
+// bases lie 0.5-0.8 cm to either side of it, so it runs up the free flank of
+// both muscles: two free columns with a channel behind each at end-diastole and
+// a slit cavity with a detached pocket at end-systole. Turned, the plane still
+// crosses both commissures (it moves ~0.4 cm at the annulus), passes through
+// the wall-attached base of the posteromedial muscle and just clear of the
+// anterolateral head, and the cavity is one piece at both phases; the turn
+// carries the plane toward the inferior RV, which the extra 5 deg of omniplane
+// takes back out. Scan (audit rows: RV area cm2 / lower-70 % cleft / double
+// barrel / island cm2 / one piece ED / ES):
+//   + 60, no turn      0.49 / 0.85 / 2.15 / 2.74 / 1.00 / 0.83
+//   + 44..56, no turn  ... / 0.50-0.60 / 1.50-2.05 / 0 / 1.00 / 0.92-0.93
+//   + 60, 4.5 deg      1.53 / 0.65 / 0.85 / 0 / 1.00 / 0.97
+//   + 63, 4.5 deg      1.18 / 0.60 / 0.95 / 0 / 1.00 / 0.970
+//   + 65, 4.5 deg      0.95 / 0.55 / 1.00 / 0 / 1.00 / 0.973   (chosen)
+//   + 65, 4 or 5 deg   0.89, 1.07 / 0.55, 0.65 / 1.15, 0.85 / 0 / 0.95-0.96 / 0.97
+//   + 66, 4.5 deg      0.87 / 0.55 / 1.05 / 0 / 0.957 / 0.973
+// (6 deg of turn loses the anterolateral muscle from the view altogether.)
+const MECOMM_OMNI = 65, MECOMM_TURN = 4.5;            // deg
 let _meOm = null;
 const meOmni = () => _meOm || (_meOm = (() => {
   const o4 = meOmniThrough(T, -15, 40) + ME4C_TRIM;
-  return { ME4C: o4, MECOMM: o4 + 60, ME2C: o4 + 90, MELAX: meOmniThrough(A, 110, 175) };
+  return { ME4C: o4, MECOMM: o4 + MECOMM_OMNI, ME2C: o4 + 90, MELAX: meOmniThrough(A, 110, 175) };
 })());
-const meView = (key) => { let c = null; return () => { if (!c) c = teeManipulate(meBaseProbe(), { omni: meOmni()[key] }); return { ...c, pos: c.pos.slice(), dir: c.dir.slice(), lat: c.lat.slice(), normal: c.normal.slice(), target: c.target.slice() }; }; };
+const meView = (key) => { let c = null; return () => { if (!c) c = teeManipulate(key === 'MECOMM' ? teeManipulate(meBaseProbe(), { rotate: MECOMM_TURN }) : meBaseProbe(), { omni: meOmni()[key] }); return { ...c, pos: c.pos.slice(), dir: c.dir.slice(), lat: c.lat.slice(), normal: c.normal.slice(), target: c.target.slice() }; }; };
 const me4cProbe = meView('ME4C');
 const melaxProbe = meView('MELAX');
 // The transducer is anteflexed and slid TG_ROLL further round the LV long axis
@@ -995,8 +1018,9 @@ function meAvLaxProbe() {
   return teeClear(probeFrom(tgt, dir, vsub(LM.U_AO, vscale(dir, vdot(LM.U_AO, dir))), Math.hypot(...vsub(tgt, pos))));
 }
 const MEAVLAX_UP = 1.0;                              // cm withdrawn: the beam meets the root side-on
-// ME mitral commissural (ME4C + 60 deg): the plane through both commissures —
-// P3 on the left, A2 in the middle, P1 on the right, both papillary muscles below.
+// ME mitral commissural (ME4C + MECOMM_OMNI and a MECOMM_TURN turn of the shaft): the
+// plane through both commissures — P3 on the left, A2 in the middle, P1 on the
+// right, the papillary muscles on the walls below.
 const meCommProbe = meView('MECOMM');
 // Transgastric views are manipulations of the one TG SAX probe position (the
 // fundal contact on the gastric path), so they lie on the path by construction
