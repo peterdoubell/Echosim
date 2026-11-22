@@ -136,6 +136,16 @@ await pickTrace('tdi', 'mvLat');
 await page.waitForFunction(() => { const t = window.echosim.echo.tdiData; return !!(t && t.site === 'mvLat'); }, null, { timeout: 60000 });
 const tdi = await page.evaluate(() => { const t = window.echosim.echo.tdiData; return { s: t.s, e: t.e, a: t.a, EoverE: t.EoverE }; });
 await shot('tdi_mvlat.png');
+// the PLAX lines carry an automatic reading (LV dimensions; aortic root and LA)
+await page.click('[data-view="PLAX"]'); await page.waitForTimeout(600);
+await pickTrace('mmode', 'lv');
+await page.waitForFunction(() => { const m = window.echosim.echo.mmodeData; return !!(m && m.key === 'lv' && m.read); }, null, { timeout: 60000 });
+const plaxLv = await page.evaluate(async () => { const { measureModel } = await import('./js/report.js'); const r = window.echosim.echo.mmodeData.read, m = measureModel(window.echosim.state.path); return { lvidd: r.lvidd, lvids: r.lvids, ivsd: r.ivsd, pwd: r.pwd, model: m.lvidd / 10 }; });
+await shot('mmode_plax_lv.png');
+await pickTrace('mmode', 'ao');
+await page.waitForFunction(() => { const m = window.echosim.echo.mmodeData; return !!(m && m.key === 'ao' && m.read); }, null, { timeout: 60000 });
+const plaxAo = await page.evaluate(() => { const r = window.echosim.echo.mmodeData.read; return { ao: r.ao, la: r.la_max }; });
+await shot('mmode_plax_ao.png');
 await page.click('[data-view="SC_IVC"]'); await page.waitForTimeout(600);
 await pickTrace('mmode', 'ivc');
 await page.waitForFunction(() => { const m = window.echosim.echo.mmodeData; return !!(m && m.key === 'ivc' && m.ivc); }, null, { timeout: 60000 });
@@ -149,7 +159,7 @@ let sniffMin = 1;
 for (let i = 0; i < 30; i++) { sniffMin = Math.min(sniffMin, await ivcR()); await page.waitForTimeout(60); }
 await shot('sniff_after.png');
 await pickTrace('doppler');
-const mres = { mmodeTapse: mm.exc, caliper: mmCal, tapseModel, tdi, ivc: ivcM, sniffMin };
+const mres = { mmodeTapse: mm.exc, caliper: mmCal, tapseModel, tdi, ivc: ivcM, sniffMin, plaxLv, plaxAo };
 
 const efNum = parseFloat(res.ef), distNum = parseFloat(res.dist);
 const checks = {
@@ -159,6 +169,8 @@ const checks = {
   'accuracy compared against truth': res.err.includes('truth'),
   'M-mode caliper returns the traced TAPSE (within 1 mm)': Number.isFinite(mmCal) && Math.abs(mmCal - mm.exc) <= 0.1,
   'M-mode TAPSE is the model TAPSE (within 2 mm)': Math.abs(mm.exc - tapseModel) <= 0.2,
+  'PLAX M-mode reads LVIDd automatically (within 3 mm of the report)': Number.isFinite(plaxLv.lvidd) && Math.abs(plaxLv.lvidd - plaxLv.model) <= 0.3 && plaxLv.lvids < plaxLv.lvidd && plaxLv.ivsd > 0.5 && plaxLv.pwd > 0.5,
+  'PLAX M-mode reads the aortic root and LA automatically': plaxAo.ao > 2 && plaxAo.ao < 4 && plaxAo.la > 2.5 && plaxAo.la < 4.2,
   "tissue Doppler reads s', e', a' and E/e'": tdi.s > 3 && tdi.e > 3 && tdi.a > 1 && tdi.EoverE > 3 && tdi.EoverE < 15,
   'IVC M-mode shows the sniff collapse (normal: > 50 %)': ivcM.collapse > 0.5 && ivcM.dMax > 1.2 && ivcM.dMax <= 2.1,
   'Sniff button narrows the live IVC by half': sniffMin < 0.6,

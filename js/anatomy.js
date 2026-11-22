@@ -2891,12 +2891,16 @@ const LUNG_WINDOWS = (() => {
 // them at close to their true wavelength), about LUNG_LOBE.wl cm long and
 // LUNG_LOBE.amp cm each, with a finer octave (x LUNG_LOBE.fine); the mediastinal
 // pleura's distance from the sac varies by LUNG_LOBE.sac of the same field.
-export const LUNG_LOBE = { wl: 2.8, amp: 0.3, sac: 0.8, fine: 0.5 };
+// (sac 0.45: at 0.8 the mediastinal pleura undulated through +-70 deg of incidence
+// within 4 cm, which no pleural reflection shows, and its line was dim throughout.)
+export const LUNG_LOBE = { wl: 2.8, amp: 0.3, sac: 0.45, fine: 0.5 };
 const _LOBE_W = (() => {
   const f = (1 + Math.sqrt(5)) / 2, n = Math.hypot(1, f);
   return [[0, 1, f], [0, 1, -f], [1, f, 0], [1, -f, 0], [f, 0, 1], [-f, 0, 1]].map((d, i) =>
     [d[0] / n, d[1] / n, d[2] / n, 1 + 0.07 * (i - 2.5), 1.3 + 2.4 * i]);   // direction, wavelength factor, phase
 })();
+// (the field never exceeds this, cm: beyond it the smooth boundary decides)
+const LOBE_REACH = 6 * LUNG_LOBE.amp * (1 + LUNG_LOBE.fine) * 1.01;
 function lungLobulation(l, a, s) {
   const k = 2 * Math.PI / LUNG_LOBE.wl;
   let v = 0;
@@ -2912,22 +2916,46 @@ function isLung(x, y, z) {
   const ab = -(x * BP[0] + y * BP[1] + z * BP[2]);                     // + anterior
   // the right lung covers the anterolateral wall of the RA (there is no acoustic
   // window there: the cardiac notch is on the left)
-  const lob = lungLobulation(lb, ab, x * BS[0] + y * BS[1] + z * BS[2]);
-  if (Math.min(RIGHT_LUNG_L - lb, ab - RIGHT_LUNG_A) + lob > 0) return true;
+  // (The lobulation is a displacement of the pleural surface along its own
+  // normal: the field is read at the foot of the perpendicular from this point
+  // to the smooth surface, not at the point itself. A field added point by point
+  // would also vary across the surface and, where it is steep, pinch detached
+  // islands of lung off the margin; a normal displacement cannot.)
+  const sb = x * BS[0] + y * BS[1] + z * BS[2];
+  {
+    const m1 = RIGHT_LUNG_L - lb, m2 = ab - RIGHT_LUNG_A;
+    const m = Math.min(m1, m2);
+    if (m > -LOBE_REACH && m + (m1 < m2 ? lungLobulation(lb + m, ab, sb) : lungLobulation(lb, ab - m, sb)) > 0) return true;
+    if (m >= LOBE_REACH) return true;
+  }
   // general lung boundary (negative = aerated): everywhere outside the two
   // acoustic-window cones and, posteriorly, outside the posterior mediastinum
-  let g = ab < 0 ? 2.8 - Math.hypot(lb, Math.min(0, ab + 1.5)) : -1e9;   // posterior mediastinum (rounded)
+  let g = -1e9, fl = lb, fa = ab, fs = sb;                              // boundary value; foot of the perpendicular (body coordinates)
+  if (ab < 0) {                                                        // posterior mediastinum (rounded)
+    const m = Math.min(0, ab + 1.5), h = Math.hypot(lb, m);
+    g = 2.8 - h;
+    if (h > 1e-6) { fl = lb + g * lb / h; fa = ab + g * m / h; }
+  }
   for (const W of LUNG_WINDOWS) {
     const vx = x - W.w[0], vy = y - W.w[1], vz = z - W.w[2];
     const al = vx * W.u[0] + vy * W.u[1] + vz * W.u[2];
     if (al <= 0) continue;
     const px = vx - W.u[0] * al, py = vy - W.u[1] * al, pz = vz - W.u[2] * al;
-    const c = al * W.tan + 1.2 - Math.sqrt(px * px + py * py + pz * pz);
-    if (c > g) g = c;
+    const pr = Math.sqrt(px * px + py * py + pz * pz);
+    const c = al * W.tan + 1.2 - pr;
+    if (c > g) {
+      g = c;
+      // gradient of the cone's boundary value: tan along the axis, -1 radially
+      const ir = pr > 1e-6 ? 1 / pr : 0, k = c / (1 + W.tan * W.tan);
+      const gx = W.tan * W.u[0] - px * ir, gy = W.tan * W.u[1] - py * ir, gz = W.tan * W.u[2] - pz * ir;
+      fl = lb - k * (gx * BL[0] + gy * BL[1] + gz * BL[2]);
+      fa = ab + k * (gx * BP[0] + gy * BP[1] + gz * BP[2]);
+      fs = sb - k * (gx * BS[0] + gy * BS[1] + gz * BS[2]);
+    }
   }
   // the lung's edge is a lobulated margin (the lingula, the cardiac notch, the
   // fissures), not the ruled surface of a cone: the boundary undulates
-  g += lob;
+  if (g > -LOBE_REACH && g < LOBE_REACH) g += lungLobulation(fl, fa, fs);
   if (ab < 0) {
     // the left pleura/lung wraps the descending aorta posterolaterally: aerated lung
     // from AORTA_PLEURA behind the aortic wall (the bright pleural line behind it

@@ -1307,7 +1307,6 @@ function erodeSurvivors(S, k, r) {
     check('B-mode', `${nm}: posterior pericardial peak above the wall (median over beams)`, diffs.length > 5 ? diffs[diffs.length >> 1] : null, [8, 30], 'dB', `${diffs.length} beams`);
   }
   const norm = [], steep = [], ends = [];
-  let faded = 0;                                      // line ends lost in the neighbouring tissue speckle
   for (const nm of ['SUBCOSTAL', 'SSN', 'PLAX', 'A4C', 'A2C', 'PSAX_MV']) {
     const R = renderBmode(nm, ED, {}), L = R.lungD, NA = R.NA, dTh = 2 * R.half / NA;
     const pk = new Float32Array(NA).fill(-1);
@@ -1332,18 +1331,8 @@ function erodeSurvivors(S, k, r) {
       seg.sort((x, y) => x - y);
       const med = seg.length >= 8 ? seg[seg.length >> 1] : 0;
       if (med >= 130) {
-        // (An end beam that is no brighter than the tissue speckle on the beam just
-        // outside the line, at the same depth, has faded out completely: what is
-        // measured there is the mediastinal tissue beside the lung, not the line.
-        // A dim line 14 cm deep in the suprasternal view is only ~8 dB above that
-        // speckle, so its ends cannot be 10 dB below it however they taper.)
-        const bg = (c, d0) => {
-          const th = -R.half + (c + 0.5) * dTh; let m = -1;
-          for (let d = d0 - 0.25; d <= d0 + 0.25; d += 0.02) { const q = beamSample(R, th, d); if (q && R.mask[q.idx]) m = Math.max(m, q.grey); }
-          return m;
-        };
-        if (a > 0 && pk[a] >= 0) { if (dB(pk[a] - bg(a - 1, L[a])) > 2) ends.push([nm, a, dB(med - pk[a])]); else faded++; }
-        if (b < NA - 1 && pk[b] >= 0) { if (dB(pk[b] - bg(b + 1, L[b])) > 2) ends.push([nm, b, dB(med - pk[b])]); else faded++; }
+        if (a > 0 && pk[a] >= 0) ends.push([nm, a, dB(med - pk[a])]);
+        if (b < NA - 1 && pk[b] >= 0) ends.push([nm, b, dB(med - pk[b])]);
       }
       a = b;
     }
@@ -1351,7 +1340,7 @@ function erodeSurvivors(S, k, r) {
   const mean = (v) => v.reduce((x, y) => x + y, 0) / v.length;
   check('B-mode', 'pleural line: fall-off from < 25 deg to > 60 deg incidence', norm.length && steep.length ? dB(mean(norm) - mean(steep)) : null, [16, 60], 'dB', `${norm.length} / ${steep.length} beams (SUBCOSTAL SSN PLAX A4C A2C PSAX-MV)`);
   ends.sort((x, y) => x[2] - y[2]);
-  check('B-mode', 'pleural line: end beam below the segment median (weakest end)', ends.length ? ends[0][2] : faded ? 60 : null, [10, 60], 'dB', (ends.length ? `${ends.length} ends, worst ${ends[0][0]} beam ${ends[0][1]}` : '') + (faded ? ` (${faded} ends at the tissue speckle level)` : ''));
+  check('B-mode', 'pleural line: end beam below the segment median (weakest end)', ends.length ? ends[0][2] : null, [10, 60], 'dB', ends.length ? `${ends.length} ends, worst ${ends[0][0]} beam ${ends[0][1]}` : '');
   {
     // The lung margin has no geometric edges: in the views where the acoustic
     // window's border crosses the sector, no 3 cm of the lung boundary (tissue
@@ -5073,6 +5062,30 @@ SECTION = 'Pathology';
   for (const [nm, path] of [['normal', PATHS.normal], ['pulmonary hypertension', PATHS.phtn]]) {
     const R = mm('A4C', 'tapse', path), model = measureModel(path).tapse / 10;
     check(g, `${nm}: M-mode TAPSE minus model TAPSE`, R.excursion - model, [-0.2, 0.2], 'cm', `M-mode ${(R.excursion * 10).toFixed(0)} mm, model ${(model * 10).toFixed(0)} mm`);
+  }
+  // PLAX lines: the trace's automatic reading (inner edge to inner edge on the
+  // R-wave column; LVIDs at the systolic minimum) against the report's 2D linear
+  // dimensions. The M-mode beam is fixed in the chest and need not cross the LV at
+  // right angles, where the report's line is perpendicular to the long axis and
+  // follows the base: in the normal heart the two agree to a few mm; in the
+  // dilated, more spherical ventricle the oblique beam reads longer, never shorter
+  // (the reason 2D-guided linear measurements are preferred: Lang et al., ASE/EACVI
+  // chamber quantification, J Am Soc Echocardiogr 2015;28:1-39).
+  {
+    const full = (key, path) => { const ln = mmodeLine('PLAX', key, path, probeOf('PLAX', path)); return mmodeRead(mmodeSweep(ln, path, 120, 300, 0.5, 16)); };
+    const L = full('lv', PATHS.normal), Ao = full('ao', PATHS.normal), M0 = measureModel(PATHS.normal);
+    assert(g, 'normal: PLAX M-mode lines are read automatically (LV and aortic root / LA)', !!L && !!Ao && L.lvidd > 0 && Ao.ao > 0 && Ao.la_max > 0);
+    if (L && Ao) {
+      check(g, 'normal: M-mode LVIDd minus report LVIDd', L.lvidd - M0.lvidd / 10, [-0.3, 0.3], 'cm', `M-mode ${(L.lvidd * 10).toFixed(0)} mm, report ${M0.lvidd.toFixed(0)} mm`);
+      check(g, 'normal: M-mode LVIDs minus report LVIDs', L.lvids - M0.lvids / 10, [-0.3, 0.3], 'cm', `M-mode ${(L.lvids * 10).toFixed(0)} mm, report ${M0.lvids.toFixed(0)} mm`);
+      check(g, 'normal: M-mode IVSd minus report IVSd', L.ivsd - M0.ivsd / 10, [-0.2, 0.2], 'cm', `M-mode ${(L.ivsd * 10).toFixed(0)} mm, report ${M0.ivsd.toFixed(0)} mm`);
+      check(g, 'normal: M-mode aortic root minus report sinus diameter', Ao.ao - M0.sov / 10, [-0.3, 0.3], 'cm', `M-mode ${(Ao.ao * 10).toFixed(0)} mm, report ${M0.sov.toFixed(0)} mm`);
+      check(g, 'normal: M-mode LA antero-posterior dimension', Ao.la_max, [2.7, 4.0], 'cm', 'ASE normal 2.7-4.0 cm');
+    }
+    const Ld = full('lv', PATHS.dcm), Md = measureModel(PATHS.dcm);
+    check(g, 'DCM: M-mode LVIDd minus report LVIDd (oblique beam reads longer)', Ld ? Ld.lvidd - Md.lvidd / 10 : null, [0, 1], 'cm', Ld ? `M-mode ${(Ld.lvidd * 10).toFixed(0)} mm, report ${Md.lvidd.toFixed(0)} mm` : '');
+    const La = full('lv', PATHS.as), Ma = measureModel(PATHS.as);
+    check(g, 'severe AS (LVH): M-mode IVSd minus report IVSd', La ? La.ivsd - Ma.ivsd / 10 : null, [-0.2, 0.2], 'cm', La ? `M-mode ${(La.ivsd * 10).toFixed(0)} mm, report ${Ma.ivsd.toFixed(0)} mm` : '');
   }
   // MAPSE: the M-mode line is on the LATERAL annulus, whose excursion exceeds the
   // annular centre's (the report's MAPSE) by its share of the angle-dependent

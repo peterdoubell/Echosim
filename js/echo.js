@@ -1045,13 +1045,19 @@ export class EchoView {
                 } else {
                   // Laminar flow is not a flat fill either: each ~2 mm colour cell
                   // holds an autocorrelation ESTIMATE of the mean velocity from a
-                  // few pulses, so it scatters about the true value (here ~12 % of
-                  // the velocity plus a small floor), re-drawn every frame: a
-                  // mottled column whose mean is still the flow's velocity.
+                  // few pulses, so it scatters about the true value, re-drawn every
+                  // frame: a mottled column whose mean is still the flow's velocity.
+                  // The estimator's spread has a part set by the ensemble length and
+                  // the signal-to-noise ratio (a fraction of the Nyquist limit,
+                  // LAMINAR_FLOOR, whatever the speed: slow venous and inflow columns
+                  // mottle as visibly as fast ones) and a part that grows with the
+                  // spectral width, i.e. with the velocity (LAMINAR_MOTTLE).
                   const jc = 5, cx0 = Math.floor(wx * jc), cy0 = Math.floor(wy * jc), cz0 = Math.floor(wz * jc);
-                  const dv = clamp(scatGauss(cx0, cy0, cz0, bloodSalt ^ 0x51ed270b), -2, 2) * (LAMINAR_MOTTLE * alos + 0.02 * nyqEff);
-                  // (the estimate keeps the flow's sign: noise does not flip a cell)
-                  los = los < 0 ? Math.min(-0.5 * wf, los + dv) : Math.max(0.5 * wf, los + dv);
+                  const dv = clamp(scatGauss(cx0, cy0, cz0, bloodSalt ^ 0x51ed270b), -2, 2) * (LAMINAR_MOTTLE * alos + LAMINAR_FLOOR * nyqEff);
+                  // (the estimate keeps the flow's sign: noise does not flip a cell,
+                  // nor does it wrap a cell that the flow itself does not alias)
+                  const lim = alos < 0.97 * nyqEff ? 0.97 * nyqEff : 1e9;
+                  los = los < 0 ? Math.max(-lim, Math.min(-0.5 * wf, los + dv)) : Math.min(lim, Math.max(0.5 * wf, los + dv));
                 }
                 const col = dopplerColor(los, nyqEff, vr, jitter);
                 // colour REPLACES the grey wherever flow is detected (write priority)
@@ -2425,7 +2431,7 @@ export class EchoView {
       const d0 = win ? Math.max(0, ln.depth - 3.2) : 0.5, d1 = win ? ln.depth + 3.2 : this.depthCm;
       const cols = Math.max(40, Math.min(240, W >> 1)), rows = Math.max(40, Math.min(260, plotH));
       S = mmodeSweep(ln, path, cols, rows, d0, d1);
-      S.read = key === 'tapse' || key === 'mapse' || key === 'ivc' ? mmodeRead(S) : null;
+      S.read = key === 'tapse' || key === 'mapse' || key === 'ivc' || key === 'lv' || key === 'ao' ? mmodeRead(S) : null;
       S.ck = ck; S.path = path; S.pp = probe.pos.slice(); S.pd = probe.dir.slice(); S.line = ln; S.img = null;
       this._mmCache = S;
     }
@@ -2471,6 +2477,17 @@ export class EchoView {
     if (R && key === 'ivc') {
       readout = `IVC max ${(R.dMax * 10).toFixed(0)} mm  min ${(R.dMin * 10).toFixed(0)} mm  collapse ${Math.round(R.collapse * 100)}%`;
       label('sniff', W * 0.5, plotH - 4, 'rgba(150,200,240,0.9)', '9px monospace', 'center');
+    } else if (R && (key === 'lv' || key === 'ao')) {
+      // the end-diastolic calipers (inner edges) on the R-wave column
+      const xe = (R.cED + 0.5) / cols * W;
+      ctx.strokeStyle = 'rgba(255,210,90,0.85)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(xe, yOf(R.top)); ctx.lineTo(xe, yOf(R.bottom));
+      for (const d of [R.top, R.bottom]) { ctx.moveTo(xe - 4, yOf(d)); ctx.lineTo(xe + 4, yOf(d)); }
+      ctx.stroke();
+      const mmOf = (v) => (v * 10).toFixed(0);
+      readout = key === 'lv'
+        ? `IVSd ${mmOf(R.ivsd)}  LVIDd ${mmOf(R.lvidd)}  PWd ${mmOf(R.pwd)}  LVIDs ${mmOf(R.lvids)} mm  FS ${Math.round(R.fs * 100)}%`
+        : `Ao root ${mmOf(R.ao)} mm  LA ${mmOf(R.la_max)} mm`;
     } else if (R) {
       for (const d of [R.min, R.max]) {
         ctx.strokeStyle = 'rgba(255,210,90,0.6)'; ctx.setLineDash([3, 3]);
@@ -2492,7 +2509,7 @@ export class EchoView {
     }
     this._drawEcg(ctx, W, H, plotH, G, nb);
     this.mmodeData = { key, label: pick[1], d0, d1, plotH, W, nb, rrSec: rr, cols, rows, read: R, caliper, anatomical: !!ln.anatomical,
-      excursion: R && key !== 'ivc' ? R.excursion : null, ivc: R && key === 'ivc' ? { dMax: R.dMax, dMin: R.dMin, collapse: R.collapse } : null };
+      excursion: R && (key === 'tapse' || key === 'mapse') ? R.excursion : null, ivc: R && key === 'ivc' ? { dMax: R.dMax, dMin: R.dMin, collapse: R.collapse } : null };
     this.spectralData = { mode: 'M', site: null, cols: 0, vs: new Float32Array(0) };
   }
 
@@ -2650,7 +2667,9 @@ function specBeats(path) {
 // so the hue follows the true direction (with a random magnitude), and only an
 // occasional cell wraps.
 // cell-to-cell scatter of the colour velocity estimate in laminar flow (fraction of the velocity, 1 SD)
-export const LAMINAR_MOTTLE = 0.12;
+export const LAMINAR_MOTTLE = 0.22;
+// ... and its velocity-independent part (fraction of the Nyquist limit, 1 SD)
+export const LAMINAR_FLOOR = 0.07;
 export function dopplerColor(los, nyq, variance, jitter) {
   const raw = Number.isFinite(los) ? los : 0;
   const jit = Number.isFinite(jitter) ? jitter : 0;
@@ -2803,6 +2822,46 @@ export function mmodeRead(S) {
       if (w[c] < dMin) dMin = w[c];
     }
     return { width: w, dMax, dMin, collapse: dMax > 0 ? 1 - dMin / dMax : 0 };
+  }
+  if (S.key === 'lv' || S.key === 'ao') {
+    // Parasternal lines, read inner edge to inner edge. The cavity under the
+    // landmark (leaflets and cusps crossing it belong to it) in every column;
+    // 'lv': the LV internal dimension at end-diastole (the last column before
+    // the R wave) and at its systolic minimum, with the septum above and the
+    // posterior wall below at end-diastole; 'ao': the aortic root at
+    // end-diastole and, behind its posterior wall, the LA at its largest.
+    const lv = S.key === 'lv', CAV = lv ? TISSUE.LV : TISSUE.AORTA;
+    const inC = (c, r) => { const x = t[c * rows + r]; return x === CAV || x === TISSUE.VALVE; };
+    const r0 = Math.max(0, Math.min(rows - 1, Math.round((S.depth - d0) / dz)));
+    const span = (c) => {
+      let m = -1;
+      for (let k = 0; k < rows && m < 0; k++) { if (r0 - k >= 0 && t[c * rows + r0 - k] === CAV) m = r0 - k; else if (r0 + k < rows && t[c * rows + r0 + k] === CAV) m = r0 + k; }
+      if (m < 0) return null;
+      let a = m, b = m;
+      while (a > 0 && inC(c, a - 1)) a--;
+      while (b < rows - 1 && inC(c, b + 1)) b++;
+      return [a, b];
+    };
+    const run = (c, r, step, K) => { let n = 0; while (r >= 0 && r < rows && t[c * rows + r] === K) { n++; r += step; } return n; };
+    const cED = Math.max(0, Math.round(cols / S.nb) - 1), ed = span(cED);
+    const width = new Float32Array(cols), la = new Float32Array(cols);
+    let wMin = 1e9, laMax = 0;
+    for (let c = 0; c < cols; c++) {
+      const q = span(c); if (!q) continue;
+      width[c] = (q[1] - q[0] + 1) * dz;
+      if (width[c] < wMin) wMin = width[c];
+      if (!lv) {
+        // the LA: the first atrial cells within 1.5 cm behind the root's posterior wall
+        let r = q[1] + 1; const lim = Math.min(rows, r + Math.round(1.5 / dz));
+        while (r < lim && t[c * rows + r] !== TISSUE.LA) r++;
+        if (r < lim) { la[c] = run(c, r, 1, TISSUE.LA) * dz; if (la[c] > laMax) laMax = la[c]; }
+      }
+    }
+    if (!ed) return null;
+    const dED = width[cED];
+    return lv
+      ? { width, cED, lvidd: dED, lvids: wMin, fs: dED > 0 ? 1 - wMin / dED : 0, ivsd: run(cED, ed[0] - 1, -1, TISSUE.MYO) * dz, pwd: run(cED, ed[1] + 1, 1, TISSUE.MYO) * dz, top: d0 + ed[0] * dz, bottom: d0 + (ed[1] + 1) * dz }
+      : { width, la, cED, ao: dED, la_max: laMax, top: d0 + ed[0] * dz, bottom: d0 + (ed[1] + 1) * dz };
   }
   const edge = new Float32Array(cols), atr = (c, r) => MM_ATR.has(t[c * rows + r]);
   let prev = S.depth, lo = 1e9, hi = -1e9;
