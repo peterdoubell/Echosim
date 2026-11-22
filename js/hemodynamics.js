@@ -331,7 +331,7 @@ function circParams(path) {
   }
   // DCM: annular dilatation and leaflet tethering leave a central FUNCTIONAL MR
   // (moderate: regurgitant fraction ~30 % in severe DCM) even with structurally normal leaflets
-  if (path.dilated && !path.mr) { p.Rmr = ({ borderline: 3.5, impaired: 1.8, severe: 1.05 })[dcmSeverityOf(path)]; }
+  if (path.dilated && !path.mr) { p.Rmr = ({ borderline: 3.47, impaired: 1.78, severe: 1.005 })[dcmSeverityOf(path)]; }
   if (path.mr) {
     // Regurgitant orifice + congested LA, plus the chronic volume-overload
     // REMODELLING of primary MR: the LV dilates (unstressed volume V0 rises) so it
@@ -348,7 +348,7 @@ function circParams(path) {
     // whose pressure climbs to a v-wave (severe: >= 25 mmHg) that blunts the
     // late-systolic MR velocity, then empties fast into the LV (a tall E wave,
     // E-dominant inflow); its booster function wanes as it dilates.
-    p.Rmr = ({ mild: 1.6, moderate: 0.85, severe: 0.33 })[g];
+    p.Rmr = ({ mild: 1.58, moderate: 0.835, severe: 0.32 })[g];
     p.Pla0 = ({ mild: 9, moderate: 12, severe: 17 })[g];
     p.V0 = ({ mild: 20, moderate: 34, severe: 40 })[g];
     p.Emax = Math.min(p.Emax, ({ mild: 2.7, moderate: 2.4, severe: 1.8 })[g]);
@@ -646,7 +646,12 @@ function simulate(path) {
         if (Qpa < 0) Qpa = 0;
       }
       qpaHist[s] = Qpa;
-      const Qmr = (p.Rmr !== Infinity && Plv > Pla) ? (Plv - Pla) / p.Rmr : 0;
+      // MR only while the mitral valve is shut and the LV activated (QRS through
+      // isovolumic relaxation), as for TR below: forward and regurgitant flow
+      // cannot share one open orifice, and the 2-3 mmHg by which the LV pressure
+      // overshoots the LA's after the E and A waves (inertial inflow still
+      // running) is not a regurgitant gradient. Diastolic MR belongs to AV block.
+      const Qmr = (p.Rmr !== Infinity && Plv > Pla && Qmv <= 0 && a > 0.01) ? (Plv - Pla) / p.Rmr : 0;
       // TR only while the tricuspid valve is shut and the RV activated (systole
       // and isovolumic relaxation): no leak while forward flow still crosses the
       // valve, nor through the closed valve in late diastole
@@ -782,7 +787,7 @@ function laMetrics(tr) {
 const RV_BUCKLE = 1.0;   // RV transmural pressure (mmHg) below which the free wall buckles
 function rightMetrics(tr, p, fwdLV) {
   let RVSP = -1e9, RVEDV = -1e9, RVESV = 1e9, raSum = 0, PASP = -1e9, PADia = 1e9, paSum = 0;
-  let trGrad = 0, trVol = 0, qp = 0, raInv = 0, rvColl = 0, QtvMax = 0, raA = -1e9, raV = -1e9, RVEDP = 0, raVmax = -1e9, raVmin = 1e9;
+  let trGrad = 0, trVol = 0, qp = 0, raInv = 0, rvColl = 0, QtvMax = 0, QtrMax = 0, raA = -1e9, raV = -1e9, RVEDP = 0, raVmax = -1e9, raVmin = 1e9;
   const dtS = CYCLE / NSAMPLE;
   for (let i = 0; i < NSAMPLE; i++) {
     const ph = tr.phase[i];
@@ -799,6 +804,7 @@ function rightMetrics(tr, p, fwdLV) {
     // once its distending pressure falls to ~1 mmHg, in early diastole)
     if (tr.Prv[i] - tr.Ppc[i] < RV_BUCKLE) rvColl++;
     if (tr.Qtv[i] > QtvMax) QtvMax = tr.Qtv[i];
+    if (tr.Qtr[i] > QtrMax) QtrMax = tr.Qtr[i];
     raVmax = Math.max(raVmax, tr.Vra[i]); raVmin = Math.min(raVmin, tr.Vra[i]);
     if ((ph >= 0.82 || ph < 0.03) && tr.Pra[i] > raA) raA = tr.Pra[i];
     if (ph >= 0.25 && ph < 0.56 && tr.Pra[i] > raV) raV = tr.Pra[i];
@@ -815,6 +821,7 @@ function rightMetrics(tr, p, fwdLV) {
     Qp: qp, QpQsRV: fwdLV > 0 ? qp / fwdLV : 1,
     Ppc: p.Ppc, raInvFrac: raInv / NSAMPLE, rvCollapseFrac: rvColl / NSAMPLE,
     QtvMax, QtvE: tvE, QtvA: tvA,
+    QtrMax, Atr: p.Atr || 0,   // peak TR flow (mL/s) and the effective regurgitant orifice (cm2): size the colour jet
     RAVmax: raVmax, RAVmin: raVmin,   // solved RA volume range (mL)
   };
 }

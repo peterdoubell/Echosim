@@ -3940,6 +3940,12 @@ SECTION = 'Pathology';
   // DCM: low LV systolic pressure (~100 mmHg) against a raised LAP (~20) gives a
   // 70-80 mmHg LV-LA gradient, about 4.2-4.5 m/s, read through a small beam angle
   check(g, 'DCM A4C: functional MR CW peak', dc4.negMax, [3.8, 5.2], 'm/s');
+  // (review 12, PHY-1) no regurgitant signal below the baseline while the mitral
+  // valve passes forward flow: E and A only
+  for (const [nm, sp, mvo] of [['severe MR', mr4, MVO], ['DCM', dc4, MVOd]]) {
+    let k = 0; for (let c = 0; c < sp.cols; c++) { const ph = c / sp.cols; if (ph > mvo + 0.015 && ph < 0.985 && sp.vs[c] < -0.2) k++; }
+    check(g, `${nm} A4C CW: columns below -0.2 m/s inside the mitral-inflow window`, k, [0, 0], '', `MVO ${mvo.toFixed(3)}`);
+  }
   { let n = 0, k = 0; for (let c = 0; c < dc4.cols; c++) { const ph = c / dc4.cols; if (ph < MVOd) { n++; if (-dc4.vs[c] > 1.5) k++; } }
     check(g, 'DCM A4C: functional MR fraction of MVC-MVO with |v| > 1.5 m/s', n ? k / n : 0, [0.85, 1], ''); }
   const al = spec('ms', 'A4C', { site: 'mvTips', mode: 'PW', pwNyquist: 0.62 });
@@ -4156,6 +4162,129 @@ SECTION = 'Pathology';
         return 2 * Math.sqrt(m * h * h / Math.PI); };
       const w1 = shell(1), w3 = shell(3);
       check(gc, `${nm} A4C: jet width at 1 cm / at 3 cm downstream`, w3 > 0 ? w1 / w3 : null, [0.25, 0.7], '', `${w1.toFixed(2)} / ${w3.toFixed(2)} cm`);
+    }
+  }
+  {
+    // Review 12 (PHY-1, PAT-4, PAT-11): regurgitant jets only through a shut valve,
+    // sized by the solved regurgitant flow. Velocity-field samples of the view's
+    // sector (0.15 cm grid) carrying the jet's flow tag above 0.1 m/s.
+    const gj = 'Regurgitant jets (valve shut, sized by the solved flow)';
+    const jetCells = (vn, p, ph, fl, tissue, step = 0.15, vmin = 0.1) => {
+      const G = geometryAt(ph, p), S = planeSample(TTE_VIEWS[vn], G, p, step);
+      let n = 0;
+      for (let j = 0; j < S.nd; j++) for (let i = 0; i < S.nx; i++) {
+        const t = S.lab[j * S.nx + i]; if (t < 0 || (tissue != null && t !== tissue)) continue;
+        const q = S.pt(i, j), v = velocityAt(q[0], q[1], q[2], G, p);
+        if (v && v.flow === fl && v.speed > vmin) n++;
+      }
+      return n * step * step;
+    };
+    for (const [nm, p] of [['MR', PATHS.mr], ['DCM', PATHS.dcm]]) {
+      let worst = 0, at = '';
+      for (const vn of ['A4C', 'PLAX']) for (let ph = 0.55; ph < 0.995; ph += 0.04) {
+        const a = jetCells(vn, p, ph, FLOW.MR_JET, null, 0.2, 0.05); if (a > worst) { worst = a; at = `${vn} ${ph.toFixed(2)}`; }
+      }
+      check(gj, `${nm}: MR jet area in diastole (A4C and PLAX, phases 0.55-0.99 in steps of 0.04)`, worst, [0, 0], 'cm2', at);
+      let dia = 0; const N = 500; for (let i = 0; i < N; i++) { const h = hemodynamics(i / N, p); if (h.Qmv > 0) dia += h.Qmr * 0.833 / N; }
+      check(gj, `${nm} circulation: MR volume while the mitral valve passes forward flow`, dia, [0, 0.5], 'mL');
+      // the plume grows and shrinks with the instantaneous regurgitant flow
+      const iso = jetCells('A4C', p, 0.02, FLOW.MR_JET, TISSUE.LA), mid = jetCells('A4C', p, 0.22, FLOW.MR_JET, TISSUE.LA);
+      check(gj, `${nm} A4C: LA jet area in isovolumic contraction / at mid-systole`, mid > 0 ? iso / mid : null, [0, 0.75], '', `${iso.toFixed(1)} / ${mid.toFixed(1)} cm2`);
+    }
+    const TRP = { 'PH': PATHS.phtn, 'mild TR': { tr: true, grade: 'mild' }, 'moderate TR': { tr: true, grade: 'moderate' }, 'severe TR': PATHS.tr };
+    for (const [nm, p] of Object.entries(TRP)) {
+      let dia = 0; const N = 500; for (let i = 0; i < N; i++) { const h = hemodynamics(i / N, p); if (h.Qtv > 0) dia += h.Qtr * 0.833 / N; }
+      check(gj, `${nm} circulation: TR volume while the tricuspid valve passes forward flow`, dia, [0, 0.5], 'mL');
+    }
+    {
+      let worst = 0, at = '';
+      for (const [nm, p] of [['PH', PATHS.phtn], ['severe TR', PATHS.tr]]) for (let ph = 0.6; ph < 0.995; ph += 0.04) {
+        const a = jetCells('A4C', p, ph, FLOW.TR_JET, null, 0.2, 0.05); if (a > worst) { worst = a; at = `${nm} ${ph.toFixed(2)}`; }
+      }
+      check(gj, 'PH and severe TR: TR jet area in diastole (A4C, phases 0.60-0.99 in steps of 0.04)', worst, [0, 0], 'cm2', at);
+    }
+    // jet size follows the solved regurgitant volume: at each case's peak regurgitant flow
+    const { FLOW_AXES } = await import('../js/cardiac-model.js');
+    const pkPh = (p) => { let m = 0, at = 0.2; for (let ph = 0.02; ph < 0.5; ph += 0.01) { const q = hemodynamics(ph, p).Qtr; if (q > m) { m = q; at = ph; } } return at; };
+    const area = {}, len = {}, vol = {};
+    for (const [nm, p] of Object.entries(TRP)) {
+      const ph = pkPh(p), G = geometryAt(ph, p), O = G.A.valves.tricuspid.c, ax = FLOW_AXES.tr;
+      area[nm] = jetCells('A4C', p, ph, FLOW.TR_JET, TISSUE.RA, 0.1, 0.3);
+      vol[nm] = hemoSummary(p).trRegurgVol;
+      const e1 = unit(cross(ax, [0, 1, 0])), e2 = cross(ax, e1);
+      let L = 0;
+      for (let d = 0.2; d < 8; d += 0.1) { let hit = false; for (let a = -2.5; a <= 2.5 && !hit; a += 0.15) for (let b = -2.5; b <= 2.5; b += 0.15) {
+        const q = add(add(add(O, mul(ax, d)), mul(e1, a)), mul(e2, b)); const v = velocityAt(q[0], q[1], q[2], G, p); if (v && v.flow === FLOW.TR_JET && v.speed > 0.3) { hit = true; break; } }
+        if (hit) L = d; else if (d > L + 0.5) break; }
+      len[nm] = L;
+    }
+    check(gj, 'PH A4C TR jet area / severe-TR jet area (each at its peak regurgitant flow)', area['severe TR'] > 0 ? area.PH / area['severe TR'] : null, [0.25, 0.6], '', `${area.PH.toFixed(1)} / ${area['severe TR'].toFixed(1)} cm2; TR volume ${vol.PH.toFixed(0)} / ${vol['severe TR'].toFixed(0)} mL`);
+    check(gj, 'severe TR A4C: jet area in the RA at peak regurgitant flow', area['severe TR'], [8, 20], 'cm2');
+    {
+      const ord = Object.keys(TRP).sort((a, b) => vol[a] - vol[b]);
+      let mono = true; for (let i = 1; i < ord.length; i++) if (len[ord[i]] < len[ord[i - 1]] - 0.05) mono = false;
+      assert(gj, 'TR jet length increases with the solved TR volume (mild, moderate, severe TR and PH)', mono, ord.map((k) => `${k} ${vol[k].toFixed(0)} mL ${len[k].toFixed(1)} cm`).join('; '));
+      check(gj, 'TR jet length, severe TR / mild TR', len['mild TR'] > 0 ? len['severe TR'] / len['mild TR'] : null, [1.6, 4], '');
+    }
+    // ---- review 12 (PHY-5, PHY-6, PAT-8, TEE-12): jet shapes -------------------
+    const gs = 'Jet shapes (VSD plume, MS candle flame and PISA, one turbulent AS jet)';
+    {
+      const p = PATHS.vsd, G = geometryAt(0.25, p), ax = FLOW_AXES.vsd, { FLOW_SITES } = await import('../js/cardiac-model.js');
+      const O = FLOW_SITES.vsd;
+      for (const vn of ['A4C', 'PSAX']) check(gs, `VSD ${vn} (0.25): jet area on the RV side (> 0.3 m/s)`, jetCells(vn, p, 0.25, FLOW.VSD_JET, TISSUE.RV, 0.1, 0.3), [0.5, 9], 'cm2');
+      // (centreline speed: the fastest sample of the cross-section, as the plume meanders about its axis)
+      const e1 = unit(cross(ax, [0, 1, 0])), e2 = cross(ax, e1);
+      const at = (d) => { const c = add(O, mul(ax, d)); let m = 0;
+        for (let a = -0.6; a <= 0.601; a += 0.15) for (let b = -0.6; b <= 0.601; b += 0.15) { const q = add(add(c, mul(e1, a)), mul(e2, b)); const v = velocityAt(q[0], q[1], q[2], G, p); if (v && v.flow === FLOW.VSD_JET && v.speed > m) m = v.speed; }
+        return { v: m, t: classify(c[0], c[1], c[2], G, p).tissue }; };
+      let rv0 = null, end = 0, mono = true, prev = 1e9;
+      for (let d = 0; d <= 6; d += 0.05) { const s = at(d); if (rv0 == null && s.t === TISSUE.RV) rv0 = d; if (s.v > 0.3) end = d; if (d >= 0.5 && d <= 3 && s.v > prev + 0.02) mono = false; if (d >= 0.5) prev = s.v; }
+      check(gs, 'VSD jet length into the RV (on-axis speed > 0.3 m/s past the RV face of the septum)', rv0 != null ? end - rv0 : null, [2, 4], 'cm', `RV face at ${rv0?.toFixed(2)} cm, jet end ${end.toFixed(2)} cm from the defect centre`);
+      check(gs, 'VSD on-axis speed v(3 cm) / v(0.5 cm)', at(0.5).v > 0 ? at(3).v / at(0.5).v : null, [0.15, 0.5], '', `${at(0.5).v.toFixed(2)} -> ${at(3).v.toFixed(2)} m/s`);
+      assert(gs, 'VSD on-axis speed falls monotonically from 0.5 to 3 cm', mono);
+    }
+    {
+      const p = PATHS.ms, G = geometryAt(0.62, p), ax = FLOW_AXES.mitralIn, O = G.A.valves.mitral.c;
+      const e1 = unit(cross(ax, [0, 1, 0])), e2 = cross(ax, e1); let m = 0; const h = 0.05;
+      for (let a = -3; a <= 3; a += h) for (let b = -3; b <= 3; b += h) { const q = add(add(add(O, mul(ax, 1)), mul(e1, a)), mul(e2, b)); const v = velocityAt(q[0], q[1], q[2], G, p); if (v && v.flow === FLOW.MITRAL_IN && v.speed > 1) m++; }
+      check(gs, 'MS (0.62): width of the > 1 m/s inflow 1 cm below the orifice', 2 * Math.sqrt(m * h * h / Math.PI), [0.6, 1.4], 'cm', `orifice ${(2 * Math.sqrt(1.0 / Math.PI)).toFixed(2)} cm`);
+      const v1 = (() => { const q = add(O, mul(ax, 1)); return velocityAt(q[0], q[1], q[2], G, p); })();
+      check(gs, 'MS (0.62): colour variance of the jet 1 cm below the orifice (mosaic)', v1 ? v1.variance : null, [0.5, 1], '');
+      // laminar aliasing shells on the LA side: crossings of the odd multiples of the 0.62 m/s Nyquist
+      const NYQ = 0.62; let nb = 0, last = null, where = [];
+      for (let d = 0.05; d <= 2.2; d += 0.02) { const q = add(O, mul(ax, -d)); const v = velocityAt(q[0], q[1], q[2], G, p);
+        if (!v || v.flow !== FLOW.MITRAL_IN || v.variance >= 0.5) { last = null; continue; }
+        const band = Math.floor((v.speed / NYQ + 1) / 2); if (last != null && band !== last) { nb++; where.push(d.toFixed(2)); } last = band; }
+      check(gs, 'MS (0.62): laminar aliasing boundaries along the LA-side axis (one PISA shell)', nb, [1, 1], '', `at ${where.join(', ')} cm`);
+    }
+    {
+      const p = PATHS.as, G = geometryAt(0.2, p), ax = FLOW_AXES.lvot, O = G.A.valves.aortic.c, r0 = Math.sqrt(G.hemo.AVA / Math.PI);
+      for (const [vn, view] of [['A5C', TTE_VIEWS.A5C || EXTRA_VIEWS.A5C], ['DTG5C', TEE_VIEWS.DTG5C]]) {
+        const S = planeSample(view, G, p, 0.1); let n = 0, plug = 0, lam = 0, fast = 0;
+        for (let j = 0; j < S.nd; j++) for (let i = 0; i < S.nx; i++) {
+          if (S.lab[j * S.nx + i] < 0) continue;
+          const q = S.pt(i, j), d = sub(q, O), al = dot(d, ax), pr = Math.hypot(...sub(d, mul(ax, al)));
+          const v = velocityAt(q[0], q[1], q[2], G, p); if (!v) continue;
+          if (al > 0 && al < 4 && pr < r0 + 0.25 * al) { n++; if (v.flow === FLOW.AORTA) plug++; }
+          if (Math.abs(al) < 1 && v.flow === FLOW.AS_JET && v.speed > 1.24) { fast++; if (v.variance < 0.5) lam++; }
+        }
+        check(gs, `AS ${vn} (0.2): aortic plug-flow samples within the jet cone`, n ? 100 * plug / n : null, [0, 5], '%', `${n} samples`);
+        check(gs, `AS ${vn} (0.2): laminar samples above twice the Nyquist limit within 1 cm of the orifice (barcode stripes)`, fast ? 100 * lam / fast : null, [0, 5], '%', `${fast} samples`);
+      }
+      const q1 = add(O, mul(ax, 1)), v1 = velocityAt(q1[0], q1[1], q1[2], G, p);
+      check(gs, 'AS (0.2): jet colour variance 1 cm downstream of the valve', v1 && v1.flow === FLOW.AS_JET ? v1.variance : null, [0.5, 1], '', v1 ? `${v1.speed.toFixed(2)} m/s` : '');
+      // beside the jet, 2 cm beyond the valve: slow disturbed flow, not a laminar plug
+      let pk = 0, lamPlug = 0, nA = 0;
+      const e1 = unit(cross(ax, [0, 1, 0])), e2 = cross(ax, e1);
+      for (let a = -2; a <= 2; a += 0.1) for (let b = -2; b <= 2; b += 0.1) { const q = add(add(add(O, mul(ax, 2)), mul(e1, a)), mul(e2, b)); const v = velocityAt(q[0], q[1], q[2], G, p); if (v && v.flow === FLOW.AORTA) { nA++; pk = Math.max(pk, v.speed); if (v.variance < 0.5) lamPlug++; } }
+      check(gs, 'AS (0.2): fastest aortic flow beside the jet 2 cm beyond the valve (slow eddies, no plug)', nA ? pk : null, [0, 0.3], 'm/s', `${nA} samples`);
+      // (velocityAt returns a reused object: read each speed before the next call)
+      const spAt = (a) => { const q = add(O, mul(ax, a)), v = velocityAt(q[0], q[1], q[2], G, p); return v ? v.speed : 0; };
+      const va = spAt(-0.2), vl = spAt(-1.0);
+      check(gs, 'AS (0.2): flow acceleration 0.2 cm below the valve / LVOT speed 1 cm below', vl > 0 ? va / vl : null, [1.3, 4], '', `${va.toFixed(2)} / ${vl.toFixed(2)} m/s`);
+      // one jet on into the ascending aorta: the fastest AS-jet sample 3-3.5 cm from the valve
+      { let m = 0; for (let x = -4; x <= 4; x += 0.2) for (let y = -4; y <= 4; y += 0.2) for (let z = -4; z <= 4; z += 0.2) { const d = Math.hypot(x, y, z); if (d < 3 || d > 3.5) continue; const v = velocityAt(O[0] + x, O[1] + y, O[2] + z, G, p); if (v && v.flow === FLOW.AS_JET && v.speed > m) m = v.speed; }
+        check(gs, 'AS (0.2): jet speed 3-3.5 cm beyond the valve / at the orifice (one jet into the ascending aorta)', spAt(0.1) > 0 ? m / spAt(0.1) : null, [0.4, 0.9], '', `${m.toFixed(2)} m/s`); }
     }
   }
   {
@@ -4455,6 +4584,30 @@ SECTION = 'Pathology';
       const eMax = Math.max(...E), varT = nb > 1 && eMax > 0 ? (eMax - Math.min(...E)) / eMax * 100 : null;
       check(gV, 'tamponade: tricuspid E respiratory variation on the A4C tvTips trace minus tvEResp', varT != null ? varT - sTt.tvEResp : null, [-5, 5], 'pts',
         `trace ${varT != null ? varT.toFixed(1) : '-'} % (E per beat ${E.map((x) => x.toFixed(2)).join(', ')} m/s), solved ${sTt.tvEResp.toFixed(1)} %`);
+    }
+    // PHY-7 (review 12): the mitral inflow core is flat, so the tips gate reads the
+    // solved Q/A in every loading state: the variation a learner measures on the
+    // tamponade trace is the reported one, and the trace E is the reported E
+    {
+      const TPt = { effusion: true, tamponade: true }, sTt = hemoSummary(TPt);
+      const sp = trace('A4C', TPt, 'mvTips'), n = sp.cols, nb = sp.beats || 1, E = [];
+      for (let b = 0; b < nb; b++) {
+        let m = 0;
+        for (let c = Math.floor(b * n / nb); c < Math.floor((b + 1) * n / nb); c++) {
+          const ph = (c - b * n / nb) / (n / nb);
+          if (ph > 0.45 && ph < 0.8) m = Math.max(m, Math.abs(sp.vs[c]));
+        }
+        E.push(m);
+      }
+      const eMax = Math.max(...E), varM = nb > 1 && eMax > 0 ? (eMax - Math.min(...E)) / eMax * 100 : null;
+      check(gV, 'tamponade: mitral E respiratory variation on the A4C mvTips trace minus mvEResp', varM != null ? varM - sTt.mvEResp : null, [-3, 3], 'pts',
+        `trace ${varM != null ? varM.toFixed(1) : '-'} % (E per beat ${E.map((x) => x.toFixed(2)).join(', ')} m/s), solved ${sTt.mvEResp.toFixed(1)} %`);
+      const spN = trace('A4C', {}, 'mvTips'); let eN = 0;
+      for (let c = 0; c < spN.cols; c++) { const ph = c / spN.cols; if (ph > 0.45 && ph < 0.8) eN = Math.max(eN, spN.vs[c]); }
+      // (an uncorrected PW trace reads v cos(theta) of the beam-to-inflow angle)
+      const eRep = geometryAt(0, {}).hemo.vMitPeak * Math.cos((spN.angleDeg || 0) * Math.PI / 180);
+      // (the sample volume straddles the last mm above the tips, so a few % under)
+      check(gV, 'normal: mitral E on the A4C tips trace / the reported E (Q / A) x cos(beam angle)', eRep > 0 ? eN / eRep : null, [0.93, 1.03], '', `${eN.toFixed(2)} / ${eRep.toFixed(2)} m/s at ${(spN.angleDeg || 0).toFixed(0)} deg`);
     }
 
     // TTE-5 / PHY-11: a default RVOT PW in the PSAX-AV; the A2C has no inflow PW
