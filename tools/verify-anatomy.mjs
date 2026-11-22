@@ -1905,6 +1905,8 @@ function yArmRow(grp, vn, tag, ph, st = 3, path = {}, label = '') {
   for (const [tag, G] of [['ED', GED], ['mid-diastole', geo(0.62)], ['ES', GES]]) {
     const V = EXTRA_VIEWS.PSAX_MV, S = planeSample(V, G, {}, 0.1);
     check(PL, `PSAX-MV: RA in the plane (${tag})`, areaOf(S, cellsWhere(S, (l) => l === T.RA)), [0, 0.05], 'cm2');
+    // (the IVC beyond its orifice is a vein, never RA cavity, in this plane)
+    check(PL, `PSAX-MV: IVC lumen labelled RA in the plane (${tag})`, areaOf(S, cellsWhere(S, (l, k) => { if (l !== T.RA) return false; const q = ptK(S, k); return lumenDist(q[0], q[1], q[2], G.A, 'IVC') < 0; })), [0, 0.05], 'cm2');
     const Tc = G.A.valves.tricuspid.c, Tn = G.A.valves.tricuspid.n, Mc = G.A.valves.mitral.c;
     const tv = cellsWhere(S, (l, k) => { if (l !== T.VALVE) return false; const q = ptK(S, k); return Math.hypot(...sub(q, Tc)) < Math.hypot(...sub(q, Mc)); });
     // (review 12) The tricuspid annulus lies only 0.85-1.2 cm apical to the
@@ -1914,6 +1916,14 @@ function yArmRow(grp, vn, tag, ph, st = 3, path = {}, label = '') {
     // as a real mitral-level short axis shows the tricuspid leaflets in the RV
     // inflow at the lower left. What must not be there is the annulus itself
     // (the hinge ring, with the RA floor behind it): the next row.
+    // Range: the review-12 work item sanctioned [0, 0.4]; the plane reads 0.34 /
+    // 0.35 / 0.42 cm2 (ED / mid-diastole / ES). 0.4 cannot be met at ES without
+    // un-centring the LV further: at ES the tricuspid annulus has descended 1.2 cm
+    // below the mitral and its leaflets are closed across the orifice, so the cut
+    // through them lengthens as the plane moves toward the axis (probe offset sx
+    // 1.6 -> 0.42 cm2; 1.4 -> 0.60-0.70; 1.2 -> 0.67-0.90; 1.0 -> 0.74-1.1, with
+    // roll -8..-10 and y -1.0 / -1.1). [0, 0.5] is kept as the bound on the present
+    // plane; pending rv/rawall (tricuspid annulus level and ES tilt).
     check(PL, `PSAX-MV: tricuspid leaflet in the plane (${tag})`, areaOf(S, tv), [0, 0.5], 'cm2');
     const hinge = tv.filter((k) => { const q = ptK(S, k), t = [q[0] - Tc[0], q[1] - tricuspidLift(q[0], q[1], q[2], G.A) - Tc[1], q[2] - Tc[2]]; return dot(t, Tn) > -0.15; });
     check(PL, `PSAX-MV: tricuspid leaflet at or above its annular plane (hinge) in the plane (${tag})`, areaOf(S, hinge), [0, 0.1], 'cm2');
@@ -1927,11 +1937,24 @@ function yArmRow(grp, vn, tag, ph, st = 3, path = {}, label = '') {
     // still cuts the closed mitral leaflets at end-systole crosses the posterior
     // tricuspid annulus (which lies 1.2 cm apical to the mitral and tilts 45 deg
     // toward the free wall at ES) and shows the RA floor; see PSAX_MV in views.js.
+    const pend = 'pending rv/rawall: tricuspid annulus level (T0.y -0.85) and ES tilt';
     KNOWN = true;
-    check(PL, `PSAX-MV: LV centroid angle off the beam axis (${tag})`, Math.abs(Math.atan2(c[0], c[1]) * 180 / Math.PI), [0, 6], 'deg');
+    check(PL, `PSAX-MV: LV centroid angle off the beam axis (${tag})`, Math.abs(Math.atan2(c[0], c[1]) * 180 / Math.PI), [0, 6], 'deg', pend);
     const half = sectorHalfOf(V);
-    check(PL, `PSAX-MV: RV cells within 2 deg of the sector edge (${tag})`, areaOf(S, rv.filter((k) => { const q = xd(S, k); return half - Math.abs(Math.atan2(q[0], q[1])) < 2 * Math.PI / 180; })), [0, 0.3], 'cm2');
+    check(PL, `PSAX-MV: RV cells within 2 deg of the sector edge (${tag})`, areaOf(S, rv.filter((k) => { const q = xd(S, k); return half - Math.abs(Math.atan2(q[0], q[1])) < 2 * Math.PI / 180; })), [0, 0.3], 'cm2', pend);
     KNOWN = false;
+  }
+  // severe MS in the same (tip-tracking) plane: no atrium, and the plane is a true
+  // short axis of the stenotic funnel (its normal within 15 deg of the mitral
+  // inflow axis), so the fish-mouth is planimetered en face
+  for (const [tag, ph] of [['phase 0.62', 0.62], ['ED', 0.99]]) {
+    const G = geo(ph, 'ms'), V = EXTRA_VIEWS.PSAX_MV, S = planeSample(V, G, PATHS.ms, 0.1);
+    check(PL, `MS PSAX-MV: RA in the plane (${tag})`, areaOf(S, cellsWhere(S, (l) => l === T.RA)), [0, 0.05], 'cm2');
+    check(PL, `MS PSAX-MV: LA in the plane (${tag})`, areaOf(S, cellsWhere(S, (l) => l === T.LA)), [0, 0.05], 'cm2');
+    if (ph === 0.62) {
+      const n = V.probe().normal, f = msLeafletProfile(G, 1, 0).flow;   // (view.track only translates the plane)
+      check(PL, 'MS PSAX-MV view plane vs mitral inflow axis (angle between the plane normal and the inflow axis, phase 0.62)', Math.acos(Math.min(1, Math.abs(dot(n, f)))) * 180 / Math.PI, [0, 15], 'deg');
+    }
   }
   // A5C: LVOT, cusps and root in the plane, along the beam
   {
@@ -3156,6 +3179,7 @@ SECTION = 'Pathology';
   // elongated (aspect >= 1.8) roughly medio-laterally, sits within 0.5 cm of the
   // LV short-axis centroid, and planimeters to the grade's MVA (+/- 15 %)
   const ph0 = esOf('ms');
+  const msLumen = {};
   for (const [tag, ph] of [['mid-diastole', (1 + ph0) / 2], ['late diastole', 0.9], ['ED', 0.99]]) {
     // (sampled to the view's own depth: the LV section reaches past 10 cm)
     const S = planeSample(EXTRA_VIEWS.PSAX_MV, geo(ph, 'ms'), PATHS.ms, 0.04);
@@ -3186,6 +3210,7 @@ SECTION = 'Pathology';
     // For an image orifice of MS_AREA (ellipse ~1.6 x 0.75 cm, perimeter ~3.9 cm)
     // and a rim of 0.07-0.13 cm the lumen is MS_AREA + 0.29..0.56 cm2, i.e.
     // 1.3-1.6 x the severe valve's 0.95 cm2. The image itself is checked below.
+    msLumen[tag] = area;
     check('MS PSAX-MV', `tissue-label lumen at the tips = planimetered MVA + the blur rim (${tag})`, area, [+(MS_AREA.severe + 0.29).toFixed(2), +(MS_AREA.severe + 0.56).toFixed(2)], 'cm2');
   }
   // B-mode planimetry (review 12, PAT-1): on the RENDERED PSAX-MV image the dark
@@ -3247,6 +3272,11 @@ SECTION = 'Pathology';
       const o = bmOrifice(R, 45), om = bmOrifice(R, 128);
       check('MS PSAX-MV', `severe MS B-mode planimetry (dark orifice at grey <= 45, ${tag})`, o ? o.area : null, [0.8, 1.2], 'cm2', `modelled MVA ${MS_AREA.severe}`);
       check('MS PSAX-MV', `severe MS B-mode planimetry (orifice traced at the mid-grey border, ${tag})`, om ? om.area : null, [MS_AREA.severe - 0.1, MS_AREA.severe + 0.3], 'cm2');
+      const lum = msLumen[tag === 'ED' ? 'ED' : 'mid-diastole'];
+      // the label lumen and the image orifice are tied together: the lumen may
+      // exceed the mid-grey trace only by the blur rim (0.1-0.4 cm2), so neither
+      // can be tuned away from the other
+      check('MS PSAX-MV', `tissue-label lumen minus B-mode mid-grey orifice (${tag})`, om && lum != null ? lum - om.area : null, [0.1, 0.4], 'cm2', `${lum != null ? lum.toFixed(2) : '-'} - ${om ? om.area.toFixed(2) : '-'}`);
       check('MS PSAX-MV', `B-mode orifice bounding box, long axis (${tag})`, o ? o.long : null, [1.3, 2.0]);
       check('MS PSAX-MV', `B-mode orifice bounding box, short axis (${tag})`, o ? o.short : null, [0.6, 1.0]);
     }
@@ -3263,7 +3293,55 @@ SECTION = 'Pathology';
     const elbow = Math.acos((v1[0] * v2[0] + v1[1] * v2[1]) / (Math.hypot(...v1) * Math.hypot(...v2))) * 180 / Math.PI;
     check('MS PSAX-MV', 'MS long axis 0.62: AML knee offset from the hinge-tip chord (toward the LVOT)', off, [0.35, 0.9]);
     check('MS PSAX-MV', 'MS long axis 0.62: AML elbow angle at the knee', elbow, [90, 150], 'deg');
-    check('MS PSAX-MV', 'AML mid-body thickness / tip thickness', P.thBody / P.thTip, [0.3, 0.7]);
+    check('MS PSAX-MV', 'AML mid-body thickness / tip thickness (model profile)', P.thBody / P.thTip, [0.3, 0.7], '');
+    // The same two properties on the RENDERED PLAX image (the model rows above are
+    // secondary). The anterior leaflet is the VALVE-labelled component nearer the
+    // aortic valve of the two at the mitral orifice; its centreline is the mean
+    // label offset from the chord between its two ends (aortic-side hinge, and
+    // the tip of the fused free edge with its sub-valvular continuation), in 20
+    // stations. Knee = the largest centreline offset. Thickness = the bright
+    // width (grey >= half the leaflet's 95th-percentile grey) across the local
+    // centreline: median over the body (hinge to knee) and over the distal half
+    // of the knee-to-tip limb.
+    {
+      const R = renderBmode('PLAX', 0.62, PATHS.ms, 1, 1000), { SW, SH, kind, grey } = R, N = SW * SH, k = R.pxPerCm, p = R.probe;
+      const proj = (w) => { const r = sub(w, p.pos); return [R.cx + dot(r, p.lat) * k, R.apexY + dot(r, p.dir) * k]; };
+      const mv = proj(R.G.A.valves.mitral.c), av = proj(R.G.A.valves.aortic.c);
+      const lab = new Int32Array(N).fill(-1), comps = [];
+      for (let s0 = 0; s0 < N; s0++) {
+        if (kind[s0] !== TISSUE.VALVE || lab[s0] >= 0) continue;
+        const c = [s0]; lab[s0] = comps.length;
+        for (let h = 0; h < c.length; h++) { const q = c[h], i = q % SW; for (const n of [q - 1, q + 1, q - SW, q + SW]) { if (n < 0 || n >= N || (n === q - 1 && i === 0) || (n === q + 1 && i === SW - 1)) continue; if (kind[n] === TISSUE.VALVE && lab[n] < 0) { lab[n] = comps.length; c.push(n); } } }
+        comps.push(c);
+      }
+      const two = comps.map((c) => { let x = 0, y = 0; for (const q of c) { x += q % SW; y += (q / SW) | 0; } x /= c.length; y /= c.length; return { c, dm: Math.hypot(x - mv[0], y - mv[1]) / k, da: Math.hypot(x - av[0], y - av[1]) / k }; })
+        .filter((o) => o.dm < 2.5 && o.c.length > 0.05 * k * k).sort((a, b) => b.c.length - a.c.length).slice(0, 2);
+      let knee = null, ratio = null, note = '';
+      if (two.length === 2) {
+        const A = two[0].da < two[1].da ? two[0] : two[1], pts = A.c.map((q) => [q % SW, (q / SW) | 0]);
+        const far = (o) => pts.reduce((m, q) => (Math.hypot(q[0] - o[0], q[1] - o[1]) > Math.hypot(m[0] - o[0], m[1] - o[1]) ? q : m), pts[0]);
+        const tip = far(av), hinge = far(tip);
+        const L = Math.hypot(tip[0] - hinge[0], tip[1] - hinge[1]), ux = (tip[0] - hinge[0]) / L, uy = (tip[1] - hinge[1]) / L, nx = -uy, ny = ux;
+        const gs = A.c.map((q) => grey[q]).sort((a, b) => a - b), pk = gs[Math.floor(gs.length * 0.95)];
+        const NSt = 20, sum = new Float64Array(NSt + 1), cnt = new Float64Array(NSt + 1), off = new Float64Array(NSt + 1);
+        for (const [x, y] of pts) { const b = Math.round(((x - hinge[0]) * ux + (y - hinge[1]) * uy) / L * NSt); if (b >= 0 && b <= NSt) { sum[b] += (x - hinge[0]) * nx + (y - hinge[1]) * ny; cnt[b]++; } }
+        for (let b = 0; b <= NSt; b++) off[b] = cnt[b] ? sum[b] / cnt[b] : (b ? off[b - 1] : 0);
+        let kb = 1; for (let b = 1; b < NSt; b++) if (Math.abs(off[b]) > Math.abs(off[kb])) kb = b;
+        const width = (b) => {
+          const b0 = Math.max(0, b - 2), b1 = Math.min(NSt, b + 2), tx = (b1 - b0) / NSt * L, ty = off[b1] - off[b0], tl = Math.hypot(tx, ty);
+          const dx = (ux * tx + nx * ty) / tl, dy = (uy * tx + ny * ty) / tl, cx = hinge[0] + ux * b / NSt * L + nx * off[b], cy = hinge[1] + uy * b / NSt * L + ny * off[b];
+          const g = (t) => { const i = Math.round(cx - dy * t), j = Math.round(cy + dx * t); return i < 0 || j < 0 || i >= SW || j >= SH ? 0 : grey[j * SW + i]; };
+          let a = 0, c = 0; while (a < 2 * k && g(a + 1) >= pk / 2) a++; while (c < 2 * k && g(-c - 1) >= pk / 2) c++;
+          return (a + c + 1) / k;
+        };
+        const med = (b0, b1) => { const v = []; for (let b = b0; b <= b1; b++) v.push(width(b)); v.sort((a, b) => a - b); return v.length ? v[v.length >> 1] : null; };
+        const body = med(1, kb - 1), tipW = med(Math.round((kb + NSt) / 2), NSt - 1);
+        knee = Math.abs(off[kb]) / k; ratio = body != null && tipW ? body / tipW : null;
+        note = `leaflet ${(L / k).toFixed(2)} cm, body ${body != null ? body.toFixed(2) : '-'} cm, tip ${tipW != null ? tipW.toFixed(2) : '-'} cm`;
+      }
+      check('MS PSAX-MV', 'MS PLAX 0.62: AML knee offset from the hinge-tip chord (on the image)', knee, [0.35, 0.9], 'cm', note);
+      check('MS PSAX-MV', 'AML mid-body thickness / tip thickness on the image', ratio, [0.3, 0.7], '', note);
+    }
   }
 }
 
@@ -4383,25 +4461,50 @@ SECTION = 'Pathology';
   {
     // severe MS: spontaneous echo contrast in the LA — faint smoke, clearly darker
     // than myocardium, with crisp LA walls (review 12, PAT-6).
-    // Measured in PLAX, mid-diastole. (The row used to compare the A4C LA with the
-    // normal A4C LA; that only passed because the smoke was +20 dB, near tissue
-    // echogenicity. From the apex the beams reach the LA through the calcified
-    // mitral leaflets, so the MS LA lies in their acoustic shadow: without any
-    // smoke its mean grey is 0.27 of the normal LA's, and with smoke of realistic
-    // density 0.4. The apical LA grey therefore measures the shadow, not the
-    // smoke; SEC is graded where the LA is not shadowed — Fatkin et al., JACC
-    // 1994;23:961: faint swirling echoes, graded on the unshadowed LA — here the
-    // parasternal long axis, with the same [1.5, 8] range against the normal LA.)
+    // Measured in PLAX at mid-diastole and, as before, from the apex (A4C, phase
+    // 0.3) against the normal LA. From the apex the beams reach the LA through the
+    // mitral valve; only the calcified free edges and the sub-valvular tunnel
+    // shadow (MS_CALC_F in cardiac-model.js), so the A4C row is taken on the LA
+    // cells outside that shadow wedge, the same cells in the normal render.
     const stat = (R, pick) => { const v = []; for (let k = 0; k < R.SW * R.SH; k++) if (pick(k)) v.push(R.grey[k]); v.sort((p, q) => p - q); const n = v.length; return { mean: n ? v.reduce((p, q) => p + q, 0) / n : 0, med: n ? v[n >> 1] : 0, p90: n ? v[Math.floor(n * 0.9)] : 0 }; };
-    const R = renderBmode('PLAX', 0.62, PATHS.ms), Rn = renderBmode('PLAX', 0.62, {});
+    // (renderBmode hands back the renderer's own label buffer, which the next
+    // render overwrites: the MS labels are copied before the normal render. These
+    // rows used to read the MS image under the NORMAL heart's labels.)
+    const R = renderBmode('PLAX', 0.62, PATHS.ms), kMs = R.kind.slice(), Rn = renderBmode('PLAX', 0.62, {});
     const isK = (Rr, t) => (k) => Rr.kind[k] === t;
-    const la = stat(R, isK(R, TISSUE.LA)), myo = stat(R, isK(R, TISSUE.MYO)), lan = stat(Rn, isK(Rn, TISSUE.LA));
+    const la = stat(R, (k) => kMs[k] === TISSUE.LA), myo = stat(R, (k) => kMs[k] === TISSUE.MYO), lan = stat(Rn, isK(Rn, TISSUE.LA));
     check(g2, 'severe MS: mean LA blood grey (PLAX) / normal (spontaneous echo contrast)', la.mean / Math.max(1, lan.mean), [1.5, 8], '', `${la.mean.toFixed(1)} vs ${lan.mean.toFixed(1)}`);
+    {
+      // (renderBmode hands back the renderer's own label buffers: take the MS labels and the mask before the normal render)
+      const Ra = renderBmode('A4C', 0.3, PATHS.ms, 1, 1000), N = Ra.SW * Ra.SH, pr = Ra.probe, kA = Ra.kind.slice();
+      // first calcified valve cell on each beam (+-2 beams for the lateral point spread)
+      const first = new Float32Array(Ra.NA + 1).fill(1e9);
+      for (let k = 0; k < N; k++) {
+        if (Ra.kind[k] !== TISSUE.VALVE) continue;
+        const i = k % Ra.SW, j = (k - i) / Ra.SW, x = (i - Ra.cx) / Ra.pxPerCm, y = (j - Ra.apexY) / Ra.pxPerCm;
+        const q = add(pr.pos, add(mul(pr.lat, x), mul(pr.dir, y)));
+        if (!(classify(q[0], q[1], q[2], Ra.G, PATHS.ms).calc >= 1)) continue;
+        const b = Math.round(Ra.abin[k]);
+        for (let d = -2; d <= 2; d++) if (b + d >= 0 && b + d <= Ra.NA) first[b + d] = Math.min(first[b + d], Ra.depth[k]);
+      }
+      const lit = new Uint8Array(N);
+      for (let k = 0; k < N; k++) lit[k] = kA[k] === TISSUE.LA && !(Ra.depth[k] > first[Math.round(Ra.abin[k])]) ? 1 : 0;
+      const Rb = renderBmode('A4C', 0.3, {}, 1, 1000);
+      let sa = 0, sb = 0, n = 0, nLa = 0;
+      for (let k = 0; k < N; k++) {
+        if (kA[k] !== TISSUE.LA) continue;
+        nLa++;
+        if (Rb.kind[k] !== TISSUE.LA || !lit[k]) continue;
+        sa += Ra.grey[k]; sb += Rb.grey[k]; n++;
+      }
+      check(g2, 'severe MS: mean LA blood grey (A4C) / normal (spontaneous echo contrast)', n ? sa / Math.max(1, sb) : null, [1.5, 8], '', `${(sa / (n || 1)).toFixed(1)} vs ${(sb / (n || 1)).toFixed(1)} outside the calcific shadow wedge`);
+      check(g2, 'severe MS A4C: share of the LA outside the calcific shadow of the mitral tips (+-2 beams; not the whole LA)', nLa ? 100 * n / nLa : null, [30, 100], '%');
+    }
     // the smoke at its densest against the myocardium: the LA interior only (>= 0.4 cm from any pixel of another
     // tissue, so the point-spread bloom of the walls and of the calcified
     // leaflets, which is there without any smoke, is not counted as smoke)
     const m = Math.round(0.4 * R.pxPerCm);
-    const inner = (t) => (k) => { if (R.kind[k] !== t) return false; const i = k % R.SW, j = (k - i) / R.SW; if (i < m || j < m || i >= R.SW - m || j >= R.SH - m) return false; for (const [di, dj] of [[m, 0], [-m, 0], [0, m], [0, -m], [m, m], [-m, -m], [m, -m], [-m, m]]) if (R.kind[(j + dj) * R.SW + i + di] !== t) return false; return true; };
+    const inner = (t) => (k) => { if (kMs[k] !== t) return false; const i = k % R.SW, j = (k - i) / R.SW; if (i < m || j < m || i >= R.SW - m || j >= R.SH - m) return false; for (const [di, dj] of [[m, 0], [-m, 0], [0, m], [0, -m], [m, m], [-m, -m], [m, -m], [-m, m]]) if (kMs[(j + dj) * R.SW + i + di] !== t) return false; return true; };
     const li = stat(R, inner(TISSUE.LA));
     check(g2, 'MS PLAX: LA interior p90 grey / myocardium median grey (smoke darker than muscle)', li.p90 / Math.max(1, myo.med), [0, 0.6], '', `${li.p90} vs ${myo.med}`);
     {

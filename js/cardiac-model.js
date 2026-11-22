@@ -1151,6 +1151,7 @@ const TV_MOD = { mild: { gap: 0.1 }, moderate: { gap: 0.25 }, severe: { gap: 0.4
 //   chord (anterior leaflet: the "hockey stick"; the posterior leaflet is stiffer).
 const MS_Q = 0.66, MS_TIP_BULB = 1.0, MS_DEPTH = 1.4, MS_THICK = 1.2, MS_TUBE = 0.45;
 const MS_BOW_A = 0.45, MS_BOW_P = 0.2;
+const MS_CALC_F = 0.85;   // leaflet fraction (0 hinge .. 1 tip) beyond which the leaflet is calcified
 const MS_SHEAR = 0.25;                                    // tip-ring shear along the commissural axis
 const MS_TIP_T = 0.5 * (AVL.mitral.thickA + AVL.mitral.thickP) * MS_THICK * (1.1 + MS_TIP_BULB);   // tip half-thickness
 // Planimetry is done on the IMAGE: the sonographer traces the inner border of the
@@ -1181,7 +1182,7 @@ export function msLeafletProfile(G, sgn = 1, q = 0) {
   const L = avLeafletPoly(P, sgn, q, G.valves.mitral, G.A.lv.mvR / LM.MV_R, avMod(path));
   const th0 = (sgn > 0 ? P.thickA : P.thickP) * MS_THICK;
   const bodyFrac = 1 - (P.ovl + 0.08) / L.len, fm = 0.5 * bodyFrac;
-  return { hinge: [L.uh, L.ah], knee: [L.ub, L.ab], tip: [L.ut, L.at], tube: L.tube,
+  return { hinge: [L.uh, L.ah], knee: [L.ub, L.ab], tip: [L.ut, L.at], tube: L.tube, flow: LEAFLETS.mitral.flow,
     thBody: th0 * (1.1 + MS_TIP_BULB * fm * fm * fm), thTip: th0 * (1.1 + MS_TIP_BULB) };
 }
 const _modCache = new WeakMap();
@@ -1268,8 +1269,14 @@ function valveTissue(px, py, pz, G, path) {
       const f = avLeafletHit(AVL[name], u, a, c, open, sc, mod, ms ? MS_THICK : 1);
       if (f < 0) continue;
       _valveResult.tissue = TISSUE.VALVE;
+      // rheumatic MS: the calcium sits in the fused free edges and the sub-valvular
+      // tunnel (f >= MS_CALC_F); the leaflet bodies are fibrotic and pliable, bright
+      // but not shadowing (Wilkins GT et al., Br Heart J 1988;60:299: thickening and
+      // calcification graded from the leaflet margins toward the base). With the
+      // whole leaflet flagged calcific, the apical views had the entire LA in an
+      // acoustic shadow.
       _valveResult.echo = ms ? 0.98 : 0.8 + 0.06 * (1 - f);
-      _valveResult.calc = ms ? 1 : 0;
+      _valveResult.calc = ms && f >= MS_CALC_F ? 1 : 0;
       return _valveResult;
     }
     // Semilunar cusps: three curtains hinging at the annulus.
