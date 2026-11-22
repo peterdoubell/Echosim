@@ -20,6 +20,7 @@ import { RWMA_SCENARIOS, DCM_SEVERITIES } from './scenarios.js';
 import { PlaybackClock } from './playback-clock.js';
 // (a case's own heart rate, the tamponade breath and swinging heart)
 import { hemodynamics, heartRate, breathPath, swingOffset, TAMPONADE_HR } from './cardiac-model.js';
+import { colourPreset } from './echo.js';
 
 // ---------------------------------------------------------------------------
 // Standard echocardiographic windows: derived from the anatomy landmarks in
@@ -761,6 +762,21 @@ function applyColourDefault(name) {
   echo.colorOn = on;
   const c = document.getElementById('colorOn');
   if (c) c.checked = on;
+  applyColourPreset(name, hidden);
+}
+// The colour scale and box a case opens with (colourPreset: a narrowed box and a
+// ~45 cm/s scale for an ASD shunt study). Applied when the preset changes (a new
+// case), so the learner's own Nyquist setting stays as they move between views;
+// a hidden-diagnosis case keeps the standard one, which gives nothing away.
+let lastColourPreset = null;
+function applyColourPreset(name, hidden) {
+  const pre = colourPreset(name, hidden ? {} : state.path || {});
+  const sig = pre.nyquist + '/' + pre.box;
+  if (sig === lastColourPreset) return;
+  lastColourPreset = sig;
+  echo.nyquist = pre.nyquist;
+  echo.cboxSize = pre.box;
+  setRange('nyq', pre.nyquist, 'nyqOut', pre.nyquist.toFixed(2), pre.nyquist + ' m/s');
 }
 
 // Scanner-style probe banner. Real machines annotate the active imaging mode on
@@ -1147,6 +1163,7 @@ function resetAll() {
   setRange('gain', DEFAULTS.gain, 'gainOut', DEFAULTS.gain.toFixed(1), DEFAULTS.gain.toFixed(1));
   echo.nyquist = DEFAULTS.nyq;
   setRange('nyq', DEFAULTS.nyq, 'nyqOut', DEFAULTS.nyq.toFixed(2), DEFAULTS.nyq + ' m/s');
+  lastColourPreset = null;           // (setView below re-applies the case's colour preset)
   // toggles back on
   // harmonic imaging is off by default (fundamental), unlike the toggles below
   const harm = document.getElementById('harmonicOn');
