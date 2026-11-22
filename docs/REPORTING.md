@@ -426,17 +426,17 @@ your own write-up.
 | Case | Model conclusion |
 |---|---|
 | Normal | Structurally normal heart. Normal biventricular size and systolic function. No significant valve disease. |
-| Aortic stenosis | 1. Severe aortic stenosis (Vmax 4.4 m/s, mean gradient 47 mmHg, AVA 0.54 cm²). 2. LV concentric hypertrophy. 3. Dilated left atrium (LAVi 50 mL/m²). |
-| Mitral regurgitation | 1. Severe mitral regurgitation (RF 54%, RVol 66 mL). 2. Moderately dilated LV (LVEDVi 102 mL/m²). 3. Dilated left atrium (LAVi 66 mL/m²). |
+| Aortic stenosis | 1. Severe aortic stenosis (Vmax 4.4 m/s, mean gradient 47 mmHg, AVA 0.54 cm²). 2. LV concentric hypertrophy. 3. Dilated left atrium (LAVi 52 mL/m²). |
+| Mitral regurgitation | 1. Severe mitral regurgitation (RF 54%, RVol 66 mL). 2. Moderately dilated LV (LVEDVi 102 mL/m²). 3. Dilated left atrium (LAVi 67 mL/m²). |
 | Mitral stenosis | 1. Severe mitral stenosis (MVA 1.00 cm², mean gradient 13.8 mmHg). 2. Dilated left atrium (LAVi 85 mL/m²). 3. High echocardiographic probability of pulmonary hypertension (TR Vmax 3.5 m/s, PASP ~56 mmHg). 4. RV dilatation (RVD1 48 mm) with impaired RV systolic function (TAPSE 15 mm, FAC 34%). |
-| Dilated cardiomyopathy | 1. Severely impaired LV systolic function, LVEF 27%. 2. Severely dilated LV (LVEDVi 120 mL/m²). 3. Moderate functional mitral regurgitation (RF 33%). 4. Dilated left atrium (LAVi 67 mL/m²). 5. RV dilatation (RVD1 48 mm) with impaired RV systolic function (TAPSE 10 mm, FAC 20%). |
+| Dilated cardiomyopathy | 1. Severely impaired LV systolic function, LVEF 27%. 2. Severely dilated LV (LVEDVi 120 mL/m²). 3. Moderate functional mitral regurgitation (RF 33%). 4. Dilated left atrium (LAVi 68 mL/m²). 5. RV dilatation (RVD1 48 mm) with impaired RV systolic function (TAPSE 10 mm, FAC 20%). |
 | Regional wall motion abnormality | 1. Impaired LV systolic function, LVEF 41%. 2. Regional wall motion abnormality: septal and apical hypokinesis (LAD territory). |
 | Pericardial effusion | 1. Large pericardial effusion (2.3 cm). |
 | Cardiac tamponade | 1. Large pericardial effusion (2.5 cm) with echocardiographic features of tamponade (RA inversion, RV diastolic collapse, plethoric IVC, mitral E variation 27%, tricuspid E 45%). Tamponade is a clinical diagnosis. |
-| Tricuspid regurgitation | 1. Severe tricuspid regurgitation (TR Vmax 2.4 m/s). 2. RV dilatation (RVD1 52 mm). |
+| Tricuspid regurgitation | 1. Severe tricuspid regurgitation (TR Vmax 2.5 m/s). 2. RV dilatation (RVD1 53 mm). |
 | Pulmonary hypertension | 1. High echocardiographic probability of pulmonary hypertension (TR Vmax 4.3 m/s, PASP ~89 mmHg). 2. RV dilatation (RVD1 48 mm) with impaired RV systolic function (TAPSE 15 mm, FAC 33%). |
 | Atrial septal defect | 1. Secundum ASD (Qp:Qs 1.7). 2. RV dilatation (RVD1 57 mm). |
-| Ventricular septal defect | 1. Mildly dilated LV (LVEDVi 83 mL/m²). 2. Dilated left atrium (LAVi 39 mL/m²). 3. Restrictive muscular VSD (Qp:Qs 1.3). |
+| Ventricular septal defect | 1. Mildly dilated LV (LVEDVi 83 mL/m²). 2. Dilated left atrium (LAVi 40 mL/m²). 3. Restrictive muscular VSD (Qp:Qs 1.3). |
 
 A few reporting points from these cases:
 
