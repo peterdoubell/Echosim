@@ -119,6 +119,8 @@ const ALPHA = {
 // Default TGC slope: compensates the average soft-tissue/blood path, so tissue
 // is roughly flat with depth and the far field slightly darker and noisier.
 const ALPHA_TGC = 0.38;
+// how far past the displayed depth a beam is followed for the pleura alone (cm)
+const PLEURA_BEYOND = 2.0;
 
 // Characteristic acoustic impedance of each tissue class (MRayl; blood 1.61,
 // myocardium ~1.68, fat ~1.38, dense fibrous tissue ~1.8), used for the specular
@@ -1481,6 +1483,25 @@ export class EchoView {
         const cap = past < 3 ? cNear : past > 5 ? cFar : cNear - (cNear - cFar) * (past - 3) * (past - 3) * (6 - past) / 4;
         enh[base + s] = Math.pow(10, Math.min(cap, kTgc * depth - att) / 20);
         att += 0.5 * (al === undefined ? 0.5 : al) * kAtt;
+      }
+      // The far arc is an edge of the sector like its sides: a pleura that runs out
+      // through it has not ended. Follow the beam PLEURA_BEYOND cm past the
+      // displayed depth for the pleural depth alone, so the line's incidence and
+      // its end taper are taken from where the pleura really goes. (Without it a
+      // pleural line leaving through the far arc was faded out over its last beams
+      // as if the lung stopped there — the far corner of the suprasternal sector.)
+      if (lungD[a] > 1e8) {
+        for (let depth = (NS + 0.5) * dStep; depth < this.depthCm + PLEURA_BEYOND; depth += dStep) {
+          if (classify(P[0] + depth * bx, P[1] + depth * by, P[2] + depth * bz, G, path).tissue !== TISSUE.LUNG ||
+              classify(P[0] + (depth + 0.4) * bx, P[1] + (depth + 0.4) * by, P[2] + (depth + 0.4) * bz, G, path).tissue !== TISSUE.LUNG) continue;
+          let lo = depth - dStep, hi = depth;
+          for (let it = 0; it < 5; it++) {
+            const mid = 0.5 * (lo + hi);
+            if (classify(P[0] + mid * bx, P[1] + mid * by, P[2] + mid * bz, G, path).tissue === TISSUE.LUNG) hi = mid; else lo = mid;
+          }
+          lungD[a] = hi;
+          break;
+        }
       }
     }
     // Calcific-AS nodules: the beam is wider (~2-3 mm) than the ~1 mm slits
