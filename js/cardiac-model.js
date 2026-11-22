@@ -1399,7 +1399,8 @@ function laaFlowSpeed(phase) {
 }
 
 // Hepatic-vein flow speed (m/s, + toward the RA): the solved caval inflow of the
-// circulation (H.Qvr, mL/s, on the right heart's clock) over an effective vessel
+// circulation (H.Qvr, mL/s, read at the cycle phase like every other solved
+// signal: hemoFrame keeps no separate right-heart clock) over an effective vessel
 // area. The S wave is the RA's fall in pressure as the tricuspid annulus descends
 // (x descent), the D wave its emptying once the tricuspid opens (y descent), and
 // a reversal wherever the RA pressure rises above the systemic venous pressure:
