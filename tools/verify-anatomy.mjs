@@ -25,7 +25,7 @@ import { LM, REF, lumenDist, mitralLift, tricuspidLift, RIDGE, BODY_AX, diaphrag
 import { MS_AREA } from '../js/hemodynamics.js';
 import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, ALL_VIEWS as ALL_V, teePathDist, teeManipulate, teeOmni, sectorHalfOf } from '../js/views.js';
 import { renderBmode, beamSample, speckleAxis, renderDoppler } from './bmode.mjs';
-import { velocityAt, VALVE_DEFS } from '../js/cardiac-model.js';
+import { velocityAt, VALVE_DEFS, msLeafletProfile } from '../js/cardiac-model.js';
 
 const VERBOSE = process.argv.includes('--verbose');
 const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
@@ -3178,7 +3178,93 @@ SECTION = 'Pathology';
     check('MS PSAX-MV', `fish-mouth aspect ratio (${tag})`, ar, [1.8, 4], '', `orifice ${area.toFixed(2)} cm2`);
     check('MS PSAX-MV', `fish-mouth long axis vs medio-lateral (${tag})`, ang, [0, 25], 'deg');
     check('MS PSAX-MV', `orifice centroid to LV short-axis centroid (${tag})`, off, [0, 0.5]);
-    check('MS PSAX-MV', `planimetered MVA (${tag})`, area, [+(MS_AREA.severe * 0.85).toFixed(2), +(MS_AREA.severe * 1.15).toFixed(2)], 'cm2');
+    // (review 12, PAT-1) This row is the TISSUE-LABEL lumen, not the planimetered
+    // area. Planimetry traces the inner border of the bright leaflet ring on the
+    // image, which lies inside the anatomical lumen by about the point-spread
+    // half-width (~0.1 cm at 8 cm depth; leaflet blooming, worse at high gain:
+    // Martin RP et al., Am J Cardiol 1979;43:560). The row used to demand
+    // lumen = MS_AREA +/- 15 %, and the image then showed a 0.2-0.45 cm2 pin-hole.
+    // For an image orifice of MS_AREA (ellipse ~1.6 x 0.75 cm, perimeter ~3.9 cm)
+    // and a rim of 0.07-0.13 cm the lumen is MS_AREA + 0.29..0.56 cm2, i.e.
+    // 1.3-1.6 x the severe valve's 0.95 cm2. The image itself is checked below.
+    check('MS PSAX-MV', `tissue-label lumen at the tips = planimetered MVA + the blur rim (${tag})`, area, [+(MS_AREA.severe + 0.29).toFixed(2), +(MS_AREA.severe + 0.56).toFixed(2)], 'cm2');
+  }
+  // B-mode planimetry (review 12, PAT-1): on the RENDERED PSAX-MV image the dark
+  // orifice inside the leaflet ring is the grade's MVA. The image is smoothed 3 x 3
+  // (speckle nulls) and flood-filled from the labelled orifice at two edge levels:
+  // near-black (grey <= 45, the reviewer's measure) and the mid-grey border a
+  // sonographer traces (grey <= 128); they bracket MS_AREA (0.95 cm2), which is
+  // also what the Hakki and PHT rows give. Bounding box of the near-black orifice
+  // along its principal axes: ~1.6 x 0.8 cm.
+  {
+    const bmOrifice = (R, thr) => {
+      const { SW, SH, kind, grey } = R, N = SW * SH;
+      let vx = 0, vy = 0, vn = 0;
+      for (let k = 0; k < N; k++) if (kind[k] === TISSUE.VALVE) { vx += k % SW; vy += (k / SW) | 0; vn++; }
+      if (!vn) return null;
+      vx /= vn; vy /= vn;
+      const lab = new Int32Array(N).fill(-1), comps = [];
+      for (let s0 = 0; s0 < N; s0++) {
+        if (kind[s0] !== TISSUE.LV || lab[s0] >= 0) continue;
+        const c = [s0]; lab[s0] = comps.length;
+        for (let h = 0; h < c.length; h++) {
+          const k = c[h], i = k % SW;
+          for (const n of [k - 1, k + 1, k - SW, k + SW]) {
+            if (n < 0 || n >= N || (n === k - 1 && i === 0) || (n === k + 1 && i === SW - 1)) continue;
+            if (kind[n] === TISSUE.LV && lab[n] < 0) { lab[n] = comps.length; c.push(n); }
+          }
+        }
+        comps.push(c);
+      }
+      const big = comps.reduce((m, c) => (c.length > m.length ? c : m), []);
+      let best = null, bd = 1e9;
+      for (const c of comps) {
+        if (c === big || c.length < 20) continue;
+        let x = 0, y = 0;
+        for (const k of c) { x += k % SW; y += (k / SW) | 0; }
+        const d = Math.hypot(x / c.length - vx, y / c.length - vy);
+        if (d < bd) { bd = d; best = c; }
+      }
+      if (!best) return null;
+      const sm = new Float32Array(N);
+      for (let j = 1; j < SH - 1; j++) for (let i = 1; i < SW - 1; i++) { let t = 0; for (let b = -1; b <= 1; b++) for (let a = -1; a <= 1; a++) t += grey[(j + b) * SW + i + a]; sm[j * SW + i] = t / 9; }
+      const seen = new Uint8Array(N), q = [];
+      for (const k of best) if (sm[k] <= thr) { seen[k] = 1; q.push(k); }
+      const lim = 6 * best.length + 2000;                // (a leak into the LV cavity shows as a huge area)
+      for (let h = 0; h < q.length && q.length < lim; h++) { const k = q[h]; for (const n of [k - 1, k + 1, k - SW, k + SW]) if (n >= 0 && n < N && !seen[n] && sm[n] <= thr && R.mask[n]) { seen[n] = 1; q.push(n); } }
+      let cx = 0, cy = 0;
+      for (const k of q) { cx += k % SW; cy += (k / SW) | 0; }
+      cx /= q.length || 1; cy /= q.length || 1;
+      let a = 0, b = 0, d = 0;
+      for (const k of q) { const x = k % SW - cx, y = ((k / SW) | 0) - cy; a += x * x; b += x * y; d += y * y; }
+      const th = 0.5 * Math.atan2(2 * b, a - d), co = Math.cos(th), si = Math.sin(th);
+      let l0 = 1e9, l1 = -1e9, s0 = 1e9, s1 = -1e9;
+      for (const k of q) { const x = k % SW - cx, y = ((k / SW) | 0) - cy, u = x * co + y * si, v = -x * si + y * co; l0 = Math.min(l0, u); l1 = Math.max(l1, u); s0 = Math.min(s0, v); s1 = Math.max(s1, v); }
+      return { area: q.length / (R.pxPerCm * R.pxPerCm), long: (l1 - l0 + 1) / R.pxPerCm, short: (s1 - s0 + 1) / R.pxPerCm };
+    };
+    for (const [tag, ph] of [['phase 0.62', 0.62], ['ED', 0.99]]) {
+      // (pinned speckle seed: the row does not depend on, or shift, the other image rows)
+      const R = renderBmode('PSAX_MV', ph, PATHS.ms, 1, 1000);
+      const o = bmOrifice(R, 45), om = bmOrifice(R, 128);
+      check('MS PSAX-MV', `severe MS B-mode planimetry (dark orifice at grey <= 45, ${tag})`, o ? o.area : null, [0.8, 1.2], 'cm2', `modelled MVA ${MS_AREA.severe}`);
+      check('MS PSAX-MV', `severe MS B-mode planimetry (orifice traced at the mid-grey border, ${tag})`, om ? om.area : null, [MS_AREA.severe - 0.1, MS_AREA.severe + 0.3], 'cm2');
+      check('MS PSAX-MV', `B-mode orifice bounding box, long axis (${tag})`, o ? o.long : null, [1.3, 2.0]);
+      check('MS PSAX-MV', `B-mode orifice bounding box, short axis (${tag})`, o ? o.short : null, [0.6, 1.0]);
+    }
+  }
+  // Diastolic doming (review 12, PAT-5): in the leaflet's own long-axis section the
+  // anterior leaflet's knee stands 0.35-0.9 cm off the hinge-tip chord toward the
+  // LVOT (the "hockey stick": elbow <= 150 deg), and the pliable body is thinner
+  // than the fused tip.
+  {
+    const P = msLeafletProfile(geo(0.62, 'ms'), 1, 0);
+    const du = P.tip[0] - P.hinge[0], da = P.tip[1] - P.hinge[1], L = Math.hypot(du, da);
+    const off = ((P.knee[0] - P.hinge[0]) * da - (P.knee[1] - P.hinge[1]) * du) / L;
+    const v1 = [P.hinge[0] - P.knee[0], P.hinge[1] - P.knee[1]], v2 = [P.tip[0] - P.knee[0], P.tip[1] - P.knee[1]];
+    const elbow = Math.acos((v1[0] * v2[0] + v1[1] * v2[1]) / (Math.hypot(...v1) * Math.hypot(...v2))) * 180 / Math.PI;
+    check('MS PSAX-MV', 'MS long axis 0.62: AML knee offset from the hinge-tip chord (toward the LVOT)', off, [0.35, 0.9]);
+    check('MS PSAX-MV', 'MS long axis 0.62: AML elbow angle at the knee', elbow, [90, 150], 'deg');
+    check('MS PSAX-MV', 'AML mid-body thickness / tip thickness', P.thBody / P.thTip, [0.3, 0.7]);
   }
 }
 

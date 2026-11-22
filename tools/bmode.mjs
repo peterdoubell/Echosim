@@ -25,7 +25,10 @@ const EVS = {};   // one renderer per sampling stride, so a coarse render leaves
 // with the same per-view settings main.js applies; colour Doppler off. `stride`
 // pins the sampling stride (1 = every pixel; the app's FPS-adaptive sampler goes
 // up to 3 on slow hardware, one sample per 3 x 3 pixel block).
-export function renderBmode(name, phase = 0, path = {}, stride = 1) {
+// `frame` (optional) pins the renderer's frame counter (the blood-speckle seed) for
+// this one render and restores it afterwards: the image then does not depend on
+// how many renders came before it, and later renders are not shifted by it.
+export function renderBmode(name, phase = 0, path = {}, stride = 1, frame = null) {
   if (!EVS[stride]) { EVS[stride] = new EchoView(stubCanvas(), null); EVS[stride]._pinStride = stride; EVS[stride]._stride = stride; }
   const e = EVS[stride];
   const tee = TEE_VIEWS[name], vw = tee || TTE_VIEWS[name] || EXTRA_VIEWS[name];
@@ -41,7 +44,10 @@ export function renderBmode(name, phase = 0, path = {}, stride = 1) {
   const G = geometryAt(phase, path);
   let probe = { ...base };
   if (vw.track) { const o = vw.track(G.A); probe = { ...base, pos: add(base.pos, o), target: base.target && add(base.target, o) }; }
+  const f0 = e._frame;
+  if (frame != null) e._frame = frame;
   e.render(G, path, probe, 0);
+  if (frame != null) e._frame = f0;
   const SW = e.img.width, SH = e.img.height, d = e.img.data;
   const grey = new Float32Array(SW * SH);
   for (let i = 0; i < SW * SH; i++) grey[i] = d[i * 4];
