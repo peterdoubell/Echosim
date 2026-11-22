@@ -49,7 +49,7 @@ export const CONTEXT_BOX = (() => {
 // (review 12: the probe's own path, views.js teePathPolyline, from above the
 // arch down through the junction to the transgastric contact, so the drawn
 // oesophagus is the tube the probe and its shaft actually travel in)
-function oesophagusPath() {
+export function oesophagusPath() {
   const tg = TEE_VIEWS.TGSAX.probe().pos;
   const pts = teePathPolyline(TEE_GEJ, TEE_PATH_TOP, 1.0);
   return [mad(pts[0], S, 3), ...pts, tg];

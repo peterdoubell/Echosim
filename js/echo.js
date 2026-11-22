@@ -225,7 +225,6 @@ const mrAxis = (path) => (path.mr ? DAX.mrEcc : DAX.mr);
 const hasMR = (path) => !!(path.mr || path.dilated);
 const _hvSeg = (A) => hepaticVeinSegs(A)[1];                 // the middle hepatic vein
 const _hvAt = (A) => { const v = _hvSeg(A); return _add(v.a, v.u, 1.6); };
-const _dtaAxis = (A) => { const d = A.ao.dta, u = [d.a[0] - d.top[0], d.a[1] - d.top[1], d.a[2] - d.top[2]], l = Math.hypot(...u); return [u[0] / l, u[1] / l, u[2] / l]; };
 const _pvVein = (A) => A.pv.veins.find((v) => v.name === 'LSPV') || A.pv.veins[0];
 const _pvAt = (A) => { const v = _pvVein(A), u = [v.b[0] - v.w[0], v.b[1] - v.w[1], v.b[2] - v.w[2]], l = Math.hypot(...u); return _add(v.w, [u[0] / l, u[1] / l, u[2] / l], 0.5); };
 // (the appendage axis out of the appendage: emptying flow is + along it)
@@ -267,8 +266,9 @@ export const DOPPLER_SITES = {
     at: (A) => _pvAt(A), axis: (p, G) => _pvVein(G.A).ax, box: (A) => _pvAt(A) },
   laaPw: { name: 'LAA emptying PW', label: 'left atrial appendage, ~1 cm inside its ostium', mode: 'PW', ref: 'E', align: true,
     at: (A) => _laaAt(A), axis: (p, G) => _laaAxis(G.A), box: (A) => _laaAt(A) },
-  descAoPw: { name: 'Descending aorta PW', label: 'proximal descending aorta', mode: 'PW', ref: 'S',
-    at: (A) => _add(A.ao.dta.top, _dtaAxis(A), 1.5), axis: (p, G) => _dtaAxis(G.A), box: (A) => _add(A.ao.dta.top, _dtaAxis(A), 1.5) },
+  // (the proximal descending aorta at the isthmus, 1.5 cm beyond the left subclavian origin)
+  descAoPw: { name: 'Descending aorta PW', label: 'proximal descending aorta, beyond the left subclavian', mode: 'PW', ref: 'S',
+    at: () => LM.DTA_PW.p, axis: () => LM.DTA_PW.u, box: () => LM.DTA_PW.p },
 };
 // Spectral Doppler is only recorded with the beam within ~20 deg of the flow
 // (the cosine error is then < 6 %). ALIGN_RES is the residual angle a

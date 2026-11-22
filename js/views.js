@@ -305,7 +305,9 @@ export const TTE_VIEWS = {
   A4C: { probe: a4cProbe, depth: 17, track: a4cTrack },
   // (15 cm deep: the LA and its roof; the PA bifurcation and the right PA lie
   // just beyond the LA roof in this plane and run along the beam to 17 cm)
-  A2C: { probe: a2cProbe, depth: 15, track: APICAL_TRACK },
+  // (review 12: 15.5 cm so the LA roof, 14.6 cm from the apex, lies inside the
+  // sector with a 0.9 cm margin for the biplane LA trace)
+  A2C: { probe: a2cProbe, depth: 15.5, track: APICAL_TRACK },
   SUBCOSTAL: { probe: subcostalProbe, depth: 18 },
 };
 // RV inflow (parasternal, tilted from the PLAX toward the right hip): the RV
@@ -400,7 +402,11 @@ function subcostalIvcProbe() {
 }
 // Suprasternal notch: the aortic arch in long axis, the ascending aorta on the
 // left of the screen and the descending aorta on the right, with the right
-// pulmonary artery in cross-section beneath the arch.
+// pulmonary artery in cross-section beneath the arch. The arch is planar (ARCH
+// in anatomy.js), so the plane through the top of the ascending aorta, the arch
+// and DTA_TOP is the arch's own plane: the candy cane opens below the summit,
+// and beyond the descending limb lies the left lung, which wraps the descending
+// aorta posterolaterally (edge-on to the beam, so it shows no pleural line).
 function suprasternalProbe() {
   const asc = LM.AO_ASC_TOP, arch = LM.AO_ARCH_MID, desc = LM.DTA_TOP;
   const n = norm(vcross(vsub(asc, arch), vsub(desc, arch)));

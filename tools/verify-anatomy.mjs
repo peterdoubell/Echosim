@@ -654,8 +654,9 @@ for (const [G, tag] of [[GED, 'ED'], [GES, 'ES']]) {
   const { st } = viewStats(EXTRA_VIEWS.SSN, GED);
   assert('SSN', 'RPA in cross-section under the arch, LA below it', has(st, 'PA') && has(st, 'LA') && st.PA.d < st.LA.d);
 }
-// the arch is a candy cane, not a goal-post: limbs ~6 cm apart, a round summit,
-// head vessels fanning from its convexity, the RPA seated on the LA roof
+// the arch is a candy cane, not a goal-post or a hairpin: a round summit, limbs
+// that diverge below it, head vessels fanning from its convexity, the RPA seated
+// on the LA roof
 {
   const ao = GED.A.ao, S = BODY_AX.S;
   const nHead = 3, archC = ao.arch.slice(0, ao.arch.length - nHead);
@@ -671,7 +672,71 @@ for (const [G, tag] of [[GED, 'ED'], [GES, 'ES']]) {
     return null;
   };
   const asc2 = atLevel(iTop, -1, hTop - 2), dsc2 = atLevel(iTop, 1, hTop - 2);
-  check('SSN', 'arch limbs: ascending-descending centrelines 2 cm below the summit', asc2 && dsc2 && Math.hypot(...sub(asc2, dsc2)), [4.5, 7]);
+  // (The former row 'arch limbs: ascending-descending centrelines 2 cm below the
+  // summit [4.5-7]' was also met by a hairpin: two limbs 6 cm apart running
+  // parallel from 4 to 14 cm. In the suprasternal long axis the limbs DIVERGE
+  // below the summit - the ascending aorta down to the screen-left, the descending
+  // aorta down to the right - which the next two rows measure in the image itself:
+  // x across the sector, depth down the central beam, centreline points 1 and 4 cm
+  // deeper than the summit on each limb. Parallel limbs read 0 deg and a ratio of 1.)
+  {
+    const spv = EXTRA_VIEWS.SSN.probe();
+    const im = (p) => [dot(sub(p, spv.pos), spv.lat), dot(sub(p, spv.pos), spv.dir)];
+    const c2 = [...cl.slice(0, cl.length - 1), ao.dta.mid || ao.dta.a, ao.dta.a].map(im);
+    let k = 0;
+    for (let i = 1; i < c2.length; i++) if (c2[i][1] < c2[k][1]) k = i;
+    const atD = (step, d) => {
+      for (let i = k; i + step >= 0 && i + step < c2.length; i += step) {
+        const a = c2[i], b = c2[i + step];
+        if ((a[1] - d) * (b[1] - d) <= 0) return a[0] + (b[0] - a[0]) * (d - a[1]) / ((b[1] - a[1]) || 1);
+      }
+      return null;
+    };
+    const d0 = c2[k][1], a1 = atD(-1, d0 + 1), a4 = atD(-1, d0 + 4), d1 = atD(1, d0 + 1), d4 = atD(1, d0 + 4);
+    const okL = [a1, a4, d1, d4].every((v) => v != null);
+    check('SSN', 'SSN: angle between ascending and descending limb axes in the image', okL ? (Math.atan2(d4 - d1, 3) - Math.atan2(a4 - a1, 3)) * 180 / Math.PI : null, [35, 75], 'deg', okL ? `summit ${d0.toFixed(1)} cm deep; ascending x ${a1.toFixed(1)} -> ${a4.toFixed(1)}, descending x ${d1.toFixed(1)} -> ${d4.toFixed(1)} cm` : '');
+    check('SSN', 'SSN: limb separation 4 cm below the summit / separation 1 cm below', okL ? (d4 - a4) / (d1 - a1) : null, [1.4, 4], '', okL ? `${(d1 - a1).toFixed(1)} -> ${(d4 - a4).toFixed(1)} cm` : '');
+    check('SSN', 'SSN: arch summit depth (near field)', d0, [3, 6.5]);
+  }
+  // In the body: a left-sided arch. It crests just left of the midline, in front of
+  // the trachea, and its branches arise in order from the midline to the left (the
+  // innominate at or just right of the midline, the left common carotid ~1 cm and
+  // the left subclavian 2-3 cm left of it, heading for the left thoracic outlet);
+  // the descending aorta begins at the left side of the spine (T4), ~2.5 cm left of
+  // the midline, with the oesophagus to its right; the right pulmonary artery runs
+  // to the right hilum behind the ascending aorta and the SVC. (Gray's Anatomy,
+  // 41st ed., ch. 57 'Great vessels'; cm to the patient's left of LM.MIDLINE.)
+  {
+    const leftOf = (p) => dot(p, BODY_AX.L) - LM.MIDLINE;
+    const hd = ao.arch.slice(-nHead);
+    check('SSN', 'arch summit left of the midline', leftOf(cl[iTop]), [0, 1.5]);
+    check('SSN', 'innominate origin left of the midline', leftOf(hd[0][0]), [-1, 0.5]);
+    check('SSN', 'left common carotid origin left of the midline', leftOf(hd[1][0]), [0.3, 1.5]);
+    check('SSN', 'left subclavian origin left of the midline', leftOf(hd[2][0]), [1.8, 3.2]);
+    check('SSN', 'left subclavian runs on to the left (end - origin, toward the thoracic outlet)', leftOf(hd[2][1]) - leftOf(hd[2][0]), [0.5, 3]);
+    check('SSN', 'DTA_TOP left of the midline', leftOf(LM.DTA_TOP), [2, 3]);
+    const rpaE = GED.A.pa.branch[1][1];
+    check('Great vessels', 'RPA end right of the midline', -leftOf(rpaE), [4.5, 7]);
+    // behind the SVC: where the RPA passes the SVC's side-to-side position, its
+    // axis lies posterior to the SVC axis by more than the two radii
+    const sv = GED.A.svc, svL = leftOf(sv.b);
+    let back = null;
+    for (const [p0, p1, r] of GED.A.pa.branch.slice(0, 2)) {
+      const l0 = leftOf(p0), l1 = leftOf(p1);
+      if ((l0 - svL) * (l1 - svL) <= 0 && l0 !== l1) { const q = add(p0, mul(sub(p1, p0), (l0 - svL) / (l0 - l1))); back = dot(sub(sv.b, q), BODY_AX.A) - r - (sv.r || 0.9); }
+    }
+    check('Great vessels', 'RPA passes behind the SVC (wall-to-wall gap, anteroposterior)', back, [0, 3]);
+    // the oesophagus (as the 3D panel draws it) and the TEE probe path stay outside the aortic lumen
+    const { oesophagusPath } = await import('../js/thorax3d.js');
+    const { teePathPoint, TEE_GEJ } = await import('../js/views.js');
+    let mnO = 9;
+    const op = oesophagusPath();
+    for (let i = 0; i + 1 < op.length; i++) for (let t = 0; t <= 1; t += 0.005) { const p = add(op[i], mul(sub(op[i + 1], op[i]), t)); mnO = Math.min(mnO, lumenDist(p[0], p[1], p[2], GED.A, 'AO')); }
+    check('Great vessels', 'oesophageal centreline to the DTA lumen (min)', mnO, [0.3, 3]);
+    let mnT = 9;
+    for (const G of [GED, GES]) for (let sT = TEE_GEJ; sT <= 12; sT += 0.05) { const p = teePathPoint(sT); mnT = Math.min(mnT, lumenDist(p[0], p[1], p[2], G.A, 'AO')); }
+    check('Great vessels', 'TEE path clearance from the aortic lumen', mnT, [0.5, 3]);
+  }
   // circumradius of (ascending 2 cm down, summit, descending 2 cm down)
   const circR = (a, b, c) => {
     const A_ = Math.hypot(...sub(b, c)), B_ = Math.hypot(...sub(a, c)), C_ = Math.hypot(...sub(a, b));
@@ -1306,7 +1371,16 @@ function erodeSurvivors(S, k, r) {
     diffs.sort((a, b) => a - b);
     check('B-mode', `${nm}: posterior pericardial peak above the wall (median over beams)`, diffs.length > 5 ? diffs[diffs.length >> 1] : null, [8, 30], 'dB', `${diffs.length} beams`);
   }
-  const norm = [], steep = [], ends = [];
+  // The window (+-0.25 cm round the interface) reads the pleural echo only where the
+  // tissue in front of it is darker than that echo. Since the arch rebuild the
+  // suprasternal sector holds the left pleura beside the descending aorta, met at
+  // > 60 deg by beams that have run several cm down the aortic lumen: blood does not
+  // attenuate, so the mediastinal fat in front of the pleura keeps its full speckle
+  // (peaks of 100-120 grey at 11-15 cm) and the window maximum is that tissue, not
+  // the pleura. Only those beams (>= 2 cm of aortic lumen on the way to the pleura)
+  // are taken out of the fall-off and tested by their own row: on average no line
+  // may stand above the tissue in front of it there. Every other beam is sampled as before.
+  const norm = [], steep = [], ends = [], postAo = [];
   for (const nm of ['SUBCOSTAL', 'SSN', 'PLAX', 'A4C', 'A2C', 'PSAX_MV']) {
     const R = renderBmode(nm, ED, {}), L = R.lungD, NA = R.NA, dTh = 2 * R.half / NA;
     const pk = new Float32Array(NA).fill(-1);
@@ -1320,7 +1394,12 @@ function erodeSurvivors(S, k, r) {
       const l = a > 0 && L[a - 1] < 1e8, r = a < NA - 1 && L[a + 1] < 1e8;
       const sl = l && r ? (L[a + 1] - L[a - 1]) / (2 * dTh * L[a]) : r ? (L[a + 1] - L[a]) / (dTh * L[a]) : l ? (L[a] - L[a - 1]) / (dTh * L[a]) : 0;
       const inc = Math.atan(Math.abs(sl)) * 180 / Math.PI;
-      if (l && r && inc < 25) norm.push(m); else if (l && r && inc > 60) steep.push(m);
+      if (l && r && inc < 25) norm.push(m);
+      else if (l && r && inc > 60) {
+        let ao = 0, bg = -1;
+        for (let d = 1; d < L[a] - 0.25; d += 0.02) { const q = beamSample(R, th, d); if (!q) continue; if (q.kind === TISSUE.AORTA) ao += 0.02; if (d >= L[a] - 0.85 && d <= L[a] - 0.35 && R.mask[q.idx]) bg = Math.max(bg, q.grey); }
+        if (ao >= 2) postAo.push(dB(m - bg)); else steep.push(m);
+      }
     }
     // each visible pleural segment: its end beams (where the line stops inside the
     // sector) against the segment's median
@@ -1338,7 +1417,8 @@ function erodeSurvivors(S, k, r) {
     }
   }
   const mean = (v) => v.reduce((x, y) => x + y, 0) / v.length;
-  check('B-mode', 'pleural line: fall-off from < 25 deg to > 60 deg incidence', norm.length && steep.length ? dB(mean(norm) - mean(steep)) : null, [16, 60], 'dB', `${norm.length} / ${steep.length} beams (SUBCOSTAL SSN PLAX A4C A2C PSAX-MV)`);
+  check('B-mode', 'pleural line: fall-off from < 25 deg to > 60 deg incidence', norm.length && steep.length ? dB(mean(norm) - mean(steep)) : null, [16, 60], 'dB', `${norm.length} / ${steep.length} beams (SUBCOSTAL SSN PLAX A4C A2C PSAX-MV); ${postAo.length} steep beams behind >= 2 cm of aortic lumen in the row below`);
+  check('B-mode', 'pleural line at > 60 deg behind the descending aorta: window peak above the tissue in front (mean)', postAo.length ? mean(postAo) : 0, [-30, 0], 'dB', `${postAo.length} beams (peak over +-0.25 cm minus peak over the 0.5 cm in front; max ${postAo.length ? Math.max(...postAo).toFixed(1) : '-'} dB)`);
   ends.sort((x, y) => x[2] - y[2]);
   check('B-mode', 'pleural line: end beam below the segment median (weakest end)', ends.length ? ends[0][2] : null, [10, 60], 'dB', ends.length ? `${ends.length} ends, worst ${ends[0][0]} beam ${ends[0][1]}` : '');
   {
@@ -2093,7 +2173,73 @@ function yArmRow(grp, vn, tag, ph, st = 3, path = {}, label = '') {
     // gave ~11.5 cm2; the PA bifurcation still shows in section beside the roof)
     const S2 = planeSample(TTE_VIEWS.A2C, G, {}, 0.1);
     const gv = cellsWhere(S2, (l, k) => l === T.AORTA && xd(S2, k)[1] > 9);
-    check(PL, `A2C: great-artery lumen beyond the mitral annulus (${tag})`, areaOf(S2, gv), [0, 8], 'cm2');
+    // (review 12: the bifurcation was lifted into the arch concavity, so the
+    // '8' of two branch lumina beside the roof is gone. What is left: ONE oval
+    // section of the pulmonary trunk (4.3 cm2 at x 3.7, d 12.5 cm), which crosses
+    // the A2C plane on its way from the valve, anterior to the LA, to the arch,
+    // and the round RPA section just beyond the LA roof (1.9 cm2 at d 14.8 cm).
+    // The acceptance of work item 11 is [0, 0.3] cm2 with at most the RPA section.
+    // KNOWN-FAIL, blocked by the position of the pulmonary valve and RVOT (root
+    // group's structures, 2.3 cm to the septal side of the A2C plane) against the
+    // bifurcation, which the PSAX-AV rows pin within 1 cm of that near-sagittal
+    // plane (L 0.7-2.6 cm): the trunk must cross the A2C plane between them at
+    // 11-14 cm. Tried (areas at 15.5-16 cm, ED/ES): bifurcation lateral/posterior
+    // x6 -> one section, 6.0-7.1 cm2 (oblique cut 4.4-5.5; floor for a
+    // perpendicular cut 3.8-4.0); bifurcation on the septal side -> trunk only
+    // 2.4-2.7 cm long or > 1.5 cm off the PSAX-AV plane; lower valve -> off-plane
+    // distance unchanged, cut more oblique; RPA crossing deeper than the sector ->
+    // into the oesophagus.)
+    KNOWN = true;
+    check(PL, `A2C: great-artery lumen beyond the mitral annulus (${tag})`, areaOf(S2, gv), [0, 0.3], 'cm2', 'pending root (pulmonary valve / RVOT position): the trunk crosses the plane between the valve and the bifurcation');
+    const gvc = components(S2, (l, k) => l === T.AORTA && xd(S2, k)[1] > 9).comps.filter((c) => areaOf(S2, c) >= 0.3);
+    // at most one round section (the RPA beyond the LA roof)
+    check(PL, `A2C: great-artery sections >= 0.3 cm2 beyond the mitral annulus (${tag})`, gvc.length, [0, 1], '',
+      'pending root (as above); ' + gvc.map((c) => `${areaOf(S2, c).toFixed(1)} cm2 at x ${(c.reduce((m, k) => m + xd(S2, k)[0], 0) / c.length).toFixed(1)}, d ${(c.reduce((m, k) => m + xd(S2, k)[1], 0) / c.length).toFixed(1)}`).join('; '));
+    KNOWN = false;
+    // LAA in the A2C (work item 11 step 3): the ostium on the plane and a neck
+    // clearly narrower than the atrium it opens from. Met at ED; at ES the ostium
+    // drifts 0.43 cm off the plane and the in-plane neck thins to a sliver, and
+    // the ME2C plane misses the ostium at ED. KNOWN-FAIL pending tee: the
+    // designs that meet these rows (ostium u = [0.5, 0.95, -0.25], 'x35') move
+    // the ostium, and today's ME2C / MELAA probes search for the appendage lumen
+    // (roll / swing), so they re-aim and fail 'MELAA: largest fluid-dark non-fluid
+    // region' (~3 cm2 [0-1]) and 'MELAA: warfarin ridge peak grey' (~130 [170])
+    // for every design tried (96 random + hand-made). To be met once ME2C is
+    // ME4C + 90 deg and the MELAA plane is fixed.
+    {
+      const aa = G.A.la.aa[0], os = aa.a, ax = unit(sub(aa.b, aa.a));
+      const laaC = cellsWhere(S2, (l, k) => l === T.LA && laPart(G.A, ptK(S2, k)) === 'laa');
+      const ui = unit([dot(ax, S2.p.lat), dot(ax, S2.p.dir), 0]);
+      let t0 = 1e9, t1 = -1e9;
+      for (const k of laaC) { const q = ptK(S2, k), al = dot(sub(q, os), ax); if (al < 0.2 || al > 0.8) continue; const [x, d] = xd(S2, k), t = -x * ui[1] + d * ui[0]; t0 = Math.min(t0, t); t1 = Math.max(t1, t); }
+      const dO = dot(sub(os, S2.p.pos), S2.p.dir);
+      let x0 = 1e9, x1 = -1e9;
+      for (const k of cellsWhere(S2, (l) => l === T.LA)) { const [x, d] = xd(S2, k); if (Math.abs(d - dO) <= 0.051) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); } }
+      KNOWN = tag === 'ES';
+      check(PL, `A2C: LAA neck width / LA width at the ostium level (${tag})`, t1 > t0 && x1 > x0 ? (t1 - t0 + S2.step) / (x1 - x0 + S2.step) : null, [0.3, 0.55], '',
+        (tag === 'ES' ? 'pending tee (ME2C = ME4C + 90, fixed MELAA plane); ' : '') + `neck ${t1 > t0 ? (t1 - t0 + S2.step).toFixed(2) : '-'} cm (0.2-0.8 cm beyond the ostium, in plane), LA ${x1 > x0 ? (x1 - x0 + S2.step).toFixed(2) : '-'} cm`);
+      KNOWN = tag === 'ES';
+      check(PL, `A2C: LAA ostium centre to plane (${tag})`, Math.abs(dot(sub(os, S2.p.pos), S2.p.normal)), [0, 0.3], 'cm', tag === 'ES' ? 'pending tee (ME2C = ME4C + 90, fixed MELAA plane)' : '');
+      const pm = planeSample(TEE_VIEWS.ME2C, G, {}, 0.5).p;
+      KNOWN = tag === 'ED';
+      check(PL, `ME2C: LAA ostium centre to plane (${tag})`, Math.abs(dot(sub(os, pm.pos), pm.normal)), [0, 0.4], 'cm',
+        (tag === 'ED' ? 'pending tee (ME2C = ME4C + 90, fixed MELAA plane); ' : '') + 'current ME2C; against the ME4C + 90 deg prototype plane of item 2: 1.24 (ED) / 0.46 (ES) cm');
+      KNOWN = false;
+    }
+    // the whole LA, roof included, inside the sector (biplane LA volume)
+    const laDeep = (SS) => cellsWhere(SS, (l) => l === T.LA).reduce((m, k) => Math.max(m, Math.hypot(...xd(SS, k))), 0);
+    check(PL, `A2C: sector depth minus the deepest LA lumen (${tag})`, TTE_VIEWS.A2C.depth - laDeep(S2), [0.5, 3], 'cm');
+    // A3C: the SVC lies in the A3C plane just beyond the LA roof (near edge at
+    // 14.7 cm), so a deeper sector adds a second great-vessel section; the depth
+    // stays 15 cm until the SVC leaves that plane
+    KNOWN = true;
+    {
+      const sv = G.A.svc, pS = sv && (sv.b || sv.c);
+      const near = pS ? Math.hypot(dot(sub(pS, S.p.pos), S.p.lat), dot(sub(pS, S.p.pos), S.p.dir)) - (sv.r || 0.8) : null;
+      check(PL, `A3C: sector depth minus the deepest LA lumen (${tag})`, EXTRA_VIEWS.A3C.depth - laDeep(S), [0.5, 3], 'cm',
+        `pending root/rawall (SVC lies in the A3C plane beyond 15 cm); SVC near edge at ${near === null ? '14.7-14.9' : near.toFixed(2)} cm, ${pS ? Math.abs(dot(sub(pS, S.p.pos), S.p.normal)).toFixed(2) : '0.3-0.6'} cm off the plane`);
+    }
+    KNOWN = false;
   }
   {
     // PSAX-AV: the PA trunk dividing ('trousers'): both branch origins in plane
@@ -4418,6 +4564,12 @@ SECTION = 'Pathology';
   {
     const sp = renderDoppler('SSN', 0.2, {}, { color: false }).spec;
     assert(g, 'SSN: default is descending-aorta PW', sp.site === 'descAoPw' && sp.mode === 'PW', `${sp.mode} ${sp.site}`);
+    // the gate lies in the proximal descending aorta just beyond the left subclavian
+    // origin (the isthmus, where coarctation and diastolic flow reversal are sought)
+    const gd = defaultSiteGeometry('SSN', 'descAoPw', {});
+    check(g, 'SSN: descending-aorta PW gate depth', gd && gd.depth, [5, 7.5], 'cm');
+    const lsa = geometryAt(0, {}).A.ao.arch.slice(-1)[0][0];
+    check(g, 'SSN: PW gate beyond the left subclavian origin', Math.hypot(...sub(LM.DTA_PW.p, lsa)), [1, 2.2], 'cm');
     let sys = 0, rev = 0; for (let c = 0; c < sp.cols; c++) { const ph = c / sp.cols, v = -sp.vs[c]; if (ph < 0.4) sys = Math.max(sys, v); else rev = Math.max(rev, -v); }
     check(g, 'SSN descending aorta: systolic peak (away from the notch)', sys, [0.8, 1.4], 'm/s');
     check(g, 'SSN descending aorta: small early-diastolic reversal', rev, [0.03, 0.3], 'm/s');

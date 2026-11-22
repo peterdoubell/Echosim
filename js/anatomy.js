@@ -83,6 +83,12 @@ const BS = _roll([0.775, 0.500, 0.386]);    // patient superior
 export const BODY_AX = {
   L: BL, R: mul(BL, -1), P: BP, A: mul(BP, -1), S: BS, I: mul(BS, -1),
 };
+// Body coordinates of a point: cm to the patient's left of the mid-sagittal plane
+// (p . L = MIDLINE), anterior and superior. The great vessels beyond the root lie
+// in the mediastinum, so their landmarks are laid out in this frame.
+const MIDLINE = -2.0;                                  // p . L of the body mid-sagittal plane
+const bodyAt = (l, a, s) => add(add(mul(BL, l + MIDLINE), mul(BODY_AX.A, a)), mul(BS, s));
+const bodyDir = (l, a, s) => unit(add(add(mul(BL, l), mul(BODY_AX.A, a)), mul(BS, s)));
 
 // ---- landmarks (end-diastolic reference geometry) --------------------------
 // LV: a truncated prolate profile about x = z = 0. ED cavity length 8.3 cm
@@ -175,28 +181,42 @@ const avFrame = (deg, r, h) => {
 const PV0 = avFrame(26.46, 3.05, 1.25);            // the same world point as before the frame re-base
 const PV_R = 1.1;                                    // annulus d 2.2
 // Main PA: from the pulmonary valve it courses POSTERIORLY along the left of the
-// aortic root (screen-right in PSAX-AV) to bifurcate at about the depth of the
-// LA, just above its roof (the RPA then passes behind the ascending aorta, over
-// the LA roof) — the PSAX-AV view of the trunk, its bifurcation and the RPA.
-const U_PA = unit(add(add(mul(BS, 0.1), BP), mul(BL, 0.1)));
-const PA_BIF = mad(PV0, U_PA, 4.4);
-// the RPA passes to the right BEHIND the ascending aorta and SVC, beneath the arch:
-// it leaves the underside of the bifurcation and dips onto the LA roof (where the
-// suprasternal plane cuts it, the LA a few mm beneath), then runs level to the
-// right hilum over the right upper pulmonary vein (two segments)
-const U_RPA = unit(add(add(mul(BODY_AX.R, 0.85), mul(BP, 0.45)), mul(BS, -0.5)));
-// (the hilar segment turns more directly rightward and ends at the hilum 3.2 cm
-// from its origin: running on further back, it crossed the PLAX / APLAX plane
-// and was cut as a second great-vessel circle beyond the ascending aorta)
-const U_RPA2 = unit(add(add(mul(BODY_AX.R, 0.85), mul(BP, 0.3)), mul(BS, 0.1)));
+// aortic root (screen-right in PSAX-AV), a little up and to the left, to divide
+// in the concavity of the aortic arch, above the LA roof and in front of the
+// left main bronchus (2.2 cm left of the midline): the PSAX-AV view of the trunk,
+// its bifurcation and the branch origins. Its LPA then passes under the arch,
+// in front of the descending aorta, and its RPA dips onto the LA roof and runs to
+// the right behind the ascending aorta and the SVC.
+// The valve and the infundibulum face along U_PA (back, a little up and left);
+// above the sinuses the trunk bends ~17 deg further up and to the left, so it is
+// 4.2 cm long (adult 4-5 cm) and divides high in the arch concavity:
+// the apical two-chamber plane then cuts ONE oval of trunk beyond the appendage
+// (not the bifurcation and both branch origins), and the left AV groove between
+// the LV base and the trunk is free for the appendage.
+const PA_BIF = bodyAt(2.2, -1.2, 4.8);
+const U_PA = unit(sub(bodyAt(1.6, -0.9, 3.8), PV0));
+// The RPA leaves the underside of the bifurcation and dips back onto the LA roof
+// (RPA_M, where the suprasternal plane cuts it, the LA a few mm beneath), then
+// runs to the right hilum (RPA_E, 5.3 cm right of the midline) behind the
+// ascending aorta and the SVC, over the right upper pulmonary vein and under the
+// arch, rising ~1 cm: it crosses the parasternal long-axis plane (which rises
+// toward the patient's right) beyond the sides of the PLAX and A3C sectors.
+// (Back onto the posterior LA roof, rather than straight to the right, it crosses
+// the apical two-chamber plane steeply, as one small round section.)
 const RPA_O = mad(PA_BIF, BS, -0.8);
-const RPA_M = mad(RPA_O, U_RPA, 1.0);
-const RPA_E = mad(RPA_M, U_RPA2, 2.2);
-// The LPA's first ~2.8 cm runs in the root's short-axis plane (left and back,
-// U_LPA taken perpendicular to the root axis): the trunk divides in its own
-// plane, so the standard PSAX-AV shows both branch origins ('trousers') without
-// tipping the probe; the LPA then climbs over the left bronchus beyond it.
-const U_LPA = (() => { const u = unit(add(add(mul(BL, 0.6), mul(BP, 0.7)), mul(BS, 0.25))); return unit(sub(u, mul(U_AO, dot(u, U_AO)))); })();
+const RPA_M = bodyAt(1.2, -2.5, 2.7);
+const RPA_E = bodyAt(-5.6, -2.8, 4.6);
+const U_RPA = unit(sub(RPA_M, RPA_O));
+// The LPA's first 1.9 cm runs close to the root's short-axis plane (to the left
+// and a little back; U_LPA is taken perpendicular to the root axis and then
+// tipped 19 deg caudally, the short-axis plane itself climbing steeply to the
+// left and back): the standard PSAX-AV shows both branch origins ('trousers')
+// without tipping the probe, and the branch stays ~0.2 cm clear of the underside
+// of the arch. It then arches over the left main bronchus and descends to the
+// left hilum (LPA_E), under the distal arch and in front of the descending aorta.
+const U_LPA = (() => { const u = unit(add(add(mul(BL, 0.9), mul(BP, 0.3)), mul(BS, 0.1))); return unit(mad(unit(sub(u, mul(U_AO, dot(u, U_AO)))), U_AO, -0.35)); })();
+const LPA_K = mad(PA_BIF, U_LPA, 1.9);
+const LPA_E = bodyAt(5.2, -1.8, 4.4);
 // (the infundibulum is separated from the LVOT / aortic root by the muscular
 // outlet septum, so on PLAX its centre lies ~3.4 cm in front of the aortic-root
 // centre, clear of the basal LV)
@@ -323,16 +343,22 @@ const CAVA = {
 // PLAX it is the round echo-free structure just behind the atrioventricular
 // groove — the landmark that separates a pericardial effusion (tracks ANTERIOR
 // to it) from a left pleural effusion (posterior to it).
-// beyond the sino-tubular junction the ascending aorta turns cranially (it lies
-// just right of the sternum, not far out to the right)
-// beyond the STJ the ascending aorta runs almost straight up, just right of the
-// sternum (a body-fixed direction, independent of the root's tilt)
-const U_ASC = unit(add(add(mul(BS, 0.85), mul(BODY_AX.R, 0.15)), mul(BODY_AX.A, 0.2)));
+// The vessels beyond the root are laid out in BODY coordinates — cm to the
+// patient's left of the mid-sagittal plane (MIDLINE), anterior, superior — since
+// they are fixed in the mediastinum, not to the beating heart.
+// Beyond the sino-tubular junction the ascending aorta turns from the root's
+// (rightward) axis onto a course straight up and a little forward behind the
+// sternum: one evenly curved tube (radius ~3 cm, no kink at the STJ) whose
+// rightmost point, ~2.7 cm right of the midline, is its top; the arch then curves
+// back to the LEFT from there, so the head vessels arise at and left of the
+// midline. (The root axis points mostly to the right, so a gentler or later turn
+// carried the ascending aorta ~3.2 cm right and the arch with it.)
+const U_ASC = bodyDir(0, 0.3, 0.95);
 const AO_STJ = mad(A0, U_AO, 2.1);
 // The ascending aorta leaves the sino-tubular junction along the root axis and
 // turns onto its cranial course at a constant rate over ASC_BEND cm (one evenly
 // curved tube, no kink at the STJ), then runs straight to the top
-const ASC_BEND = 3.0, ASC_LEN = 4.6;
+const ASC_BEND = 3.2, ASC_LEN = 4.0;
 const ASC_PTS = (() => {
   const th = Math.acos(Math.max(-1, Math.min(1, dot(U_AO, U_ASC))));
   const w = unit(sub(U_ASC, mul(U_AO, Math.cos(th))));        // U_AO -> U_ASC rotation, in their plane
@@ -354,37 +380,93 @@ const hermite = (p0, t0, p1, t1, t) => {
   const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
   return [0, 1, 2].map((k) => h00 * p0[k] + h10 * t0[k] + h01 * p1[k] + h11 * t1[k]);
 };
-// The descending aorta: vertical below the LA level (DTA_P), its upper part
-// inclined forward and medially to the end of the arch, so the arch's limbs are
-// ~6 cm apart and the descending limb tapers away down and back from the arch.
-const DTA_TOP = add(add(DTA_P, mul(BS, 6.6)), add(mul(BP, -1.8), mul(BL, -1.2)));
-// (between them it bows DTA_MID_OFF cm posteriorly and to the left, so behind
-// the atria it runs posterolateral to the oesophagus — the TEE probe's path —
-// instead of across it)
+// The descending aorta begins at the end of the arch beside the left side of the
+// spine, ~2.5 cm left of the midline at the depth of the oesophagus and behind it
+// (posterolateral to it, the oesophagus to its right and in front), and runs down
+// along the spine: vertical, drifting a few mm back and toward the midline to the
+// aorta behind the LA (DTA_P). (Before, its top lay 0.9 cm left of the midline and
+// 1.2 cm in front of the oesophagus, the upper limb inclined forward and medially:
+// the oesophagus ran through the proximal DTA.)
+const DTA_TOP = bodyAt(2.9, -4.4, 5.6);
+// The posterior mediastinal bed behind the atria that the oesophagus occupies:
+// an enlarged LA abuts it but never overruns it (dLAlumen). It is the straight
+// course from 6.6 cm above the aorta behind the LA, 1.8 cm in front and 1.2 cm to
+// the right, down to it.
+const POST_BED_TOP = add(add(DTA_P, mul(BS, 6.6)), add(mul(BP, -1.8), mul(BL, -1.2)));
+// Behind the atria the aorta bows DTA_MID_OFF cm posteriorly and to the left of
+// that bed (2.6 cm above the aorta behind the LA, 3.1 cm left of the midline), so
+// it runs posterolateral to the oesophagus — the TEE probe's path — instead of
+// across it; the bow is unchanged by the rebuilt arch above it.
 const DTA_MID_OFF = [-0.2, 1.7];                       // cm: posterior, left
-const DTA_MID = add(lerp3(DTA_P, DTA_TOP, 0.6), add(mul(BP, DTA_MID_OFF[0]), mul(BL, DTA_MID_OFF[1])));
+const DTA_MID = add(lerp3(DTA_P, POST_BED_TOP, 0.6), add(mul(BP, DTA_MID_OFF[0]), mul(BL, DTA_MID_OFF[1])));
 const DTA_BOT = mad(DTA_P, BS, -9.0);
 const DTA_R = 1.12;                                   // d 2.25
-// The arch: a round candy-cane curve (radius ~3 cm) tangent to the ascending
-// aorta at its top and to the descending aorta at the end of the arch, tapering
-// from the ascending calibre to the descending, with its three head and neck
-// branches (brachiocephalic, left common carotid, left subclavian) fanning from
-// its upper convexity over ~3.5 cm — the suprasternal long-axis landmarks.
+// The arch: a candy cane. From the top of the ascending aorta it rises up and to
+// the left in front of the trachea, crests 1.1 cm left of the midline (a round
+// summit, radius 3.1 cm, at the level of the head and neck branches), and runs back
+// along the left side of the trachea and oesophagus, turning down into the
+// descending aorta beside the spine. It is built in the plane of its three
+// landmarks (ascending top, summit, descending top): the circular summit spans
+// ARCH.A1 deg toward the ascending side and ARCH.A2 deg toward the descending
+// side, and Hermite flanks (handles k1 / k2 x their chords) join it to the
+// ascending and descending aorta along their own axes. The flanks open downward
+// (~45 deg between the limbs in the suprasternal view), the ascending one to the
+// right and front, the descending one back to the spine. It tapers from the
+// ascending calibre to the descending.
+const ARCH = { summit: bodyAt(1.0, -0.7, 9.15), R: 3.1, A1: 55, A2: 75, k1: 1.0, k2: 0.8 };
 const ARCH_CURVE = (() => {
-  const tIn = U_ASC, tOut = unit(sub(DTA_P, DTA_TOP));
-  const th = Math.acos(Math.max(-1, Math.min(1, dot(tIn, tOut))));
-  const chord = Math.hypot(...sub(DTA_TOP, AO_ASC_TOP));
-  const r = chord / (2 * Math.sin(th / 2));
-  // (Hermite tangents 3.5x the circular-arc Bezier handle 4/3 tan(th/4) r: a
-  // round summit rising ~3.5 cm above the ascending top, not a flat goal-post)
-  const h = 3.5 * (4 / 3) * Math.tan(th / 4) * r;
-  const pts = [];
-  const N = 16;
-  for (let i = 0; i <= N; i++) pts.push(hermite(AO_ASC_TOP, mul(tIn, h), DTA_TOP, mul(tOut, h), i / N));
-  return { pts, r };
+  const tIn = U_ASC, tOut = unit(sub(DTA_MID, DTA_TOP));
+  const Sm = ARCH.summit, R = ARCH.R;
+  const n = unit(cross(sub(Sm, AO_ASC_TOP), sub(DTA_TOP, AO_ASC_TOP)));
+  const hx = unit(sub(sub(DTA_TOP, AO_ASC_TOP), mul(n, dot(sub(DTA_TOP, AO_ASC_TOP), n))));   // toward the descending side
+  let up = cross(n, hx);
+  if (dot(up, BS) < 0) up = mul(up, -1);
+  const Cc = mad(Sm, up, -R);
+  const arcP = (th) => add(Cc, add(mul(hx, R * Math.sin(th)), mul(up, R * Math.cos(th))));
+  const arcT = (th) => unit(add(mul(hx, Math.cos(th)), mul(up, -Math.sin(th))));
+  const t1 = -ARCH.A1 * Math.PI / 180, t2 = ARCH.A2 * Math.PI / 180;
+  const P1 = arcP(t1), P2 = arcP(t2);
+  const c1 = Math.hypot(...sub(P1, AO_ASC_TOP)), c2 = Math.hypot(...sub(DTA_TOP, P2));
+  const dense = [];
+  for (let k = 0; k < 60; k++) dense.push(hermite(AO_ASC_TOP, mul(tIn, ARCH.k1 * c1), P1, mul(arcT(t1), ARCH.k1 * c1), k / 60));
+  for (let k = 0; k < 60; k++) dense.push(arcP(t1 + (t2 - t1) * k / 60));
+  for (let k = 0; k <= 60; k++) dense.push(hermite(P2, mul(arcT(t2), ARCH.k2 * c2), DTA_TOP, mul(tOut, ARCH.k2 * c2), k / 60));
+  // resampled at N equal steps of arc length
+  const cum = [0];
+  for (let i = 1; i < dense.length; i++) cum.push(cum[i - 1] + Math.hypot(...sub(dense[i], dense[i - 1])));
+  const N = 16, tot = cum[cum.length - 1], pts = [];
+  let j = 1;
+  for (let i = 0; i <= N; i++) {
+    const s = tot * i / N;
+    while (j < dense.length - 1 && cum[j] < s) j++;
+    const f = (s - cum[j - 1]) / ((cum[j] - cum[j - 1]) || 1);
+    pts.push(lerp3(dense[j - 1], dense[j], Math.max(0, Math.min(1, f))));
+  }
+  return { pts, r: R };
 })();
 const AO_ARCH_MID = ARCH_CURVE.pts[ARCH_CURVE.pts.length >> 1];
 const ARCH_HEADS = 3;                                // brachiocephalic, left carotid, left subclavian (last in ARCH_SEGS)
+// head and neck vessels: [origin as arc length from the summit (cm), radius,
+// course (body l, a, s), length]: the innominate (largest, first) up and to the
+// right toward the right sternoclavicular joint, the left common carotid straight
+// up, the left subclavian up, left and back toward the left thoracic outlet —
+// origins ~0.1 cm left of the midline, 1.2 cm and 2.2 cm left
+const ARCH_BRANCHES = [
+  [-1.6, 0.6, bodyDir(-0.35, 0.1, 1), 3.2],
+  [0.0, 0.38, bodyDir(0.05, 0, 1), 3.4],
+  [1.6, 0.42, bodyDir(0.4, -0.25, 1), 3.2],
+];
+// the point of the arch centreline at arc length s from the ascending top
+const ARCH_CUM = (() => { const p = ARCH_CURVE.pts, c = [0]; for (let i = 1; i < p.length; i++) c.push(c[i - 1] + Math.hypot(...sub(p[i], p[i - 1]))); return c; })();
+function archAt(s) {
+  const pts = ARCH_CURVE.pts, cum = ARCH_CUM;
+  let i = 1;
+  while (i < pts.length - 1 && cum[i] < s) i++;
+  const f = Math.max(0, Math.min(1, (s - cum[i - 1]) / (cum[i] - cum[i - 1])));
+  return lerp3(pts[i - 1], pts[i], f);
+}
+// arc length of the summit (the arch's most cranial point)
+const ARCH_SUMMIT_S = (() => { const p = ARCH_CURVE.pts; let k = 0; for (let i = 1; i < p.length; i++) if (dot(p[i], BS) > dot(p[k], BS)) k = i; return ARCH_CUM[k]; })();
 const ARCH_SEGS = (() => {
   const pts = ARCH_CURVE.pts;
   const segs = [];
@@ -393,34 +475,22 @@ const ARCH_SEGS = (() => {
     segs.push([pts[i], pts[i + 1], AO.ascR * 0.95 + (DTA_R - AO.ascR * 0.95) * f]);
   }
   // head and neck vessels: origins spread along the upper convexity of the arch
-  // (cumulative arc length), each with its own course — the innominate (largest,
-  // first) up and to the right, the left carotid straight up, the left subclavian
-  // up, left and back
-  const cum = [0];
-  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(...sub(pts[i], pts[i - 1])));
-  const at = (s) => {
-    let i = 1;
-    while (i < pts.length - 1 && cum[i] < s) i++;
-    const f = (s - cum[i - 1]) / (cum[i] - cum[i - 1]);
-    return { p: lerp3(pts[i - 1], pts[i], f), t: unit(sub(pts[i], pts[i - 1])) };
-  };
+  // (cumulative arc length), centred on its summit
   const centre = lerp3(lerp3(AO_ASC_TOP, DTA_TOP, 0.5), AO_ARCH_MID, 0.5);
-  const along = unit(sub(DTA_TOP, AO_ASC_TOP));
-  // centred on the summit of the arch (its most cranial point)
-  let iTop = 0;
-  for (let i = 1; i < pts.length; i++) if (dot(pts[i], BS) > dot(pts[iTop], BS)) iTop = i;
-  const sMid = cum[iTop];
-  for (const [ds, r, dir, len] of [
-    [-1.5, 0.6, unit(add(add(BS, mul(BODY_AX.R, 0.12)), mul(BODY_AX.A, 0.22))), 3.2],   // brachiocephalic (innominate)
-    [0.0, 0.38, unit(add(BS, mul(along, 0.05))), 3.4],                               // left common carotid
-    [1.5, 0.42, unit(add(add(add(BS, mul(along, 0.3)), mul(BL, 0.05)), mul(BP, 0.15))), 3.2], // left subclavian
-  ]) {
-    const { p } = at(sMid + ds);
-    const out = unit(sub(p, centre));
-    const o = mad(p, out, 0.5);
+  for (const [ds, r, dir, len] of ARCH_BRANCHES) {
+    const p = archAt(ARCH_SUMMIT_S + ds);
+    const o = mad(p, unit(sub(p, centre)), 0.5);
     segs.push([o, mad(o, dir, len), r]);
   }
   return segs;
+})();
+// The suprasternal descending-aorta PW gate: in the proximal descending aorta
+// DTA_PW_PAST cm (along the centreline) beyond the left subclavian origin, at the
+// isthmus where the arch turns down, with the flow direction there (p, u).
+const DTA_PW_PAST = 1.5;
+const DTA_PW = (() => {
+  const s = ARCH_SUMMIT_S + ARCH_BRANCHES[2][0] + DTA_PW_PAST;
+  return { p: archAt(s), u: unit(sub(archAt(s + 0.4), archAt(s - 0.4))) };
 })();
 
 // Left brachiocephalic (innominate) vein: from behind the left sternoclavicular
@@ -511,7 +581,6 @@ const GASTRIC = (() => {
 // diaphragmatic surface and does not climb its sides, so the liver stays below the
 // RV and RA instead of riding up beside them into the parasternal far field.
 const DIAPH_WRAP = 1.5;
-const MIDLINE = -2.0;                                  // p . L of the body mid-sagittal plane
 
 // Everything the rest of the app needs to place valves, flows, labels and views.
 export const LM = {
@@ -519,7 +588,7 @@ export const LM = {
   PA_BIF, U_RPA, U_LPA, RVOT: RVOT_PTS, E_ANT, E_SCR,
   LV: LVP, apex: [0, LVP.apexY, 0],
   LA_ROOF, RA_ROOF, A_LA, A_RA, LA_FLOOR0, RA_FLOOR0, LA_ES, RA_ES,
-  IAS_P, IAS_N, IAS, AO_STJ, AO_ASC_TOP, AO_ARCH_MID, DTA_P, DTA_TOP, DTA_BOT, DTA_R,
+  IAS_P, IAS_N, IAS, AO_STJ, AO_ASC_TOP, AO_ARCH_MID, DTA_P, DTA_TOP, DTA_BOT, DTA_R, DTA_PW,
   GASTRIC, DIAPH_N, A4C_TILT, ANT_HEART: _ANT0, A4C_Z: (x, y) => onA4C(x, y), MIDLINE, MAPSE_REF, TAPSE_REF, TV_SEPT_FRAC,
 };
 
@@ -1102,7 +1171,7 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
     pa: {
       pv: PVlive,
       main: { a: mad(PVlive, U_PA, -0.1), b: PA_BIF, r1: 1.1 * (1 + (path.rvpo ? 0.35 : 0)), r2: 1.05 * (1 + (path.rvpo ? 0.35 : 0)) },
-      branch: [[RPA_O, RPA_M, 0.8], [RPA_M, RPA_E, 0.78], [PA_BIF, mad(PA_BIF, U_LPA, 2.8), 0.68]],
+      branch: [[RPA_O, RPA_M, 0.8], [RPA_M, RPA_E, 0.78], [PA_BIF, LPA_K, 0.68], [LPA_K, LPA_E, 0.66]],
       wall: 0.16,
     },
     valves: {
@@ -1132,31 +1201,35 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
 }
 
 // Left atrial appendage: an oval ostium on the anterolateral LA opening into a
-// short neck, then a broad windsock body (one dominant lobe, its wall ridged by
+// neck, then a tubular, finger-like body (one dominant lobe, its wall ridged by
 // pectinate muscles) in the left AV groove over the circumflex. The neck is why
 // it is THE site of thrombus in atrial fibrillation.
 function laaSegs(la) {
   // ostium on the ANTEROLATERAL LA wall, ~1-1.5 cm in front of the LSPV across
-  // the warfarin ridge; a short neck, then a broad windsock body (~2 cm wide)
-  // running forward, down and laterally in the left AV groove over the
-  // circumflex, beside (not against) the aortic root, tapering to its tip.
-  // Ostium ~1.6 cm, depth ~3.6 cm (normal adult 1.5-2.5 cm, 2.5-4.5 cm).
+  // the warfarin ridge. Ostium ~1.6 cm, depth ~3.8 cm (normal adult 1.5-2.5 cm,
+  // 2.5-4.5 cm). (The ME LAA and ME two-chamber planes are aimed at this ostium
+  // and at the lumen beyond it, so it stays where those views were tuned: its
+  // centre lies 0.1 cm from the apical two-chamber plane at end-diastole and is
+  // carried 0.4 cm across it by the filling LA wall at end-systole.)
   const u = unit(add(add(mul(la.e1, 0.55), mul(la.e2, 0.75)), mul(la.a, -0.45)));
   const w = laWall(la, laIn(la), u);
-  // The ostium sits in the wall; the neck (~1.4 cm) leaves the LA body square to
-  // its anterior wall, so the appendage stands off the body (its own wall between
-  // them) beyond the first ~1 cm: a finger-like pouch at the screen-right of the
-  // LA, beside the anterior mitral annulus, in the TTE A2C and the ME2C.
+  // The neck (1.3 cm, narrowing to 1.35 cm) leaves the LA body square to its
+  // anterior wall, so the appendage stands off the body (its own wall between
+  // them); the body (1.4 cm long, ~1.5 cm wide) and the tapering tip then turn
+  // forward and down along the left AV groove, under the LV base and 0.3 cm or
+  // more clear of the pulmonary trunk: a tubular, finger-like pouch ~3.8 cm long
+  // at the screen-right of the LA, beside the anterior mitral annulus, in the
+  // TTE A2C and the ME2C. (The tip runs forward more than down: it ends at the
+  // AV-groove level, above the mitral leaflets, so the PSAX mitral-level plane
+  // stays clear of it.)
   const o = mad(w, u, -0.1);
-  const p1 = mad(o, unit([0.36, 0.02, 0.93]), 1.2);
-  const p2 = mad(p1, unit([0.35, -0.7, 0.6]), 1.4);
-  // (the tip runs forward more than down: it ends at the AV-groove level, above
-  // the mitral leaflets, so the PSAX mitral-level plane stays clear of it)
-  const p3 = mad(p2, unit([0.25, -0.75, 0.6]), 1.0);
+  const p1 = mad(o, [0.3445, 0, 0.9388], 1.3);
+  const p2 = mad(p1, [0.3424, -0.6971, 0.63], 1.4);
+  const p3 = mad(p2, [0.2403, -0.7413, 0.6267], 1.1);
   return [
-    { a: o, b: p1, r1: 0.8, r2: 0.68, w },
-    { a: p1, b: p2, r1: 0.68, r2: 0.82 },
-    { a: p2, b: p3, r1: 0.82, r2: 0.45 },
+    { a: o, b: p1, r1: 0.8, r2: 0.67, w },
+    { a: p1, b: p2, r1: 0.67, r2: 0.78 },
+    { a: p2, b: p3, r1: 0.78, r2: 0.49 },
   ];
 }
 // Right atrial appendage: BROAD-BASED and triangular, wide-mouthed — the key
@@ -2432,12 +2505,12 @@ function dArchHeads(x, y, z, A) {
   }
   return d;
 }
-// the posterior mediastinal bed behind the atria: the straight course from the
-// end of the arch to the aorta behind the LA, which the bowed descending aorta
-// (DTA_MID) leaves to the oesophagus
+// the posterior mediastinal bed behind the atria that the oesophagus occupies
+// (POST_BED_TOP down to the aorta behind the LA), right of and in front of the
+// descending aorta
 function dPostBed(x, y, z, A) {
-  const t = A.ao.dta;
-  return sdCapsule(x, y, z, t.top[0], t.top[1], t.top[2], t.a[0], t.a[1], t.a[2], t.r);
+  const t = A.ao.dta, q = POST_BED_TOP;
+  return sdCapsule(x, y, z, q[0], q[1], q[2], t.a[0], t.a[1], t.a[2], t.r);
 }
 function dDTA(x, y, z, A) {
   const t = A.ao.dta, m = t.mid || t.top;
@@ -2927,6 +3000,16 @@ function isLung(x, y, z) {
     const m = Math.min(m1, m2);
     if (m > -LOBE_REACH && m + (m1 < m2 ? lungLobulation(lb + m, ab, sb) : lungLobulation(lb, ab - m, sb)) > 0) return true;
     if (m >= LOBE_REACH) return true;
+  }
+  // the pleura keeps AORTA_PLEURA of mediastinal fat off the wall of the upper
+  // descending aorta along its real (bowed) course from the isthmus to the level
+  // behind the LA, not only round the straight axis used below: otherwise the left
+  // lung lies on the aortic wall where the aorta leaves that axis (suprasternal
+  // long axis: air directly on the lateral wall of the descending limb).
+  if (ab < 0) {
+    const rr = DTA_R + AORTA_PLEURA;
+    if (sdCapsule(x, y, z, DTA_TOP[0], DTA_TOP[1], DTA_TOP[2], DTA_MID[0], DTA_MID[1], DTA_MID[2], rr) < 0 ||
+        sdCapsule(x, y, z, DTA_MID[0], DTA_MID[1], DTA_MID[2], DTA_P[0], DTA_P[1], DTA_P[2], rr) < 0) return false;
   }
   // general lung boundary (negative = aerated): everywhere outside the two
   // acoustic-window cones and, posteriorly, outside the posterior mediastinum
