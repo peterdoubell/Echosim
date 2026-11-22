@@ -8,7 +8,7 @@ import { OrbitControls } from '../vendor/OrbitControls.js';
 import { geometryAt, velocityAt, VALVE_DEFS } from './cardiac-model.js';
 import { myoDist, lumenDist, LM } from './anatomy.js';
 import { buildMesh } from './marching.js';
-import { VESSELS, VESSEL_BOX, VESSEL_CELL } from './vessels3d.js';
+import { VESSELS, VESSEL_BOX, VESSEL_CELL, CORONARY_3D } from './vessels3d.js';
 import { CONTEXT, buildContext, structureLabels, cameraDir, cameraDirForPlane, declutterLabels, labelPriority, CAMERA_UP } from './thorax3d.js';
 import { teePathParam, teePathPolyline, TEE_PATH_TOP } from './views.js';
 
@@ -123,7 +123,16 @@ export class Heart3D {
     this.vesselMeshes = {};
     for (const v of VESSELS) {
       this.vesselMeshes[v.key] = new THREE.Mesh(new THREE.BufferGeometry(),
-        mkMat(v.color, v.key === 'coronary' ? 0.9 : 0.66, { depthWrite: true, roughness: 0.5 }));
+        mkMat(v.color, v.key === 'coronary' ? 1 : 0.66, { depthWrite: true, roughness: 0.5 }));
+    }
+    {
+      // coronaries: opacity 1 and self-lit, drawn after the translucent myocardial
+      // shell (which writes no depth), so they are not tinted by it. (The material
+      // stays in the transparent pass: an opaque-pass mesh is always drawn before
+      // the shell, whatever its renderOrder.)
+      const cm = this.vesselMeshes.coronary;
+      cm.material.emissive = new THREE.Color(CORONARY_3D.emissive);
+      cm.material.emissiveIntensity = CORONARY_3D.emissiveIntensity;
     }
     this.vesMesh = this.vesselMeshes.aorticRoot;
     // Per-chamber Fresnel rim: each pool gets a thin glowing silhouette in its
@@ -139,6 +148,7 @@ export class Heart3D {
     const A0 = geometryAt(0, {}).A;
     for (const v of VESSELS) if (!v.moving) this.vesselMeshes[v.key].geometry = this._geomFrom((x, y, z) => v.fn(x, y, z, A0), VESSEL_BOX, VESSEL_CELL);
     this.bloodMeshes.forEach((m) => { m.renderOrder = 2; });
+    this.vesselMeshes.coronary.renderOrder = CORONARY_3D.renderOrder;   // after the myocardial shell (4)
     [this.myoMesh, ...this.bloodMeshes].forEach((m) => this.heartGroup.add(m));
 
     // Rule-based (Streeter) myofiber overlay: helical fibres wound around the LV

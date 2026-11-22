@@ -87,6 +87,7 @@ export const MODULES = [
       { id: 'tour', text: 'Step through PLAX, PSAX, PSAX AV, PSAX MV, A4C, A5C, A2C, A3C, Subcostal, SC IVC and SSN on the normal heart. Name the structures before reading the labels.', sim: { path: 'normal', view: 'PLAX' } },
       { id: 'labels', text: 'Turn off anatomy labels (L) and identify the chambers and valves in A4C yourself.', sim: { path: 'normal', view: 'A4C' } },
       { id: 'probe', text: 'Use the azimuth/tilt sliders to foreshorten A4C, then restore it. Note how the apex looks when the plane misses it.', sim: { path: 'normal', view: 'A4C' } },
+      { id: 'mmode', text: 'In A4C, set the Trace panel to M-mode on the lateral tricuspid annulus. Click the lowest and the highest point of the annular echo to measure TAPSE, then repeat on the lateral mitral annulus (MAPSE).', sim: { path: 'normal', view: 'A4C', trace: 'mmode', line: 'tapse' } },
     ],
     questions: [
       { q: 'Which view is used to measure the LVOT diameter for the continuity equation?', options: ['Zoomed parasternal long axis', 'Apical four-chamber', 'Parasternal short axis at papillary level', 'Subcostal'], answer: 0, explain: 'The LVOT is measured in zoomed PLAX in mid-systole, inner edge to inner edge, close to the aortic annulus.' },
@@ -180,6 +181,7 @@ export const MODULES = [
     ],
     tasks: [
       { id: 'inflow', text: 'In A4C, read E and A on the mitral inflow trace in the normal heart, then in mitral stenosis.', sim: { path: 'normal', view: 'A4C' } },
+      { id: 'tdi', text: 'In A4C, set the Trace panel to Tissue Doppler at the lateral and then the septal mitral annulus. Read e\' and E/e\' in dilated cardiomyopathy, then compare the normal heart and aortic stenosis.', sim: { path: 'dcm', view: 'A4C', trace: 'tdi', line: 'mvLat' } },
       { id: 'la', text: 'Compare LA size and LAVi in the Echo report for the normal heart and severe mitral regurgitation.', action: 'report', sim: { path: 'mr', view: 'A4C', grade: 'severe' } },
     ],
     questions: [
@@ -274,7 +276,8 @@ export const MODULES = [
     tasks: [
       { id: 'tapse', text: 'In A4C, note TAPSE and RV size in the Echo report for the normal heart, then for pulmonary hypertension.', action: 'report', sim: { path: 'phtn', view: 'A4C' } },
       { id: 'dsign', text: 'Load pulmonary hypertension in PSAX and watch the septum flatten into a D-shape through the cycle.', sim: { path: 'phtn', view: 'PSAX' } },
-      { id: 'ivc', text: 'Open the subcostal IVC view and estimate RA pressure.', sim: { path: 'tr', view: 'SC_IVC', grade: 'severe' } },
+      { id: 'ivc', text: 'Open the subcostal IVC view and estimate RA pressure: measure the largest and smallest diameter on the M-mode trace across a sniff (or press Sniff and watch the vein), then compare with the normal heart.', sim: { path: 'tr', view: 'SC_IVC', grade: 'severe', trace: 'mmode', line: 'ivc' } },
+      { id: 'rvs', text: 'In A4C, set the Trace panel to Tissue Doppler at the lateral tricuspid annulus and read RV s\' in pulmonary hypertension; measure TAPSE on the M-mode trace of the same annulus.', sim: { path: 'phtn', view: 'A4C', trace: 'tdi', line: 'tvLat' } },
     ],
     questions: [
       { q: 'TAPSE is abnormal below:', options: [`${tapse} mm`, '25 mm', '10 mm', '21 mm'], answer: 0, explain: `TAPSE < ${tapse} mm indicates reduced RV longitudinal function.` },

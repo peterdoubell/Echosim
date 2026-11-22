@@ -1342,6 +1342,46 @@ function erodeSurvivors(S, k, r) {
   ends.sort((x, y) => x[2] - y[2]);
   check('B-mode', 'pleural line: end beam below the segment median (weakest end)', ends.length ? ends[0][2] : null, [10, 60], 'dB', ends.length ? `${ends.length} ends, worst ${ends[0][0]} beam ${ends[0][1]}` : '');
   {
+    // The lung margin has no geometric edges: in the views where the acoustic
+    // window's border crosses the sector, no 3 cm of the lung boundary (tissue
+    // grid, 1 mm cells, beyond the chest wall) is a straight line (same line-fit
+    // form as the liver-edge row); the PLAX pleural line behind the descending
+    // aorta is one smooth curve (no cusps in the per-beam pleural depth).
+    const lungEdgeFit = (view) => {
+      const g = sectorGrid(view, GED), B = [];
+      const at = (i, j) => { const c = g.cells.get(`${i},${j}`); return c && Math.hypot(c.u, c.v) > 2.5 ? c.t : -1; };
+      for (const [k, c] of g.cells) {
+        if (c.t !== TISSUE.LUNG || Math.hypot(c.u, c.v) <= 2.5) continue;
+        const [i, j] = k.split(',').map(Number);
+        for (const [a, b] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const n = at(i + a, j + b); if (n !== -1 && n !== TISSUE.LUNG) { B.push([c.u, c.v]); break; } }
+      }
+      let worst = 1e9, where = ''; const R = 1.5;
+      for (let k = 0; k < B.length; k += 2) {
+        const [cx, cy] = B[k], P = B.filter(([x, y]) => (x - cx) ** 2 + (y - cy) ** 2 < R * R);
+        if (P.length < 20) continue;
+        const mx = P.reduce((s, q) => s + q[0], 0) / P.length, my = P.reduce((s, q) => s + q[1], 0) / P.length;
+        let sxx = 0, syy = 0, sxy = 0;
+        for (const [x, y] of P) { sxx += (x - mx) ** 2; syy += (y - my) ** 2; sxy += (x - mx) * (y - my); }
+        const tr = sxx + syy, l1 = tr / 2 + Math.sqrt(Math.max(0, tr * tr / 4 - (sxx * syy - sxy * sxy)));
+        let e = [sxy, l1 - sxx]; if (Math.hypot(e[0], e[1]) < 1e-9) e = sxx > syy ? [1, 0] : [0, 1];
+        const el = Math.hypot(e[0], e[1]), u = [e[0] / el, e[1] / el];
+        let lo = 1e9, hi = -1e9, res = 0;
+        for (const [x, y] of P) { const s = (x - mx) * u[0] + (y - my) * u[1]; lo = Math.min(lo, s); hi = Math.max(hi, s); res = Math.max(res, Math.abs(-(x - mx) * u[1] + (y - my) * u[0])); }
+        if (hi - lo < 2 * R - 0.3) continue;
+        if (res < worst) { worst = res; where = `at (${cx.toFixed(1)}, ${cy.toFixed(1)}) cm`; }
+      }
+      return [worst === 1e9 ? null : worst, where];
+    };
+    for (const nm of ['PSAX', 'PSAX_MV', 'SUBCOSTAL']) {
+      const [w, where] = lungEdgeFit(TTE_VIEWS[nm] || EXTRA_VIEWS[nm]);
+      check('B-mode', `${nm}: straightest 3 cm of lung border (max line-fit residual)`, w, [0.15, 99], 'cm', where);
+    }
+    for (const nm of ['TG2C', 'TGLAX']) {
+      const [w, where] = lungEdgeFit(TEE_VIEWS[nm]);
+      check('B-mode', `${nm}: straightest 3 cm of pleural border (max line-fit residual)`, w, [0.15, 99], 'cm', where);
+    }
+  }
+  {
     // speckle grain follows the beam geometry: the autocorrelation's major axis
     // lies along the depth arc (perpendicular to the beam), also at the fan edges
     const R = renderBmode('A4C', ED, {});
@@ -3935,6 +3975,130 @@ SECTION = 'TEE';
   const tri = Object.fromEntries(Object.entries(M).map(([k, m]) => [k, m ? m.indices.length / 3 : 0]));
   assert('3D', 'thoracic context meshes present (lungs, diaphragm, liver, oesophagus, stomach, pericardium, chest wall)',
     ['lungs', 'diaphragm', 'liver', 'oesophagus', 'stomach', 'pericardium', 'chestWall'].every((k) => tri[k] > 200), JSON.stringify(tri));
+  {
+    // review 12 (ANA-11, ANA-10): skeleton, airway and coronaries of the 3D panel
+    const T3 = await import('../js/thorax3d.js');
+    const { lumenDist: lumD, LM: LM3, bodyClassify: bcl, BODY: BD } = await import('../js/anatomy.js');
+    const { TTE_VIEWS: TV3, teePathAt } = await import('../js/views.js');
+    const need = ['sternum', 'ribs', 'spine', 'airway'];
+    assert('3D', 'CONTEXT includes sternum, ribs, spine, trachea and bronchi', need.every((k) => tri[k] > 200 && T3.CONTEXT.some((c) => c.key === k)) &&
+      ['trachea', 'right', 'left'].every((k) => T3.AIRWAY[k].length >= 2), need.map((k) => `${k} ${tri[k]}`).join(', '));
+    // the standard windows lie in an intercostal space: the parasternal ones in
+    // the 4th left space beside the sternum, the apical ones in the 5th
+    let clr = 1e9, where = ''; const space = {};
+    for (const k of ['PLAX', 'PSAX', 'PSAX_AV', 'A4C', 'A2C']) {
+      const [l, a, s] = T3.worldToBody(...TV3[k].probe(A).pos);
+      const th = Math.atan2(Math.abs(l - T3.SKEL.l0) / 13, (a + 1.5) / 8);
+      let above = 0;
+      for (const n of T3.SKEL.ribs) { const ds = s - T3.ribHeight(n, th); if (ds < 0) above = Math.max(above, n); if (Math.abs(ds) - T3.SKEL.ribR < clr) { clr = Math.abs(ds) - T3.SKEL.ribR; where = k; } }
+      space[k] = above;                                    // the lowest rib above the probe = the interspace number
+    }
+    check('3D', 'parasternal and apical probes: clearance from the nearest rib (worst window)', clr, [0.1, 3], 'cm', where);
+    assert('3D', 'parasternal windows in the 4th interspace, apical windows in the 5th', space.PLAX === 4 && space.PSAX === 4 && space.PSAX_AV === 4 && space.A4C === 5 && space.A2C === 5, JSON.stringify(space));
+    const stL = T3.worldToBody(...TV3.PLAX.probe(A).pos)[0] - T3.SKEL.l0;
+    check('3D', 'PLAX probe: distance left of the sternal midline (left sternal edge at 1.25 cm)', stL, [1.25, 4]);
+    const ssn = T3.worldToBody(...EXTRA_VIEWS.SSN.probe(A).pos), sub = T3.worldToBody(...TV3.SUBCOSTAL.probe(A).pos);
+    assert('3D', 'suprasternal probe above the manubrium, subcostal probe below the xiphoid', ssn[2] > T3.SKEL.manubrium && sub[2] < T3.SKEL.xiphoid, `SSN s ${ssn[2].toFixed(1)}, subcostal s ${sub[2].toFixed(1)}`);
+    // the air column touches no blood pool and not the oesophagus
+    let air = 1e9, aw = '';
+    for (const k of ['trachea', 'right', 'left']) {
+      const q = T3.AIRWAY[k], r = k === 'trachea' ? T3.AIRWAY.rT : T3.AIRWAY.rB;
+      for (let n = 0; n + 1 < q.length; n++) for (let f = 0; f <= 1.001; f += 0.1) {
+        const w = T3.bodyToWorld(...q[n].map((v, i) => v + (q[n + 1][i] - v) * f));
+        for (const nm of ['LV', 'RV', 'LA', 'RA', 'AOROOT', 'PA', 'ARCH', 'DESC', 'SVC', 'BCV']) { const d = lumD(w[0], w[1], w[2], A, nm) - r; if (d < air) { air = d; aw = `${k} / ${nm}`; } }
+        for (let u = -6; u <= 12; u += 0.25) { const e = teePathAt(u), d = Math.hypot(e[0] - w[0], e[1] - w[1], e[2] - w[2]) - r - 0.8; if (d < air) { air = d; aw = `${k} / oesophagus`; } }
+      }
+    }
+    check('3D', 'trachea and main bronchi: clearance from the blood pools and the oesophagus', air, [0.1, 5], 'cm', aw);
+    // the TEE blind spot: from the oesophagus 5-6 cm above the ME station the line
+    // of sight to the distal ascending aorta crosses the air column
+    const asc = A.ao.ascSegs[A.ao.ascSegs.length - 1].b; let blind = 0;
+    for (const u of [5, 6]) { const e = teePathAt(u), len = Math.hypot(...e.map((v, i) => asc[i] - v)); let h = 0; for (let f = 0.02; f < 1; f += 0.01) if (T3.airwayDist(...T3.worldToBody(...e.map((v, i) => v + (asc[i] - v) * f))) < 0) h++; blind = Math.max(blind, h * 0.01 * len); }
+    check('3D', 'TEE blind spot: air between the upper oesophagus and the distal ascending aorta', blind, [0.5, 3]);
+    // coronary ostia in the tracked end-diastolic PSAX-AV plane, as clock hours
+    // round the root centre (12 = towards the probe, clockwise on the display)
+    {
+      const G9 = geo(0.99), A9 = G9.A, v = TV3.PSAX_AV, pr = v.probe(A9), off = v.track ? v.track(A9) : [0, 0, 0];
+      const pos = pr.pos.map((x, i) => x + off[i]), d3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+      const c = [0, 1, 2].map((i) => A9.ao.valve[i] + LM3.U_AO[i] * A9.ao.sinusH - pos[i]), cx = d3(c, pr.lat), cy = d3(c, pr.dir);
+      const acc = { L: { n: 0, sa: 0, lum: 0 }, R: { n: 0, sa: 0, lum: 0 } };
+      for (let r = 1.0; r <= 3.4; r += 0.04) for (let a = 0; a < 360; a++) {
+        const dx = Math.sin(a * Math.PI / 180) * r, dy = -Math.cos(a * Math.PI / 180) * r;
+        const p = [0, 1, 2].map((i) => pos[i] + pr.lat[i] * (cx + dx) + pr.dir[i] * (cy + dy));
+        if (lumD(p[0], p[1], p[2], A9, 'CORONARY') >= 0) continue;
+        const o = a > 30 && a < 200 ? acc.L : acc.R; o.n++; o.sa += o === acc.R && a < 180 ? a + 360 : a;
+        if (bcl(p[0], p[1], p[2], A9).code === BD.AO) o.lum += 0.04 * (Math.PI / 180) * r;
+      }
+      check('3D', 'PSAX-AV ED: left main in plane, clock hour', acc.L.n ? acc.L.sa / acc.L.n / 30 : NaN, [3.5, 4.5], "o'clock");
+      check('3D', 'PSAX-AV ED: right coronary in plane, clock hour', acc.R.n ? (acc.R.sa / acc.R.n % 360) / 30 : NaN, [10, 12], "o'clock");
+      check('3D', 'PSAX-AV ED: left main drawn as arterial lumen', acc.L.lum, [0.1, 0.5], 'cm2');
+      // KNOWN-FAIL: the first ~2 cm of the RCA leave the right sinus through the
+      // infundibular muscle and the RV lumen (anatomy.js buildCoronaries: no
+      // epicardial corridor exists between the re-based root, the RVOT and the
+      // right AV groove; root / RV groups), so only its tip is drawn in the plane
+      KNOWN = acc.R.lum < 0.1;
+      check('3D', 'PSAX-AV ED: right coronary drawn as arterial lumen', acc.R.lum, [0.1, 0.5], 'cm2', KNOWN ? 'pending root / RV: proximal RCA crosses the infundibulum' : '');
+      KNOWN = false;
+    }
+    {
+      // 3D coronaries against the myocardial shell: relative luminance (WCAG) of
+      // the coronary colour over the shell's muscle colour, drawn at opacity 1 after it
+      const fs3 = await import('fs');
+      const V3 = await import('../js/vessels3d.js');
+      const h3 = fs3.readFileSync(new URL('../js/heart3d.js', import.meta.url), 'utf8');
+      const mus = parseInt(h3.match(/const MUSCLE = 0x([0-9a-f]{6})/i)[1], 16), myoOrder = +h3.match(/this\.myoMesh\.renderOrder = (\d+)/)[1];
+      const lum = (c) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(c >> 16 & 255) + 0.7152 * f(c >> 8 & 255) + 0.0722 * f(c & 255); };
+      check('3D', '3D: coronary-to-myocardium screen contrast', (lum(V3.CORONARY) + 0.05) / (lum(mus) + 0.05), [2, 21], ':1');
+      assert('3D', '3D coronaries opaque, inflated and drawn after the myocardial shell', V3.CORONARY_3D.opacity === 1 && V3.CORONARY_3D.inflate >= 0.18 && V3.CORONARY_3D.renderOrder > myoOrder &&
+        /vesselMeshes\.coronary\.renderOrder = CORONARY_3D\.renderOrder/.test(h3), `opacity ${V3.CORONARY_3D.opacity}, inflate ${V3.CORONARY_3D.inflate} cm, order ${V3.CORONARY_3D.renderOrder} > ${myoOrder}`);
+    }
+  }
+  {
+    // review 12 (ANA-10): pericardial reflections and sinuses
+    const AN = await import('../js/anatomy.js');
+    // the drawn sac closes over the pulmonary trunk's bifurcation: no point of a
+    // branch centreline more than 1 cm (+ the 3 mm sac offset) beyond the trunk is inside it
+    const bif = A.pa.main.b; let far = 0, wrapped = 0, old = 0;
+    for (const seg of A.pa.branch) for (let f = 0; f <= 1.001; f += 0.05) {
+      const q = seg[0].map((v, i) => v + (seg[1][i] - v) * f);
+      if (Math.hypot(...q.map((v, i) => v - bif[i])) - A.pa.main.r2 <= AN.PERI_REFLECT.paBranch + AN.PERI_REFLECT.sac) continue;
+      far++; if (AN.parietalSacDist(q[0], q[1], q[2], A) < AN.PERI_REFLECT.sac) wrapped++; if (AN.epiDist(q[0], q[1], q[2], A) < AN.PERI_REFLECT.sac) old++;
+    }
+    assert('3D', 'pericardial sac does not wrap the PA branches beyond 1 cm from the bifurcation', far >= 8 && wrapped === 0, `${wrapped} of ${far} far centreline points inside the sac (the epicardial field: ${old})`);
+    const svTop = A.svc.c || A.svc.b;
+    assert('3D', 'pericardial sac holds the lower SVC, not its upper end', AN.parietalSacDist(...[0, 1, 2].map((i) => A.svc.a[i] + (A.svc.b[i] - A.svc.a[i]) * 0.5), A) < AN.PERI_REFLECT.sac &&
+      AN.parietalSacDist(svTop[0], svTop[1], svTop[2], A) > AN.PERI_REFLECT.sac, `top ${AN.parietalSacDist(svTop[0], svTop[1], svTop[2], A).toFixed(2)} cm outside the field`);
+    // effusion: fluid in the transverse sinus (between the great arteries and the
+    // atria, within 1.5 cm of the LA) and the parietal line against the DTA
+    const pe = PATHS.eff, Ge = geo(0.99, 'eff'), Ae = Ge.A, h = 0.04, tsA = {};
+    let line = 0, touch = 0;
+    for (const [vn, v] of [['PLAX', TTE_VIEWS.PLAX], ['PSAX_AV', TTE_VIEWS.PSAX_AV], ['MEAVLAX', TEE_VIEWS.MEAVLAX], ['MEAVSAX', TEE_VIEWS.MEAVSAX]]) {
+      const pr = v.probe(Ae), off = v.track ? v.track(Ae) : [0, 0, 0], pos = pr.pos.map((x, i) => x + off[i]), half = Math.tan(sectorHalfOf(v));
+      tsA[vn] = 0;
+      for (let d = 0.3; d < v.depth; d += h) for (let x = -d * half; x <= d * half; x += h) {
+        const q = [0, 1, 2].map((i) => pos[i] + pr.dir[i] * d + pr.lat[i] * x), ti = classify(q[0], q[1], q[2], Ge, pe).tissue;
+        if (vn === 'PLAX' && (ti === TISSUE.PERICARDIUM || ti === TISSUE.PERI_LINE)) {
+          const dd = AN.lumenDist(q[0], q[1], q[2], Ae, 'DESC') - Ae.ao.wall;
+          if (ti === TISSUE.PERICARDIUM && dd > 0 && dd < 0.1) touch++;
+          if (ti === TISSUE.PERI_LINE && dd > 0 && dd < 0.22) line++;
+        }
+        if (ti !== TISSUE.PERICARDIUM) continue;
+        const s = AN.transverseSinus(q[0], q[1], q[2], Ae);
+        if (s.atrial && s.art > 0 && s.atr > 0 && s.art + s.atr < 0.95 && AN.lumenDist(q[0], q[1], q[2], Ae, 'LA') < 1.5) tsA[vn] += h * h;
+      }
+    }
+    assert('Effusion', 'effusion PLAX: parietal line between the fluid and the DTA', line * h * h > 0.1 && touch === 0, `line ${(line * h * h).toFixed(2)} cm2 on the aortic wall, ${touch} fluid samples within 1 mm of it`);
+    check('Effusion', 'effusion ME AV LAX: fluid in the transverse sinus between the root and the LA', tsA.MEAVLAX, [0.2, 3], 'cm2');
+    check('Effusion', 'effusion ME AV SAX: fluid in the transverse sinus between the root and the LA', tsA.MEAVSAX, [0.2, 3], 'cm2');
+    check('Effusion', 'effusion PLAX: fluid in the transverse sinus between the root and the LA', tsA.PLAX, [0.2, 3], 'cm2');
+    // KNOWN-FAIL: in the transthoracic PSAX-AV plane the atrial wall and septum
+    // are drawn solid against the non-coronary sinus (no space is left between the
+    // root and the LA to distend); opening one means carving the atrial wall there,
+    // which belongs to the atrial-wall group. The TEE planes and PLAX show the sinus.
+    KNOWN = tsA.PSAX_AV < 0.2;
+    check('Effusion', 'effusion PSAX-AV: fluid in the transverse sinus between the root and the LA', tsA.PSAX_AV, [0.2, 3], 'cm2', KNOWN ? 'pending atrial wall: the root abuts the atrial wall in this plane' : '');
+    KNOWN = false;
+  }
   const Lb = structureLabels(A).heart.map(([t]) => t);
   assert('3D', 'labels for the LAA and the four pulmonary veins', ['LAA', 'LSPV', 'LIPV', 'RSPV', 'RIPV'].every((t) => Lb.includes(t)), Lb.join(' '));
   {
@@ -5219,6 +5383,130 @@ SECTION = 'Pathology';
   let sideT = 0;
   for (let j = 0; j < RT.SH; j++) if (RT.mask[j * RT.SW] || RT.mask[j * RT.SW + RT.SW - 1]) sideT++;
   check('B-mode', 'ME4C 16 cm (90 deg TEE sector): sector rows touching the buffer side edges', sideT, [0, 0], 'rows');
+  SECTION = sec0;
+}
+// (also rendered last, for the same reason) the PLAX pleural line is one smooth
+// curve; the descending-aorta long axis has its mirror image; laminar colour is mottled
+{
+  const sec0 = SECTION; SECTION = 'Normal';
+  {
+    const R = renderBmode('PLAX', ED, {}), L = R.lungD;
+    let d2 = 0, nb = 0;
+    for (let a = 1; a < R.NA - 1; a++) if (L[a - 1] < 1e8 && L[a] < 1e8 && L[a + 1] < 1e8) { nb++; d2 = Math.max(d2, Math.abs(L[a - 1] - 2 * L[a] + L[a + 1])); }
+    check('B-mode', 'PLAX pleural line: max |second difference| of per-beam depth', nb ? d2 : null, [0, 0.3], 'cm', `${nb} beams`);
+  }
+  {
+    // the long-axis view mirrors too: a second, fainter tube beyond the pleura. The
+    // mirrored lumen (the points beyond the plane whose mirror image is aortic
+    // lumen) is darker than the rest of the far field at the same range
+    const R = renderBmode('DESCAOLAX', ED, {}), M = R.mirP, W = R.SW, lum = [], rest = [];
+    if (M) for (let j = 0; j < R.SH; j++) for (let i = 0; i < W; i++) {
+      const p = j * W + i; if (!R.mask[p]) continue;
+      const dist = (i - M[0]) * M[2] + (j - M[1]) * M[3];
+      if (dist < 0.3 * R.pxPerCm || dist > 3 * R.pxPerCm) continue;           // 0.3-3 cm beyond the plane
+      if (R.depth[p] < R.lungD[Math.round(R.abin[p])] + 0.2) continue;
+      const th = Math.atan2(i - R.cx, j - R.apexY); if (Math.abs(th) > R.half - 0.2) continue;
+      const mx = Math.round(i - 2 * dist * M[2]), my = Math.round(j - 2 * dist * M[3]);
+      if (mx < 0 || mx >= W || my < 0 || my >= R.SH || !R.mask[my * W + mx]) continue;
+      (R.kind[my * W + mx] === TISSUE.AORTA ? lum : rest).push(R.grey[p]);
+    }
+    const mean = (v) => v.reduce((x, y) => x + y, 0) / v.length;
+    assert('B-mode', 'DESCAOLAX: mirror plane found on the pleura behind the aorta', !!M);
+    check('B-mode', 'DESCAOLAX: mirrored aortic lumen below the rest of the mirrored far field', M && lum.length > 200 && rest.length > 200 ? (mean(rest) - mean(lum)) / 255 * 55 : null, [6, 40], 'dB', `${lum.length} / ${rest.length} px`);
+  }
+  {
+    // laminar inflow is a mottled column, not a flat fill: coefficient of variation
+    // of the colour intensity (R + G + B) over the tricuspid inflow in the RV inflow view
+    const D = renderDoppler('RVIT', 0.56, {}, {}), v = [];
+    for (let q = 0; q < D.SW * D.SH; q++) {
+      if (!D.alpha[q] || (D.kind[q] !== TISSUE.RV && D.kind[q] !== TISSUE.RA)) continue;
+      v.push(D.rgb[q * 3] + D.rgb[q * 3 + 1] + D.rgb[q * 3 + 2]);
+    }
+    const m = v.length ? v.reduce((x, y) => x + y, 0) / v.length : 0;
+    const sd = v.length ? Math.sqrt(v.reduce((x, y) => x + (y - m) ** 2, 0) / v.length) : 0;
+    check('B-mode', 'RVIT inflow colour: coefficient of variation of the colour intensity', v.length > 300 ? sd / m : null, [0.05, 0.3], '', `${v.length} px`);
+  }
+  SECTION = sec0;
+}
+
+// ---- M-mode, tissue Doppler and the breathing IVC (MOT-5) --------------------
+// What the trace panel shows, read off the trace itself (mmodeRead: the caliper's
+// reading), against the model's own numbers.
+{
+  const { mmodeLine, mmodeSweep, mmodeRead, tdiTrace, annulusPoint } = await import('../js/echo.js');
+  const sec0 = SECTION; SECTION = 'Doppler';
+  const g = 'M-mode, tissue Doppler, IVC sniff';
+  const TP = { effusion: true, tamponade: true };
+  const probeOf = (vn, path) => { const vw = ALL_V[vn], p = vw.probe(); if (vw.track) { const o = vw.track(geometryAt(0.99, path).A); p.pos = add(p.pos, o); } return p; };
+  const mm = (vn, key, path) => { const ln = mmodeLine(vn, key, path, probeOf(vn, path)); return mmodeRead(mmodeSweep(ln, path, 120, 260, Math.max(0, ln.depth - 3.2), ln.depth + 3.2)); };
+  // TAPSE: the lateral tricuspid annulus's excursion on the M-mode trace against
+  // the model's (report) TAPSE
+  for (const [nm, path] of [['normal', PATHS.normal], ['pulmonary hypertension', PATHS.phtn]]) {
+    const R = mm('A4C', 'tapse', path), model = measureModel(path).tapse / 10;
+    check(g, `${nm}: M-mode TAPSE minus model TAPSE`, R.excursion - model, [-0.2, 0.2], 'cm', `M-mode ${(R.excursion * 10).toFixed(0)} mm, model ${(model * 10).toFixed(0)} mm`);
+  }
+  // PLAX lines: the trace's automatic reading (inner edge to inner edge on the
+  // R-wave column; LVIDs at the systolic minimum) against the report's 2D linear
+  // dimensions. The M-mode beam is fixed in the chest and need not cross the LV at
+  // right angles, where the report's line is perpendicular to the long axis and
+  // follows the base: in the normal heart the two agree to a few mm; in the
+  // dilated, more spherical ventricle the oblique beam reads longer, never shorter
+  // (the reason 2D-guided linear measurements are preferred: Lang et al., ASE/EACVI
+  // chamber quantification, J Am Soc Echocardiogr 2015;28:1-39).
+  {
+    const full = (key, path) => { const ln = mmodeLine('PLAX', key, path, probeOf('PLAX', path)); return mmodeRead(mmodeSweep(ln, path, 120, 300, 0.5, 16)); };
+    const L = full('lv', PATHS.normal), Ao = full('ao', PATHS.normal), M0 = measureModel(PATHS.normal);
+    assert(g, 'normal: PLAX M-mode lines are read automatically (LV and aortic root / LA)', !!L && !!Ao && L.lvidd > 0 && Ao.ao > 0 && Ao.la_max > 0);
+    if (L && Ao) {
+      check(g, 'normal: M-mode LVIDd minus report LVIDd', L.lvidd - M0.lvidd / 10, [-0.3, 0.3], 'cm', `M-mode ${(L.lvidd * 10).toFixed(0)} mm, report ${M0.lvidd.toFixed(0)} mm`);
+      check(g, 'normal: M-mode LVIDs minus report LVIDs', L.lvids - M0.lvids / 10, [-0.3, 0.3], 'cm', `M-mode ${(L.lvids * 10).toFixed(0)} mm, report ${M0.lvids.toFixed(0)} mm`);
+      check(g, 'normal: M-mode IVSd minus report IVSd', L.ivsd - M0.ivsd / 10, [-0.2, 0.2], 'cm', `M-mode ${(L.ivsd * 10).toFixed(0)} mm, report ${M0.ivsd.toFixed(0)} mm`);
+      check(g, 'normal: M-mode aortic root minus report sinus diameter', Ao.ao - M0.sov / 10, [-0.3, 0.3], 'cm', `M-mode ${(Ao.ao * 10).toFixed(0)} mm, report ${M0.sov.toFixed(0)} mm`);
+      check(g, 'normal: M-mode LA antero-posterior dimension', Ao.la_max, [2.7, 4.0], 'cm', 'ASE normal 2.7-4.0 cm');
+    }
+    const Ld = full('lv', PATHS.dcm), Md = measureModel(PATHS.dcm);
+    check(g, 'DCM: M-mode LVIDd minus report LVIDd (oblique beam reads longer)', Ld ? Ld.lvidd - Md.lvidd / 10 : null, [0, 1], 'cm', Ld ? `M-mode ${(Ld.lvidd * 10).toFixed(0)} mm, report ${Md.lvidd.toFixed(0)} mm` : '');
+    const La = full('lv', PATHS.as), Ma = measureModel(PATHS.as);
+    check(g, 'severe AS (LVH): M-mode IVSd minus report IVSd', La ? La.ivsd - Ma.ivsd / 10 : null, [-0.2, 0.2], 'cm', La ? `M-mode ${(La.ivsd * 10).toFixed(0)} mm, report ${Ma.ivsd.toFixed(0)} mm` : '');
+  }
+  // MAPSE: the M-mode line is on the LATERAL annulus, whose excursion exceeds the
+  // annular centre's (the report's MAPSE) by its share of the angle-dependent
+  // descent, so the trace is compared with the lateral annulus's own excursion
+  for (const [nm, path] of [['normal', PATHS.normal], ['DCM', PATHS.dcm]]) {
+    const R = mm('A4C', 'mapse', path), a = annulusPoint(geometryAt(0.99, path).A, 'mvLat'), b = annulusPoint(geometryAt(hemoSummary(path).tMinVol, path).A, 'mvLat');
+    const model = Math.hypot(...sub(a, b));
+    check(g, `${nm}: M-mode MAPSE minus model MAPSE (lateral annulus)`, R.excursion - model, [-0.15, 0.15], 'cm', `M-mode ${(R.excursion * 10).toFixed(0)} mm, lateral annulus ${(model * 10).toFixed(0)} mm, report (annular centre) ${measureModel(path).mapse} mm`);
+  }
+  // tissue Doppler from the apical four-chamber window
+  const tdi = (site, path) => tdiTrace(site, path, probeOf('A4C', path).pos, 60 / 72);
+  const tN = tdi('mvLat', PATHS.normal), tA = tdi('mvLat', { ...PATHS.as, grade: 'severe' }), tD = tdi('mvLat', PATHS.dcm), tDs = tdi('mvSep', PATHS.dcm), tR = tdi('tvLat', PATHS.normal);
+  // (KNOWN: 2016 ASE/EACVI diastolic guideline, a normal lateral e' is >= 10 cm/s.
+  // The annulus velocity is the time derivative of the drawn long-axis
+  // shortening, which follows the solved LV filling curve: the early-filling rate
+  // and the volume-to-long-axis mapping belong to the circulation and LV
+  // mechanics, and give 9.4 cm/s. The display reads what the heart does.)
+  KNOWN = !(tN.e >= 10 && tN.e <= 16);
+  check(g, "normal: TDI lateral e'", tN.e, [10, 16], 'cm/s', `s' ${tN.s.toFixed(1)}, a' ${tN.a.toFixed(1)}, E ${tN.E.toFixed(2)} m/s, E/e' ${tN.EoverE.toFixed(1)}`);
+  KNOWN = false;
+  check(g, "normal: lateral E/e'", tN.EoverE, [4, 13], '', 'ASE/EACVI 2016: lateral E/e\' > 13 is raised');
+  check(g, "severe AS: TDI lateral e' (impaired relaxation)", tA.e, [4, 8], 'cm/s', `E/e' ${tA.EoverE.toFixed(1)}`);
+  check(g, "DCM: E/e' (average of septal and lateral)", 0.5 * (tD.EoverE + tDs.EoverE), [14, 30], '', `lateral ${tD.EoverE.toFixed(1)}, septal ${tDs.EoverE.toFixed(1)}`);
+  check(g, "normal: RV s' (lateral tricuspid annulus)", tR.s, [10, 16], 'cm/s');
+  assert(g, "septal e' below lateral e' (normal)", tdi('mvSep', PATHS.normal).e < tN.e);
+  // IVC: the minimum over the maximum diameter across a sniff, on the M-mode
+  // trace of the subcostal IVC view
+  for (const [nm, path, range] of [['normal', PATHS.normal, [0, 0.5]], ['DCM', PATHS.dcm, [0.8, 1]], ['pulmonary hypertension', PATHS.phtn, [0.8, 1]], ['severe TR', PATHS.tr, [0.8, 1]], ['tamponade', TP, [0.8, 1]]]) {
+    const R = mm('SC_IVC', 'ivc', path), iv = geometryAt(0, path).A.ivc;
+    check(g, `${nm}: IVC sniff collapse (min/max diameter)`, R.dMin / R.dMax, range, '', `max ${(R.dMax * 10).toFixed(0)} mm, min ${(R.dMin * 10).toFixed(0)} mm; model ${(2 * iv.rMax * 10).toFixed(0)} mm, ${Math.round(iv.collapse * 100)} % collapse`);
+    if (nm === 'normal' || nm === 'DCM') check(g, `${nm}: IVC maximum diameter on the trace minus the model's`, R.dMax - 2 * iv.rMax, [-0.15, 0.15], 'cm');
+  }
+  // the drawn vein breathes: a sniff narrows it by its collapse fraction, and the
+  // RA-pressure estimate still uses the expiratory diameter
+  {
+    const a = geometryAt(0, { sniff: 1 }).A.ivc, b = geometryAt(0, {}).A.ivc;
+    check(g, 'normal: IVC radius on a full sniff / expiratory radius', a.r / b.r, [0.4, 0.5], '');
+    assert(g, 'RA-pressure estimate unchanged by the breath (expiratory diameter)', rapEstimate(a) === rapEstimate(b), `${rapEstimate(a)} / ${rapEstimate(b)} mmHg`);
+  }
   SECTION = sec0;
 }
 

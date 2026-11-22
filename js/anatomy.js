@@ -678,16 +678,25 @@ function anchorToSeptum(E, sgn, pen) {
 // diameter <= 2.1 cm collapsing > 50 % on sniff -> 3 mmHg; > 2.1 cm collapsing
 // < 50 % -> 15 mmHg; anything in between -> 8 mmHg.
 export function rapEstimate(ivc) {
-  const d = 2 * ivc.r, small = d <= 2.1, collapses = (ivc.collapse != null ? ivc.collapse : 0.55) > 0.5;
+  const d = 2 * (ivc.rMax != null ? ivc.rMax : ivc.r), small = d <= 2.1, collapses = (ivc.collapse != null ? ivc.collapse : 0.55) > 0.5;
   return small && collapses ? 3 : !small && !collapses ? 15 : 8;
 }
 // IVC radius (cm) and sniff collapse (fraction) for a mean RA pressure (mmHg), the
 // inverse of rapEstimate: <= ~5 mmHg a 1.8 cm IVC halving on sniff (RAP 3); 7-9
 // a dilated (> 2.1 cm) IVC that still collapses (RAP 8); >= ~10 a plethoric
 // 2.5 cm IVC collapsing < 50 % (RAP 15).
+// Respiration. The IVC narrows as the intrathoracic pressure falls: by its sniff
+// collapse fraction on a full sniff (breath 1) and by about a quarter of that in
+// quiet inspiration (ASE 2010/2015 RA-pressure estimate: the maximum, expiratory
+// diameter 1-2 cm from the RA and its percentage collapse on a sniff). The UI's
+// respiratory clock sets the breath with setIvcBreath (0 = end expiration);
+// path.sniff (0..1) overrides it, so a case can be drawn at a stated breath.
+let _ivcBreath = 0;
+export function setIvcBreath(s) { _ivcBreath = Math.max(0, Math.min(1, +s || 0)); }
+export function ivcBreath(path = {}) { return path.sniff != null ? Math.max(0, Math.min(1, +path.sniff || 0)) : _ivcBreath; }
 export function ivcOfRap(rap) {
   const t = (x, a, b) => Math.max(0, Math.min(1, (x - a) / (b - a)));
-  return { r: 0.9 + 0.35 * t(rap, 4.6, 9), collapse: 0.55 - 0.35 * t(rap, 9.4, 11) };
+  return { r: 0.9 + 0.35 * t(rap, 4.6, 9), collapse: 0.55 - 0.4 * t(rap, 9.4, 10.6) };
 }
 // Right-heart loading per pathology (shared by the anatomy and the coarse proxies
 // in cardiac-model). rvC scales RV contractility — TAPSE, free-wall (FAC) and
@@ -1056,7 +1065,9 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
       svc: { a: sa, ...course(sa), r: CAVA.svcR },     // d 1.6
       // sniff: the IVC halves in calibre with normal RA pressure; plethoric with
       // raised RA pressure it barely collapses (< 50 %)
-      ivc: { a: add(ia, tether), b: mad(add(ia, tether), unit(mad(BODY_AX.I, SEPT_V, CAVA.ivcTilt)), 11.0), r: ivcR,
+      ivc: { a: add(ia, tether), b: mad(add(ia, tether), unit(mad(BODY_AX.I, SEPT_V, CAVA.ivcTilt)), 11.0),
+        // r is the calibre now (it breathes); rMax the expiratory one that is reported
+        r: ivcR * (1 - ivcS.collapse * ivcBreath(path)), rMax: ivcR,
         collapse: ivcS.collapse },
     };
   })();
@@ -1492,6 +1503,7 @@ function lvEpiRadiusAt(y, L) {
 // the PDA descends the inferior interventricular groove. On echo the ostia are
 // the landmark of the PSAX-AV view (LM at ~4 o'clock off the left cusp, RCA at
 // ~10-11 o'clock off the right cusp). Calibres: LM ~4.5 mm, LAD / RCA ~3.5 mm.
+export const LM_OSTIUM_DEG = 300;
 const CONUS_LIFT = 2.3;                 // conus branch: distance off the RVOT axis (cm)
 function buildCoronaries(L, ao, T, tvN) {
   const segs = [];
@@ -1522,8 +1534,11 @@ function buildCoronaries(L, ao, T, tvN) {
   };
   const axis = mad(ao.valve, U_AO, ao.sinusH);
   const dirAt = (deg) => { const a = deg * Math.PI / 180; return add(mul(E_SCR, Math.cos(a)), mul(E_ANT, Math.sin(a))); };
-  // left main from the left-coronary sinus (330 deg in the PSAX-AV frame)
-  const lmO = mad(axis, dirAt(330), ao.sinusOff + ao.sinusR - 0.12);
+  // left main from the left-coronary sinus (centred on 330 deg in the PSAX-AV
+  // frame). The ostium lies in the posterior half of the sinus, 300 deg, so the
+  // left main is cut at ~4 o'clock off the root in the PSAX-AV plane (review 12:
+  // at 330 deg it read 3.2 o'clock, and 0.15 cm clear of the sinus wall)
+  const lmO = mad(axis, dirAt(LM_OSTIUM_DEG), ao.sinusOff + ao.sinusR - 0.12);
   const bif = mad(lmO, unit(add(add(mul(E_SCR, 0.75), mul(E_ANT, 0.45)), mul(U_AO, -0.25))), 1.1);
   chain([lmO, bif], 0.23, 0.22);
   const yb = L.base;
@@ -2346,6 +2361,57 @@ export function epiDist(x, y, z, A) {
   return d;
 }
 
+// ---- pericardial reflections and sinuses (review 12) --------------------------
+// The fibrous (parietal) sac does not follow the great vessels out of the chest:
+// it reflects onto the ascending aorta ~1 cm below the innominate artery, onto
+// the pulmonary trunk at its bifurcation (the right and left pulmonary arteries
+// are extrapericardial beyond their first centimetre), onto ~2 cm of the SVC,
+// and onto the pulmonary-vein ostia and the IVC at the atrial walls (the venous
+// tubes pierce it, they are not wrapped).
+export const PERI_REFLECT = { paBranch: 1.0, svc: 2.0, sac: 0.3 };   // (sac: the drawn 3D sac lies 3 mm outside this field's zero)
+// Distance to the heart as the PARIETAL SAC wraps it: the epicardium of the four
+// chambers, the aortic root and ascending aorta, the pulmonary trunk with the
+// first centimetre of each branch, and the intrapericardial SVC. Kept apart from
+// epiDist (the visceral surface every wall is drawn from) and from the effusion's
+// visceralDist: this one only says where the sac is.
+export function parietalSacDist(x, y, z, A) {
+  let d = myoParts(x, y, z, A).core;
+  d = smin(d, dAOroot(x, y, z, A) - A.ao.wall, 0.4);
+  const pa = A.pa, bif = pa.main.b;
+  let dp = sdRoundCone(x, y, z, pa.main.a[0], pa.main.a[1], pa.main.a[2], bif[0], bif[1], bif[2], pa.main.r1, pa.main.r2);
+  // the branches as far as the reflection: each one clipped by a sphere about the bifurcation
+  let db = 1e9;
+  for (const seg of pa.branch) db = Math.min(db, sdCapsule(x, y, z, seg[0][0], seg[0][1], seg[0][2], seg[1][0], seg[1][1], seg[1][2], seg[2]));
+  // (the drawn sac, PERI_REFLECT.sac outside, then closes 1 cm beyond the trunk)
+  const reach = Math.hypot(x - bif[0], y - bif[1], z - bif[2]) - (pa.main.r2 + PERI_REFLECT.paBranch - PERI_REFLECT.sac - pa.wall);
+  dp = smin(dp, Math.max(db, reach), 0.3);
+  d = smin(d, dp - pa.wall, 0.4);
+  // the SVC for its last ~2 cm above the cavo-atrial junction
+  const sv = A.svc, ax = [sv.b[0] - sv.a[0], sv.b[1] - sv.a[1], sv.b[2] - sv.a[2]], al = Math.hypot(ax[0], ax[1], ax[2]) || 1;
+  const k = Math.min(1, PERI_REFLECT.svc / al), e = [sv.a[0] + ax[0] * k, sv.a[1] + ax[1] * k, sv.a[2] + ax[2] * k];
+  d = smin(d, sdCapsule(x, y, z, sv.a[0], sv.a[1], sv.a[2], e[0], e[1], e[2], sv.r + 0.15), 0.3);
+  return d;
+}
+// The transverse sinus: the passage of the pericardial space behind the two
+// great arteries and in front of the atria (the classic TEE site of fluid, and
+// of a pseudo-abscess, beside the aortic root). Returns the two wall distances
+// of a point: `art` to the outer wall of the aortic root / ascending aorta or
+// pulmonary trunk, `atr` to the atrial epicardium; a point is IN the sinus when
+// both are positive, the nearest chamber is an atrium and art + atr is less
+// than the width the sinus is distended to.
+const _ts = { art: 0, atr: 0, atrial: false };
+export function transverseSinus(x, y, z, A) {
+  const pa = A.pa;
+  const dtr = sdRoundCone(x, y, z, pa.main.a[0], pa.main.a[1], pa.main.a[2], pa.main.b[0], pa.main.b[1], pa.main.b[2], pa.main.r1, pa.main.r2) - pa.wall;
+  _ts.art = Math.min(dAOroot(x, y, z, A) - A.ao.wall, dtr);
+  _ts.atrial = false; _ts.atr = 1e9;
+  if (_ts.art > 2) return _ts;
+  const dat = Math.min(dLAlumen(x, y, z, A), dRAlumen(x, y, z, A));
+  _ts.atrial = dat < Math.min(dLVlumen(x, y, z, A), dRVlumen(x, y, z, A));
+  _ts.atr = myoParts(x, y, z, A).core;
+  return _ts;
+}
+
 // The visceral envelope an effusion is measured from: the epicardium plus the
 // coronary sinus with its wall and a sheath of AV-groove fat. The CS lies deep to
 // the visceral pericardium against the LV and LA, so fluid starts outside it and
@@ -2787,6 +2853,9 @@ export function bodyClassify(x, y, z, A, periOff = 0) {
     // the RA wall (the ME bicaval far field is RA wall, pericardium and fat)
     const lbR = x * BL[0] + y * BL[1] + z * BL[2] - MIDLINE;
     if (lbR < RIGHT_LUNG_L + 1.0) gap = Math.max(gap, LUNG_GAP_RA * smoothstep(RIGHT_LUNG_L + 1.0, RIGHT_LUNG_L - 0.5, lbR));
+    // (the mediastinal pleura follows the sac at a distance that varies with the
+    // pericardial fat: the same lobulation as the rest of the lung margin)
+    gap = Math.max(0.15, gap + LUNG_LOBE.sac * lungLobulation(lbR, -(x * BP[0] + y * BP[1] + z * BP[2]), x * BS[0] + y * BS[1] + z * BS[2]));
     if (sac > gap && isLung(x, y, z)) return bc(BODY.LUNG, 0.9);
   }
   return bc(BODY.OUT, 0);
@@ -2815,23 +2884,78 @@ const LUNG_WINDOWS = (() => {
   const wp = mad([-0.35, 0.3, 0.35], BODY_AX.A, 7.0);                 // left parasternal window
   return [wa, wp].map((w) => ({ w, u: unit(sub(_HC, w)), tan: Math.tan(32 * Math.PI / 180) }));
 })();
+// Lobulation of the visceral pleura where it borders the acoustic windows and the
+// posterior mediastinum: a smooth field (cm; body left / anterior / superior
+// coordinates) added to the lung boundary, so that no plane cuts it in a straight
+// line. Six waves along the six icosahedral axes (so every plane sees several of
+// them at close to their true wavelength), about LUNG_LOBE.wl cm long and
+// LUNG_LOBE.amp cm each, with a finer octave (x LUNG_LOBE.fine); the mediastinal
+// pleura's distance from the sac varies by LUNG_LOBE.sac of the same field.
+// (sac 0.45: at 0.8 the mediastinal pleura undulated through +-70 deg of incidence
+// within 4 cm, which no pleural reflection shows, and its line was dim throughout.)
+export const LUNG_LOBE = { wl: 2.8, amp: 0.3, sac: 0.45, fine: 0.5 };
+const _LOBE_W = (() => {
+  const f = (1 + Math.sqrt(5)) / 2, n = Math.hypot(1, f);
+  return [[0, 1, f], [0, 1, -f], [1, f, 0], [1, -f, 0], [f, 0, 1], [-f, 0, 1]].map((d, i) =>
+    [d[0] / n, d[1] / n, d[2] / n, 1 + 0.07 * (i - 2.5), 1.3 + 2.4 * i]);   // direction, wavelength factor, phase
+})();
+// (the field never exceeds this, cm: beyond it the smooth boundary decides)
+const LOBE_REACH = 6 * LUNG_LOBE.amp * (1 + LUNG_LOBE.fine) * 1.01;
+function lungLobulation(l, a, s) {
+  const k = 2 * Math.PI / LUNG_LOBE.wl;
+  let v = 0;
+  for (const w of _LOBE_W) {
+    const ph = k / w[3] * (l * w[0] + a * w[1] + s * w[2]);
+    // (with a finer octave: an irregular margin has no long inflections)
+    v += Math.sin(ph + w[4]) + LUNG_LOBE.fine * Math.sin(2.13 * ph + 1.7 * w[4]);
+  }
+  return LUNG_LOBE.amp * v;
+}
 function isLung(x, y, z) {
   const lb = x * BL[0] + y * BL[1] + z * BL[2] - MIDLINE;
   const ab = -(x * BP[0] + y * BP[1] + z * BP[2]);                     // + anterior
   // the right lung covers the anterolateral wall of the RA (there is no acoustic
   // window there: the cardiac notch is on the left)
-  if (lb < RIGHT_LUNG_L && ab > RIGHT_LUNG_A) return true;
+  // (The lobulation is a displacement of the pleural surface along its own
+  // normal: the field is read at the foot of the perpendicular from this point
+  // to the smooth surface, not at the point itself. A field added point by point
+  // would also vary across the surface and, where it is steep, pinch detached
+  // islands of lung off the margin; a normal displacement cannot.)
+  const sb = x * BS[0] + y * BS[1] + z * BS[2];
+  {
+    const m1 = RIGHT_LUNG_L - lb, m2 = ab - RIGHT_LUNG_A;
+    const m = Math.min(m1, m2);
+    if (m > -LOBE_REACH && m + (m1 < m2 ? lungLobulation(lb + m, ab, sb) : lungLobulation(lb, ab - m, sb)) > 0) return true;
+    if (m >= LOBE_REACH) return true;
+  }
   // general lung boundary (negative = aerated): everywhere outside the two
   // acoustic-window cones and, posteriorly, outside the posterior mediastinum
-  let g = ab < 0 ? 2.8 - Math.hypot(lb, Math.min(0, ab + 1.5)) : -1e9;   // posterior mediastinum (rounded)
+  let g = -1e9, fl = lb, fa = ab, fs = sb;                              // boundary value; foot of the perpendicular (body coordinates)
+  if (ab < 0) {                                                        // posterior mediastinum (rounded)
+    const m = Math.min(0, ab + 1.5), h = Math.hypot(lb, m);
+    g = 2.8 - h;
+    if (h > 1e-6) { fl = lb + g * lb / h; fa = ab + g * m / h; }
+  }
   for (const W of LUNG_WINDOWS) {
     const vx = x - W.w[0], vy = y - W.w[1], vz = z - W.w[2];
     const al = vx * W.u[0] + vy * W.u[1] + vz * W.u[2];
     if (al <= 0) continue;
     const px = vx - W.u[0] * al, py = vy - W.u[1] * al, pz = vz - W.u[2] * al;
-    const c = al * W.tan + 1.2 - Math.sqrt(px * px + py * py + pz * pz);
-    if (c > g) g = c;
+    const pr = Math.sqrt(px * px + py * py + pz * pz);
+    const c = al * W.tan + 1.2 - pr;
+    if (c > g) {
+      g = c;
+      // gradient of the cone's boundary value: tan along the axis, -1 radially
+      const ir = pr > 1e-6 ? 1 / pr : 0, k = c / (1 + W.tan * W.tan);
+      const gx = W.tan * W.u[0] - px * ir, gy = W.tan * W.u[1] - py * ir, gz = W.tan * W.u[2] - pz * ir;
+      fl = lb - k * (gx * BL[0] + gy * BL[1] + gz * BL[2]);
+      fa = ab + k * (gx * BP[0] + gy * BP[1] + gz * BP[2]);
+      fs = sb - k * (gx * BS[0] + gy * BS[1] + gz * BS[2]);
+    }
   }
+  // the lung's edge is a lobulated margin (the lingula, the cardiac notch, the
+  // fissures), not the ruled surface of a cone: the boundary undulates
+  if (g > -LOBE_REACH && g < LOBE_REACH) g += lungLobulation(fl, fa, fs);
   if (ab < 0) {
     // the left pleura/lung wraps the descending aorta posterolaterally: aerated lung
     // from AORTA_PLEURA behind the aortic wall (the bright pleural line behind it

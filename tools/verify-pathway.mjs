@@ -18,6 +18,7 @@ import { fileURLToPath } from 'url';
 import { MODULES, MODULE_BY_ID, PASS_MARK, EXAM, prepare, moduleQuiz, mockExam, score, weakModules, shuffle } from '../js/pathway.js';
 import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS } from '../js/views.js';
 import { buildReport } from '../js/report.js';
+import { MMODE_LINES, TDI_SITES } from '../js/echo.js';
 
 const results = [];
 const check = (name, ok, note = '') => results.push({ name, ok: !!ok, note });
@@ -35,6 +36,7 @@ const rng = (seed) => () => { seed = (seed * 1664525 + 1013904223) % 4294967296;
 check('ten modules', MODULES.length === 10, MODULES.map((m) => m.id).join(','));
 const ids = new Set(), problems = [];
 let total = 0, cases = 0;
+const traceTasks = [];
 for (const m of MODULES) {
   if (m.questions.length < 8) problems.push(`${m.id}: only ${m.questions.length} questions`);
   if (!m.objectives.length || !m.learn.length || !m.tasks.length) problems.push(`${m.id}: missing objectives, key points or tasks`);
@@ -57,8 +59,15 @@ for (const m of MODULES) {
     if (!PATHS.includes(t.sim.path)) problems.push(`${m.id}/${t.id}: unknown pathology ${t.sim.path}`);
     if (!VIEWS.has(t.sim.view)) problems.push(`${m.id}/${t.id}: unknown view ${t.sim.view}`);
     if (t.sim.grade && !GRADES.has(t.sim.grade)) problems.push(`${m.id}/${t.id}: bad grade`);
+    // a task that sets the trace panel names a line that view offers
+    if (t.sim.trace) {
+      const list = t.sim.trace === 'mmode' ? MMODE_LINES[t.sim.view] : t.sim.trace === 'tdi' && t.sim.view === 'A4C' ? TDI_SITES : null;
+      if (!list || !list.some((l) => l[0] === t.sim.line)) problems.push(`${m.id}/${t.id}: no ${t.sim.trace} line ${t.sim.line} in ${t.sim.view}`);
+      traceTasks.push(`${m.id}/${t.id}`);
+    }
   }
 }
+check('TAPSE (M-mode), tissue Doppler and IVC sniff tasks exist', ['mmode', 'tdi', 'ivc', 'rvs'].every((id) => traceTasks.some((k) => k.endsWith('/' + id))), traceTasks.join(','));
 check('question bank is well formed', problems.length === 0, problems.slice(0, 4).join(' | '));
 check(`bank size: ${total} questions, ${cases} case questions`, total >= 90 && cases >= 12);
 check('pathology list read from index.html', PATHS.length === 12, PATHS.join(','));
@@ -190,6 +199,33 @@ if (!chromium) {
     view: document.getElementById('viewTag').textContent,
   }));
   check('practice task loads its case and closes the pathway', task.closed && task.path === 'as' && task.grade === 'moderate' && task.view === 'A5C', JSON.stringify(task));
+
+  // the trace tasks: each opens its case with the trace panel on the stated line,
+  // and the trace reads a value in the taught range
+  const runTask = async (mod, id, trace, line) => {
+    await page.click('#pathwayBtn').catch(() => {});
+    await page.evaluate(() => { const o = document.getElementById('pathwayOverlay'); if (o.classList.contains('hidden')) document.getElementById('pathwayBtn')?.click(); });
+    await page.click(`#pwNav [data-nav="${mod}"]`);
+    await page.click('#pwMain [data-mtab="practise"]');
+    await page.click(`#pwMain [data-open="${id}"]`);
+    await page.waitForFunction(([tr, ln]) => { const e = window.echosim.echo; return e.traceMode === tr && (tr === 'mmode' ? !!(e.mmodeData && e.mmodeData.key === ln) : !!(e.tdiData && e.tdiData.site === ln)); }, [trace, line], { timeout: 60000 });
+    await page.waitForTimeout(300);
+    return page.evaluate(() => { const e = window.echosim.echo; return { mode: e.traceMode, mm: e.mmodeData && { key: e.mmodeData.key, exc: e.mmodeData.excursion, ivc: e.mmodeData.ivc }, tdi: e.tdiData && { site: e.tdiData.site, s: e.tdiData.s, e: e.tdiData.e, EoverE: e.tdiData.EoverE }, path: document.getElementById('pathology').value, view: document.getElementById('viewTag').textContent }; });
+  };
+  const tk = {};
+  for (const m of MODULES) for (const t of m.tasks) if (t.sim.trace) tk[t.id] = await runTask(m.id, t.id, t.sim.trace, t.sim.line);
+  check('TAPSE task: M-mode of the lateral tricuspid annulus reads a normal TAPSE (17-30 mm)', tk.mmode && tk.mmode.mode === 'mmode' && tk.mmode.mm.key === 'tapse' && tk.mmode.mm.exc > 1.7 && tk.mmode.mm.exc < 3.0, JSON.stringify(tk.mmode));
+  check("TDI task: DCM lateral e' reduced (< 10 cm/s) with E/e' > 14", tk.tdi && tk.tdi.mode === 'tdi' && tk.tdi.tdi.site === 'mvLat' && tk.tdi.tdi.e < 10 && tk.tdi.tdi.EoverE > 14, JSON.stringify(tk.tdi));
+  check('IVC task: severe TR, plethoric IVC (> 21 mm, < 50 % collapse on the sniff trace)', tk.ivc && tk.ivc.mm.key === 'ivc' && tk.ivc.mm.ivc.dMax > 2.1 && tk.ivc.mm.ivc.collapse < 0.5, JSON.stringify(tk.ivc));
+  check("RV s' task: pulmonary hypertension, tissue Doppler of the lateral tricuspid annulus reads s'", tk.rvs && tk.rvs.tdi.site === 'tvLat' && tk.rvs.tdi.s > 2 && tk.rvs.tdi.s < 16, JSON.stringify(tk.rvs));
+  // back to the first practice task's case (the later steps start from it)
+  await page.click('#pathwayBtn').catch(() => {});
+  await page.evaluate(() => { const o = document.getElementById('pathwayOverlay'); if (o.classList.contains('hidden')) document.getElementById('pathwayBtn')?.click(); });
+  await page.click('#pwNav [data-nav="aortic"]');
+  await page.click('#pwMain [data-mtab="practise"]');
+  await page.click('#pwMain [data-open]');
+  await page.waitForTimeout(400);
+  check('a task without a trace returns the panel to spectral Doppler', await page.evaluate(() => !window.echosim.echo.traceMode && document.getElementById('traceMode').value === 'doppler'));
 
   // module test with case questions, answered from the case bar
   await page.click('#pathwayBtn');

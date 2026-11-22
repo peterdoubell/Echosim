@@ -179,7 +179,7 @@ export function measureModel(path = {}) {
   if (path.mitralStenosis) { m.mva = sum.mvaHakki; m.mvMeanGrad = sum.meanGradMV; }
   if (path.mr || sum.regurgVol > 1) { m.mrRf = sum.regurgFraction * 100; m.mrRvol = sum.regurgVol; }
   m.trVmax = H.vTRPeak || null;
-  m.ivc = 2 * GED.A.ivc.r * 10;
+  m.ivc = 2 * (GED.A.ivc.rMax || GED.A.ivc.r) * 10;
   m.ivcCollapse = GED.A.ivc.collapse != null ? GED.A.ivc.collapse * 100 : null;
   m.rap = rapEstimate(GED.A.ivc);
   if (m.trVmax) m.pasp = 4 * m.trVmax ** 2 + m.rap;

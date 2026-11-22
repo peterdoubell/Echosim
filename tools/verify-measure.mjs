@@ -109,16 +109,75 @@ const res = await page.evaluate(() => ({
   truth: document.getElementById('mEf').textContent,
 }));
 
+// ---- trace panel: M-mode (TAPSE by a two-point caliper), tissue Doppler, IVC sniff ----
+// The M-mode caliper is driven by real clicks on the trace at the annulus echo's
+// deepest and shallowest points; it must return the excursion the trace shows,
+// and that must be the model's TAPSE. Tissue Doppler must read s', e', a' and
+// E/e'. In the subcostal IVC view the sniff trace must show the collapse.
+const shot = async (name) => { if (process.env.SHOT_DIR) await page.locator('.echo-panel, #spectral').first().screenshot({ path: path.join(process.env.SHOT_DIR, name) }).catch(() => {}); };
+const pickTrace = async (mode, line) => {
+  await page.selectOption('#traceMode', mode); await page.waitForTimeout(150);
+  if (line) { await page.selectOption('#traceLine', line); await page.waitForTimeout(150); }
+};
+await page.click('[data-view="A4C"]'); await page.waitForTimeout(600);
+await pickTrace('mmode', 'tapse');
+await page.waitForFunction(() => { const m = window.echosim.echo.mmodeData; return !!(m && m.key === 'tapse' && m.read); }, null, { timeout: 60000 });
+const mm = await page.evaluate(() => { const m = window.echosim.echo.mmodeData; return { d0: m.d0, d1: m.d1, plotH: m.plotH, W: m.W, min: m.read.min, max: m.read.max, exc: m.excursion }; });
+{
+  const r = await page.$eval('#spectral', (el) => { const b = el.getBoundingClientRect(); return { x: b.x, y: b.y, w: b.width, h: b.height, H: el.height }; });
+  const yOf = (d) => r.y + (d - mm.d0) / (mm.d1 - mm.d0) * mm.plotH * r.h / r.H;
+  await page.mouse.click(r.x + r.w * 0.3, yOf(mm.min)); await page.waitForTimeout(80);
+  await page.mouse.click(r.x + r.w * 0.6, yOf(mm.max)); await page.waitForTimeout(300);
+}
+const mmCal = await page.evaluate(() => (window.echosim.echo.mmodeData.caliper || {}).dDepth);
+const tapseModel = await page.evaluate(async () => { const { measureModel } = await import('./js/report.js'); return measureModel(window.echosim.state.path).tapse / 10; });
+await shot('mmode_tapse.png');
+await pickTrace('tdi', 'mvLat');
+await page.waitForFunction(() => { const t = window.echosim.echo.tdiData; return !!(t && t.site === 'mvLat'); }, null, { timeout: 60000 });
+const tdi = await page.evaluate(() => { const t = window.echosim.echo.tdiData; return { s: t.s, e: t.e, a: t.a, EoverE: t.EoverE }; });
+await shot('tdi_mvlat.png');
+// the PLAX lines carry an automatic reading (LV dimensions; aortic root and LA)
+await page.click('[data-view="PLAX"]'); await page.waitForTimeout(600);
+await pickTrace('mmode', 'lv');
+await page.waitForFunction(() => { const m = window.echosim.echo.mmodeData; return !!(m && m.key === 'lv' && m.read); }, null, { timeout: 60000 });
+const plaxLv = await page.evaluate(async () => { const { measureModel } = await import('./js/report.js'); const r = window.echosim.echo.mmodeData.read, m = measureModel(window.echosim.state.path); return { lvidd: r.lvidd, lvids: r.lvids, ivsd: r.ivsd, pwd: r.pwd, model: m.lvidd / 10 }; });
+await shot('mmode_plax_lv.png');
+await pickTrace('mmode', 'ao');
+await page.waitForFunction(() => { const m = window.echosim.echo.mmodeData; return !!(m && m.key === 'ao' && m.read); }, null, { timeout: 60000 });
+const plaxAo = await page.evaluate(() => { const r = window.echosim.echo.mmodeData.read; return { ao: r.ao, la: r.la_max }; });
+await shot('mmode_plax_ao.png');
+await page.click('[data-view="SC_IVC"]'); await page.waitForTimeout(600);
+await pickTrace('mmode', 'ivc');
+await page.waitForFunction(() => { const m = window.echosim.echo.mmodeData; return !!(m && m.key === 'ivc' && m.ivc); }, null, { timeout: 60000 });
+const ivcM = await page.evaluate(() => window.echosim.echo.mmodeData.ivc);
+await shot('mmode_ivc.png');
+// the Sniff button narrows the live IVC and it recovers
+const ivcR = () => page.evaluate(async () => { const { geometryAt } = await import('./js/cardiac-model.js'); const v = geometryAt(0, window.echosim.state.path).A.ivc; return v.r / v.rMax; });
+await page.evaluate(() => { const b = document.getElementById('playBtn'); if (/Play/.test(b.textContent)) b.click(); });
+await page.click('#sniffBtn');
+let sniffMin = 1;
+for (let i = 0; i < 30; i++) { sniffMin = Math.min(sniffMin, await ivcR()); await page.waitForTimeout(60); }
+await shot('sniff_after.png');
+await pickTrace('doppler');
+const mres = { mmodeTapse: mm.exc, caliper: mmCal, tapseModel, tdi, ivc: ivcM, sniffMin, plaxLv, plaxAo };
+
 const efNum = parseFloat(res.ef), distNum = parseFloat(res.dist);
 const checks = {
   'no console errors': errors.length === 0,
   'caliper returned a distance': Number.isFinite(distNum) && distNum > 0,
   'Simpson returned a plausible EF': Number.isFinite(efNum) && efNum > 0 && efNum < 100,
   'accuracy compared against truth': res.err.includes('truth'),
+  'M-mode caliper returns the traced TAPSE (within 1 mm)': Number.isFinite(mmCal) && Math.abs(mmCal - mm.exc) <= 0.1,
+  'M-mode TAPSE is the model TAPSE (within 2 mm)': Math.abs(mm.exc - tapseModel) <= 0.2,
+  'PLAX M-mode reads LVIDd automatically (within 3 mm of the report)': Number.isFinite(plaxLv.lvidd) && Math.abs(plaxLv.lvidd - plaxLv.model) <= 0.3 && plaxLv.lvids < plaxLv.lvidd && plaxLv.ivsd > 0.5 && plaxLv.pwd > 0.5,
+  'PLAX M-mode reads the aortic root and LA automatically': plaxAo.ao > 2 && plaxAo.ao < 4 && plaxAo.la > 2.5 && plaxAo.la < 4.2,
+  "tissue Doppler reads s', e', a' and E/e'": tdi.s > 3 && tdi.e > 3 && tdi.a > 1 && tdi.EoverE > 3 && tdi.EoverE < 15,
+  'IVC M-mode shows the sniff collapse (normal: > 50 %)': ivcM.collapse > 0.5 && ivcM.dMax > 1.2 && ivcM.dMax <= 2.1,
+  'Sniff button narrows the live IVC by half': sniffMin < 0.6,
 };
 const pass = Object.values(checks).every(Boolean);
 for (const [name, ok] of Object.entries(checks)) console.log(`  ${ok ? 'PASS' : 'FAIL'} ${name}`);
-console.log(JSON.stringify({ pass, result: res, errors }, null, 2));
+console.log(JSON.stringify({ pass, result: res, trace: mres, errors }, null, 2));
 
 await browser.close();
 server.close();

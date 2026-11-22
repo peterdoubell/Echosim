@@ -15,7 +15,7 @@
 // blood-flow field, and couples everything to the lumped-parameter circulation.
 
 import { clamp, smoothstep, pulse, unit } from './mathutils.js';
-import { anatomyParams, rightHeartLoad, hepaticVeinSegs, ivcOfRap, atrialFill, bodyClassify, visceralDist, lumenDist, mitralLift, tricuspidLift, buildRwma, rwmaWeight, BODY, CFG, LM, BODY_AX } from './anatomy.js';
+import { anatomyParams, rightHeartLoad, hepaticVeinSegs, ivcOfRap, atrialFill, bodyClassify, visceralDist, transverseSinus, PERI, lumenDist, mitralLift, tricuspidLift, buildRwma, rwmaWeight, BODY, CFG, LM, BODY_AX } from './anatomy.js';
 import { hemodynamics, hemoSummary, pvLoop, gradeOf, eaRatio, MS_AREA, laPhasic } from './hemodynamics.js';
 import { DCM_SEVERITIES, dcmSeverityOf } from './scenarios.js';
 
@@ -835,6 +835,7 @@ const BODY_TO_TISSUE = {
 // axis. The circumferential maximum (~1.8 cm posteriorly) is a moderate-large
 // effusion; anteriorly it tapers to ~0.3 cm.
 const _P = BODY_AX.P;
+const TS_WIDTH = 0.9;                       // cm: the transverse sinus distended by a moderate-to-large effusion
 function effusionGap(px, py, pz, A) {
   const c = A.lv.c;
   const dep = (px - c[0]) * _P[0] + (py - c[1]) * _P[1] + (pz - c[2]) * _P[2];
@@ -921,7 +922,23 @@ export function classify(px, py, pz, G, path = {}) {
     if (de > 0.02 && de < g) {
       // fluid only displaces the pericardial space itself — never a vessel, lung or liver
       const b0 = bodyClassify(px, py, pz, A, g);
-      if (b0.code === BODY.OUT || b0.code === BODY.PERI || b0.code === BODY.FAT) return cls(TISSUE.PERICARDIUM, 0.02);
+      if (b0.code === BODY.OUT || b0.code === BODY.PERI || b0.code === BODY.FAT) {
+        // (review 12) the descending aorta lies OUTSIDE the sac: where the fluid
+        // reaches it the parietal pericardium is the bright line between the two
+        const dd = lumenDist(px, py, pz, A, 'DESC') - A.ao.wall;
+        if (dd >= PERI.thick + 0.03) return cls(TISSUE.PERICARDIUM, 0.02);
+        if (dd > 0) return cls(TISSUE.PERI_LINE, 0.3);
+      }
+    }
+    // (review 12) the transverse sinus, behind the great arteries and in front of
+    // the atria, is part of the pericardial space above the taper of the dependent
+    // layer: an effusion distends it to a few millimetres (anatomy.js transverseSinus)
+    {
+      const ts = transverseSinus(px, py, pz, A);
+      if (ts.atrial && ts.art > 0.03 && ts.atr > 0.03 && ts.art + ts.atr < TS_WIDTH) {
+        const b0 = bodyClassify(px, py, pz, A, g);
+        if (b0.code === BODY.OUT || b0.code === BODY.PERI || b0.code === BODY.FAT) return cls(TISSUE.PERICARDIUM, 0.02);
+      }
     }
     periOff = g;
   }

@@ -89,6 +89,16 @@
       </div>
       <div class="spectral-wrap">
         <span class="sp-label" id="spLabel">Spectral Doppler (standard site for the view · 1 cardiac cycle)</span>
+        <div class="trace-ctl">
+          <label for="traceMode" title="What the trace panel shows: spectral Doppler, M-mode (depth against time along a line) or tissue Doppler of the annulus">Trace</label>
+          <select id="traceMode" aria-label="Trace mode">
+            <option value="doppler">Spectral Doppler</option>
+            <option value="mmode">M-mode</option>
+            <option value="tdi">Tissue Doppler</option>
+          </select>
+          <select id="traceLine" class="hidden" aria-label="M-mode line or tissue Doppler site"></select>
+          <button id="sniffBtn" type="button" title="Ask the patient to sniff: the IVC collapses with normal RA pressure and stays plethoric when it is raised (best seen in the subcostal IVC view)">Sniff</button>
+        </div>
         <canvas id="spectral" width="440" height="120"></canvas>
       </div>
     </section>
