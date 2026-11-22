@@ -408,20 +408,29 @@ function suprasternalProbe() {
   const dir = inPlane(vscale(BODY_AX.S, -1), n);
   return probeFrom(tgt, dir, vsub(desc, asc), 7.0);
 }
-// PSAX-MV: the mitral leaflet level, 0.8 cm below the annulus. At this level the
-// inferior RA, the IVC orifice and the apically offset tricuspid lie just behind
-// the inferoseptal wall, so from the mid-parasternal position the left of the
-// sector cuts them. The probe is slid 2.5 cm along the chest wall toward the LV
-// lateral wall (one rib space lateral), its beam turned 34 deg (not the full 45)
-// toward body-posterior and rolled 7 deg (its septal edge toward the apex, its
-// lateral edge still below the LA): the LV and the RV crescent over it fill the
-// sector, the commissural line of the leaflets lies within ~15 deg of
-// screen-horizontal, and the RA belongs to the PSAX-AV level (at most the tips
-// of the open tricuspid leaflets show at the left edge in diastole). The plane
-// follows PSAX_MV_TRACK of the base's systolic descent, so the closed leaflets
-// stay in plane at ES without the plane reaching the RA floor.
-const PSAX_MV = [-0.8, 2.5, 34, 0, -7];              // y, sx (cm), rot, tilt, roll (deg)
-const PSAX_MV_TRACK = 0.85;
+// PSAX-MV: the mitral leaflet level, 1 cm below the annulus at end-diastole.
+// The tricuspid annulus lies apical to the mitral (0.85 cm at its centre at ED,
+// 1.2 cm at ES as its free-wall side descends) and tilts down toward the RV
+// free wall, so a plane exactly perpendicular to the LV long axis at this level
+// passes above the tricuspid orifice on the left of the sector: from the
+// mid-parasternal position (probe 0.7 cm lateral, no roll) it shows 2-4 cm2 of
+// RA floor beside the inferoseptal wall. The plane is therefore rolled 8 deg
+// about the beam (its right-heart edge toward the apex, its lateral edge still
+// below the LA: the small angulation a sonographer makes to keep the RV, not
+// the RA, beside the septum), with the beam turned 40 deg toward body-posterior
+// as in the papillary-level short axis. It follows PSAX_MV_TRACK of the base's
+// systolic descent, so at ES it sits ~0.55 cm below the annulus and still cuts
+// the closed leaflets.
+// At end-systole those two constraints leave a window of only ~3 mm (a plane
+// high enough for the closed mitral leaflets crosses the posterior tricuspid
+// annulus where it reaches 6 cm to the right of the LV centre; more roll brings
+// the lateral LA in), so the probe is still slid 1.6 cm along the chest wall
+// toward the LV lateral wall (it was 2.5 cm): the LV centre lies ~12 deg left
+// of the beam axis (it was 19 deg), no RA or LA lumen is in the plane at any
+// phase, and of the tricuspid valve only the leaflets hanging into the RV
+// inflow show (<= 0.45 cm2).
+const PSAX_MV = [-1.0, 1.6, 40, 0, -8];              // y, sx (cm), rot, tilt, roll (deg)
+const PSAX_MV_TRACK = 0.7;
 const psaxMvProbe = () => psaxProbe(...PSAX_MV);
 function psaxMvTrack(A) {
   if (!A.msTip) return [0, PSAX_MV_TRACK * (A.lv.base - A0.lv.base), 0];
@@ -434,7 +443,7 @@ function psaxMvTrack(A) {
 export const EXTRA_VIEWS = {
   A5C: { probe: a5cProbe, depth: 14, track: a5cTrack },
   A3C: { probe: a3cProbe, depth: 15, track: APICAL_TRACK },
-  // mitral leaflet level, 0.8 cm below the annulus (closed coaptation line at ED,
+  // mitral leaflet level, 1 cm below the annulus (closed coaptation line at ED,
   // fish-mouth in diastole): the probe follows the posterolateral annular
   // excursion (the small tilt a sonographer makes), so the plane stays at the
   // leaflets and never climbs into the posterior AV groove (CS / RA) in systole

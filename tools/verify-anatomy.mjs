@@ -1901,22 +1901,37 @@ function yArmRow(grp, vn, tag, ph, st = 3, path = {}, label = '') {
       check(PL, `${nm}: liver + stomach share of the sector (${tag})`, 100 * abdomen(S).length / sectorCells(S), [0, nm === 'PSAX' && tag === 'ES' ? 2.5 : lim], '%');
     }
   }
-  // PSAX-MV: no RA, RV crescent over the LV
-  for (const [tag, G] of [['ED', GED], ['ES', GES]]) {
-    const S = planeSample(EXTRA_VIEWS.PSAX_MV, G, {}, 0.1);
+  // PSAX-MV: no RA, RV crescent over the LV (ED, mid-diastole, ES)
+  for (const [tag, G] of [['ED', GED], ['mid-diastole', geo(0.62)], ['ES', GES]]) {
+    const V = EXTRA_VIEWS.PSAX_MV, S = planeSample(V, G, {}, 0.1);
     check(PL, `PSAX-MV: RA in the plane (${tag})`, areaOf(S, cellsWhere(S, (l) => l === T.RA)), [0, 0.05], 'cm2');
-    const Tc = G.A.valves.tricuspid.c, Mc = G.A.valves.mitral.c;
+    const Tc = G.A.valves.tricuspid.c, Tn = G.A.valves.tricuspid.n, Mc = G.A.valves.mitral.c;
     const tv = cellsWhere(S, (l, k) => { if (l !== T.VALVE) return false; const q = ptK(S, k); return Math.hypot(...sub(q, Tc)) < Math.hypot(...sub(q, Mc)); });
-    // KNOWN-FAIL at ED: the tips of the open tricuspid leaflets (which hang into
-    // the RV inflow at this level) still show at the left sector edge, ~0.2 cm2
-    KNOWN = tag === 'ED';
-    check(PL, `PSAX-MV: tricuspid leaflet in the plane (${tag})`, areaOf(S, tv), [0, 0.02], 'cm2');
-    KNOWN = false;
+    // (review 12) The tricuspid annulus lies only 0.85-1.2 cm apical to the
+    // mitral and its leaflets hang ~1.35 cm into the RV inflow below it, so a
+    // short axis at the mitral LEAFLET level legitimately cuts the tricuspid
+    // leaflets beside the septum (a ~3 cm line of 0.15 cm leaflet: <= 0.5 cm2),
+    // as a real mitral-level short axis shows the tricuspid leaflets in the RV
+    // inflow at the lower left. What must not be there is the annulus itself
+    // (the hinge ring, with the RA floor behind it): the next row.
+    check(PL, `PSAX-MV: tricuspid leaflet in the plane (${tag})`, areaOf(S, tv), [0, 0.5], 'cm2');
+    const hinge = tv.filter((k) => { const q = ptK(S, k), t = [q[0] - Tc[0], q[1] - tricuspidLift(q[0], q[1], q[2], G.A) - Tc[1], q[2] - Tc[2]]; return dot(t, Tn) > -0.15; });
+    check(PL, `PSAX-MV: tricuspid leaflet at or above its annular plane (hinge) in the plane (${tag})`, areaOf(S, hinge), [0, 0.1], 'cm2');
     const lv = cellsWhere(S, (l) => l === T.LV), rv = cellsWhere(S, (l) => l === T.RV);
     const c = lv.reduce((m, k) => { const q = xd(S, k); return [m[0] + q[0] / lv.length, m[1] + q[1] / lv.length]; }, [0, 0]);
     const bins = new Set();
     for (const k of rv) { const q = xd(S, k); if (Math.hypot(q[0] - c[0], q[1] - c[1]) < 5.5) bins.add(Math.floor((Math.atan2(q[0] - c[0], -(q[1] - c[1])) * 180 / Math.PI + 360) / 5)); }
     check(PL, `PSAX-MV: RV crescent arc round the LV (${tag})`, bins.size * 5, [90, 200], 'deg');
+    // KNOWN-FAIL (review 12, TTE-3): the LV is 12-13 deg left of the beam axis (it
+    // was 19 deg) and the RV runs off the left sector edge. A centred plane that
+    // still cuts the closed mitral leaflets at end-systole crosses the posterior
+    // tricuspid annulus (which lies 1.2 cm apical to the mitral and tilts 45 deg
+    // toward the free wall at ES) and shows the RA floor; see PSAX_MV in views.js.
+    KNOWN = true;
+    check(PL, `PSAX-MV: LV centroid angle off the beam axis (${tag})`, Math.abs(Math.atan2(c[0], c[1]) * 180 / Math.PI), [0, 6], 'deg');
+    const half = sectorHalfOf(V);
+    check(PL, `PSAX-MV: RV cells within 2 deg of the sector edge (${tag})`, areaOf(S, rv.filter((k) => { const q = xd(S, k); return half - Math.abs(Math.atan2(q[0], q[1])) < 2 * Math.PI / 180; })), [0, 0.3], 'cm2');
+    KNOWN = false;
   }
   // A5C: LVOT, cusps and root in the plane, along the beam
   {
