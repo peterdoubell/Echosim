@@ -1040,15 +1040,13 @@ const inPlaneAng = (p, q) => { const w = vsub(q, p.pos); return Math.atan2(vdot(
 // beam, 1 cm to depth - 1 cm; a plane can hold them all behind or beside the
 // transducer): the muscles then read as columns on the wall with their chordal
 // fans, not as free head islands. A head more than TG2C_HEAD cm off the plane
-// costs TG2C_W[4] times more. (With the anterolateral head under its commissure
-// the four head positions (two muscles, ED and ES) lie 0.36 cm from their best
-// common plane; with all of them and the mitral valve inside the sector the
-// floor is 0.41 cm, reached only with the valve on the sector edge and a quarter
-// of the chordae in plane at end-diastole. The search therefore holds the valve
-// 7 deg inside the edge and about half the chordae, with the heads at ~0.45 cm.)
+// costs TG2C_W[4] times more. (The four head positions (two muscles, ED and ES)
+// are not coplanar: the heads move ~0.3 cm inward in systole. With the valve
+// inside the sector the best common plane holds them within ~0.36 cm; the search
+// settles at 0.37 / 0.38 cm with about half the chordae in plane at end-diastole.)
 // (From the TG mid station, ~3 cm from the apex,
 // the LV spans more than the 90 deg sector: the apex lies off its left edge.)
-const TG2C_ADV = [-2, 3], TG2C_W = [0.5, 2.0, 0.1, 1.0, 4.0], TG2C_HEAD = 0.3, TG2C_DEPTH = 13;
+const TG2C_ADV = [-2, 3], TG2C_W = [0.5, 3.0, 0.1, 1.0, 8.0], TG2C_HEAD = 0.3, TG2C_DEPTH = 13;
 let _tg2cG = null;
 const tg2cGeo = () => _tg2cG || (_tg2cG = [geometryAt(0, {}), geometryAt(0.42, {})]);   // end-diastole, end-systole (as A0, A_ES)
 const tg2cProbe = cachedProbe(() => {

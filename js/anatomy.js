@@ -772,8 +772,13 @@ const PM_ROOT = { ang: -2.7, up: 0.3, rb: 0.6, rt: 0.4 };
 // In systole the thickening bodies abut the wall: the fillet rises by filSys of
 // the height at full contraction (the TG mid SAX gap is an end-diastolic
 // landmark), so no systolic plane shows a cleft beside a muscle.
+// (The anterolateral head stands at 0.55 rad, ~1.4 mm further round the wall than
+// the 0.45 rad of the first placement: the two heads, at end-diastole and
+// end-systole, then lie within 0.38 cm of one transgastric two-chamber plane that
+// also holds the mitral valve in the sector (0.41 cm at 0.45 rad). At 0.6 rad the
+// body closes the TG mid SAX gap between the muscle and the wall.)
 const PAP = {
-  alpm: { r: [1.7, 1.4], ang: [-0.05, 0.45], rt: 0.5, filTop: 0.45 },
+  alpm: { r: [1.7, 1.4], ang: [-0.05, 0.55], rt: 0.5, filTop: 0.45 },
   pmpm: { r: [1.95, 1.15], ang: [-2.3, -1.8], rt: 0.46, filTop: 0.4 },
   rb: 0.72, tipK: 0.5,
   fillet: 0.8, filTop: 0.4, filFade: 0.08, filSys: 0.4,

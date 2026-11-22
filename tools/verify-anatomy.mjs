@@ -4692,18 +4692,7 @@ SECTION = 'Pathology';
   for (const [G, ph] of [[GED, 'ED'], [GES, 'ES']]) {
     const p = TEE_VIEWS.TG2C.probe();
     const m = Math.max(...G.A.pap.map((pp) => Math.abs(dot(sub(pp.b, p.pos), p.normal))));
-    // (merge of the LV papillary repair with the TEE presets: the anterolateral head
-    // now sits under its commissure (PSAX clock >= 3 h, TG SAX gap rows), and the
-    // four head positions (two muscles, ED and ES) are 0.36 cm from their best
-    // common plane; holding them and the mitral valve inside the 90 deg sector the
-    // floor is 0.41 cm (exhaustive search over omniplane, flex +/-30, turn +/-30,
-    // advance -2..3 cm), and that plane puts the valve on the sector edge with
-    // 27 % of the chordae in plane at ED. This row needs <= 0.4 cm; the papillary
-    // rows need the head where it is. The preset keeps the valve inside the
-    // sector and ~50 % of the chordae: 0.45 cm (ED) / 0.44 cm (ES).)
-    KNOWN = m > 0.4;
-    check(gT, `TG2C: both papillary heads within 0.4 cm of the plane (${ph})`, m, [0, 0.4], 'cm', KNOWN ? 'merge lv x tee: four head positions are not coplanar within 0.4 cm inside the sector (floor 0.41)' : '');
-    KNOWN = false;
+    check(gT, `TG2C: both papillary heads within 0.4 cm of the plane (${ph})`, m, [0, 0.4], 'cm');
     let nin = 0, ntot = 0;
     for (const c of G.chordae || []) {
       if (c.tv) continue;
