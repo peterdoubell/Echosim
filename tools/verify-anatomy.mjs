@@ -2938,9 +2938,8 @@ for (const [vn, view] of [['A4C', TTE_VIEWS.A4C], ['A2C', TTE_VIEWS.A2C], ['A3C'
     const H = hull(lv.map((k) => xd(S, k)));
     const mv = cellsWhere(S, (l) => l === TISSUE.VALVE).filter((k) => inHull(H, xd(S, k)));
     const ext = (cs) => { const xs = cs.map((k) => xd(S, k)[0]); return xs.length ? Math.max(...xs) - Math.min(...xs) : 0; };
-    // KNOWN-FAIL at ED (F07/WI7): the closed leaflets coapt below the tracked
-    // plane, which cuts only chordal specks (~0.1 cm2) at end-diastole
-    KNOWN = tag === 'ED';
+    // (ED was a KNOWN-FAIL until review 12: the old plane cut only chordal specks
+    // there; the rolled PSAX-MV plane keeps the closed leaflets in view)
     // (a few scattered specks can span the cavity too: below 0.3 cm2 of leaflet it scores 0)
     const a = areaOf(S, mv);
     check('PSAX-MV', `mitral leaflets span the LV cavity (${tag}, width fraction)`, a >= 0.3 ? ext(mv) / ext(lv) : 0, [0.5, 1.2], '',
@@ -4405,6 +4404,13 @@ SECTION = 'Pathology';
     const inner = (t) => (k) => { if (R.kind[k] !== t) return false; const i = k % R.SW, j = (k - i) / R.SW; if (i < m || j < m || i >= R.SW - m || j >= R.SH - m) return false; for (const [di, dj] of [[m, 0], [-m, 0], [0, m], [0, -m], [m, m], [-m, -m], [m, -m], [-m, m]]) if (R.kind[(j + dj) * R.SW + i + di] !== t) return false; return true; };
     const li = stat(R, inner(TISSUE.LA));
     check(g2, 'MS PLAX: LA interior p90 grey / myocardium median grey (smoke darker than muscle)', li.p90 / Math.max(1, myo.med), [0, 0.6], '', `${li.p90} vs ${myo.med}`);
+    {
+      // the smoke is visible: the MS LA is brighter than the echo-free LV cavity
+      // (pinned speckle seed, tools/bmode.mjs)
+      const Rp = renderBmode('PLAX', 0.62, PATHS.ms, 1, 1000);
+      const laP = stat(Rp, isK(Rp, TISSUE.LA)), lvP = stat(Rp, isK(Rp, TISSUE.LV));
+      check(g2, 'MS PLAX: LA mean grey / LV mean grey (smoke visible against the cavity)', laP.mean / Math.max(1, lvP.mean), [1.5, 4], '', `${laP.mean.toFixed(1)} vs ${lvP.mean.toFixed(1)}`);
+    }
   }
   {
     // chronic septal infarct: a thinned, echo-bright scar
