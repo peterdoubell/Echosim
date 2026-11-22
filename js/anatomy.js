@@ -2661,6 +2661,16 @@ function isLung(x, y, z) {
   // the right lung covers the anterolateral wall of the RA (there is no acoustic
   // window there: the cardiac notch is on the left)
   if (lb < RIGHT_LUNG_L && ab > RIGHT_LUNG_A) return true;
+  // the pleura keeps AORTA_PLEURA of mediastinal fat off the wall of the upper
+  // descending aorta along its real (bowed) course from the isthmus to the level
+  // behind the LA, not only round the straight axis used below: otherwise the left
+  // lung lies on the aortic wall where the aorta leaves that axis (suprasternal
+  // long axis: air directly on the lateral wall of the descending limb).
+  if (ab < 0) {
+    const rr = DTA_R + AORTA_PLEURA;
+    if (sdCapsule(x, y, z, DTA_TOP[0], DTA_TOP[1], DTA_TOP[2], DTA_MID[0], DTA_MID[1], DTA_MID[2], rr) < 0 ||
+        sdCapsule(x, y, z, DTA_MID[0], DTA_MID[1], DTA_MID[2], DTA_P[0], DTA_P[1], DTA_P[2], rr) < 0) return false;
+  }
   // general lung boundary (negative = aerated): everywhere outside the two
   // acoustic-window cones and, posteriorly, outside the posterior mediastinum
   let g = ab < 0 ? 2.8 - Math.hypot(lb, Math.min(0, ab + 1.5)) : -1e9;   // posterior mediastinum (rounded)

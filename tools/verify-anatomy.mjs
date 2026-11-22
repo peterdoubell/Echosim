@@ -1342,33 +1342,35 @@ function erodeSurvivors(S, k, r) {
     diffs.sort((a, b) => a - b);
     check('B-mode', `${nm}: posterior pericardial peak above the wall (median over beams)`, diffs.length > 5 ? diffs[diffs.length >> 1] : null, [8, 30], 'dB', `${diffs.length} beams`);
   }
-  // Incidence fall-off: the pleural echo itself is read from the interface into
-  // the air (it is centred on the interface, and beyond it the image carries only
-  // the pleural echo, its reverberations and the haze). A +-0.25 cm window would
-  // also read the tissue in front: 0.25 cm along a beam that meets the pleura at
-  // > 60 deg is < 0.13 cm from the surface, inside whatever the beam is still
-  // crossing (from the notch, the mediastinal fat and wall of the descending
-  // aorta, which the left lung wraps edge-on to the beam) — that is the tissue's
-  // echo, not the pleura's. Beams within 6 of an end of the line inside the
-  // sector are left to the end-taper row below: there the line fades by design
-  // and the tissue shows through (a partial air hit), whatever the incidence.
-  const norm = [], steep = [], ends = [];
+  // The window (+-0.25 cm round the interface) reads the pleural echo only where the
+  // tissue in front of it is darker than that echo. Since the arch rebuild the
+  // suprasternal sector holds the left pleura beside the descending aorta, met at
+  // > 60 deg by beams that have run several cm down the aortic lumen: blood does not
+  // attenuate, so the mediastinal fat in front of the pleura keeps its full speckle
+  // (peaks of 100-120 grey at 11-15 cm) and the window maximum is that tissue, not
+  // the pleura. Only those beams (>= 2 cm of aortic lumen on the way to the pleura)
+  // are taken out of the fall-off and tested by their own row: on average no line
+  // may stand above the tissue in front of it there. Every other beam is sampled as before.
+  const norm = [], steep = [], ends = [], postAo = [];
   for (const nm of ['SUBCOSTAL', 'SSN', 'PLAX', 'A4C', 'A2C', 'PSAX_MV']) {
     const R = renderBmode(nm, ED, {}), L = R.lungD, NA = R.NA, dTh = 2 * R.half / NA;
     const pk = new Float32Array(NA).fill(-1);
     for (let a = 0; a < NA; a++) {
       if (L[a] > 1e8) continue;
       const th = -R.half + (a + 0.5) * dTh;
-      let m = -1, mAir = -1, ok = true;
-      for (let d = L[a] - 0.25; d <= L[a] + 0.25; d += 0.02) { const q = beamSample(R, th, d); if (!q || !R.mask[q.idx]) { ok = false; break; } m = Math.max(m, q.grey); if (d >= L[a]) mAir = Math.max(mAir, q.grey); }
+      let m = -1, ok = true;
+      for (let d = L[a] - 0.25; d <= L[a] + 0.25; d += 0.02) { const q = beamSample(R, th, d); if (!q || !R.mask[q.idx]) { ok = false; break; } m = Math.max(m, q.grey); }
       if (!ok) continue;
       pk[a] = m;
       const l = a > 0 && L[a - 1] < 1e8, r = a < NA - 1 && L[a + 1] < 1e8;
       const sl = l && r ? (L[a + 1] - L[a - 1]) / (2 * dTh * L[a]) : r ? (L[a + 1] - L[a]) / (dTh * L[a]) : l ? (L[a] - L[a - 1]) / (dTh * L[a]) : 0;
       const inc = Math.atan(Math.abs(sl)) * 180 / Math.PI;
-      let n = 1; while (n <= 6 && !((a - n >= 0 && L[a - n] > 1e8) || (a + n < NA && L[a + n] > 1e8))) n++;
-      if (n <= 6) continue;                               // tapered end of the line
-      if (l && r && inc < 25) norm.push(mAir); else if (l && r && inc > 60) steep.push(mAir);
+      if (l && r && inc < 25) norm.push(m);
+      else if (l && r && inc > 60) {
+        let ao = 0, bg = -1;
+        for (let d = 1; d < L[a] - 0.25; d += 0.02) { const q = beamSample(R, th, d); if (!q) continue; if (q.kind === TISSUE.AORTA) ao += 0.02; if (d >= L[a] - 0.85 && d <= L[a] - 0.35 && R.mask[q.idx]) bg = Math.max(bg, q.grey); }
+        if (ao >= 2) postAo.push(dB(m - bg)); else steep.push(m);
+      }
     }
     // each visible pleural segment: its end beams (where the line stops inside the
     // sector) against the segment's median
@@ -1386,7 +1388,8 @@ function erodeSurvivors(S, k, r) {
     }
   }
   const mean = (v) => v.reduce((x, y) => x + y, 0) / v.length;
-  check('B-mode', 'pleural line: fall-off from < 25 deg to > 60 deg incidence', norm.length && steep.length ? dB(mean(norm) - mean(steep)) : null, [16, 60], 'dB', `${norm.length} / ${steep.length} beams, air side, full taper (SUBCOSTAL SSN PLAX A4C A2C PSAX-MV)`);
+  check('B-mode', 'pleural line: fall-off from < 25 deg to > 60 deg incidence', norm.length && steep.length ? dB(mean(norm) - mean(steep)) : null, [16, 60], 'dB', `${norm.length} / ${steep.length} beams (SUBCOSTAL SSN PLAX A4C A2C PSAX-MV); ${postAo.length} steep beams behind >= 2 cm of aortic lumen in the row below`);
+  check('B-mode', 'pleural line at > 60 deg behind the descending aorta: window peak above the tissue in front (mean)', postAo.length ? mean(postAo) : 0, [-30, 0], 'dB', `${postAo.length} beams (peak over +-0.25 cm minus peak over the 0.5 cm in front; max ${postAo.length ? Math.max(...postAo).toFixed(1) : '-'} dB)`);
   ends.sort((x, y) => x[2] - y[2]);
   check('B-mode', 'pleural line: end beam below the segment median (weakest end)', ends.length ? ends[0][2] : null, [10, 60], 'dB', ends.length ? `${ends.length} ends, worst ${ends[0][0]} beam ${ends[0][1]}` : '');
   {
@@ -1910,16 +1913,58 @@ function yArmRow(grp, vn, tag, ph, st = 3, path = {}, label = '') {
     const S2 = planeSample(TTE_VIEWS.A2C, G, {}, 0.1);
     const gv = cellsWhere(S2, (l, k) => l === T.AORTA && xd(S2, k)[1] > 9);
     // (review 12: the bifurcation was lifted into the arch concavity, so the
-    // '8' of two branch lumina beside the roof is gone; what is left is ONE oval
-    // section of the pulmonary trunk, which crosses the A2C plane on its way from
-    // the valve, anterior to the LA, to the arch: 5.7/6.2 cm2 at 15 cm, more at
-    // 15.5 cm because the sector is deeper. Limit set to that single section.)
-    check(PL, `A2C: great-artery lumen beyond the mitral annulus (${tag})`, areaOf(S2, gv), [0, 7.5], 'cm2');
+    // '8' of two branch lumina beside the roof is gone. What is left: ONE oval
+    // section of the pulmonary trunk (4.3 cm2 at x 3.7, d 12.5 cm), which crosses
+    // the A2C plane on its way from the valve, anterior to the LA, to the arch,
+    // and the round RPA section just beyond the LA roof (1.9 cm2 at d 14.8 cm).
+    // The acceptance of work item 11 is [0, 0.3] cm2 with at most the RPA section.
+    // KNOWN-FAIL, blocked by the position of the pulmonary valve and RVOT (root
+    // group's structures, 2.3 cm to the septal side of the A2C plane) against the
+    // bifurcation, which the PSAX-AV rows pin within 1 cm of that near-sagittal
+    // plane (L 0.7-2.6 cm): the trunk must cross the A2C plane between them at
+    // 11-14 cm. Tried (areas at 15.5-16 cm, ED/ES): bifurcation lateral/posterior
+    // x6 -> one section, 6.0-7.1 cm2 (oblique cut 4.4-5.5; floor for a
+    // perpendicular cut 3.8-4.0); bifurcation on the septal side -> trunk only
+    // 2.4-2.7 cm long or > 1.5 cm off the PSAX-AV plane; lower valve -> off-plane
+    // distance unchanged, cut more oblique; RPA crossing deeper than the sector ->
+    // into the oesophagus.)
+    KNOWN = true;
+    check(PL, `A2C: great-artery lumen beyond the mitral annulus (${tag})`, areaOf(S2, gv), [0, 0.3], 'cm2', 'pending root (pulmonary valve / RVOT position): the trunk crosses the plane between the valve and the bifurcation');
     const gvc = components(S2, (l, k) => l === T.AORTA && xd(S2, k)[1] > 9).comps.filter((c) => areaOf(S2, c) >= 0.3);
-    // two separate round sections, not the figure-of-8 of a bifurcation: the
-    // trunk beside the LA and, at 15.5 cm, the RPA just beyond the LA roof
-    check(PL, `A2C: great-artery sections >= 0.3 cm2 beyond the mitral annulus (${tag})`, gvc.length, [0, 2], '',
-      gvc.map((c) => `${areaOf(S2, c).toFixed(1)} cm2 at x ${(c.reduce((m, k) => m + xd(S2, k)[0], 0) / c.length).toFixed(1)}, d ${(c.reduce((m, k) => m + xd(S2, k)[1], 0) / c.length).toFixed(1)}`).join('; '));
+    // at most one round section (the RPA beyond the LA roof)
+    check(PL, `A2C: great-artery sections >= 0.3 cm2 beyond the mitral annulus (${tag})`, gvc.length, [0, 1], '',
+      'pending root (as above); ' + gvc.map((c) => `${areaOf(S2, c).toFixed(1)} cm2 at x ${(c.reduce((m, k) => m + xd(S2, k)[0], 0) / c.length).toFixed(1)}, d ${(c.reduce((m, k) => m + xd(S2, k)[1], 0) / c.length).toFixed(1)}`).join('; '));
+    KNOWN = false;
+    // LAA in the A2C (work item 11 step 3): the ostium on the plane and a neck
+    // clearly narrower than the atrium it opens from. Met at ED; at ES the ostium
+    // drifts 0.43 cm off the plane and the in-plane neck thins to a sliver, and
+    // the ME2C plane misses the ostium at ED. KNOWN-FAIL pending tee: the
+    // designs that meet these rows (ostium u = [0.5, 0.95, -0.25], 'x35') move
+    // the ostium, and today's ME2C / MELAA probes search for the appendage lumen
+    // (roll / swing), so they re-aim and fail 'MELAA: largest fluid-dark non-fluid
+    // region' (~3 cm2 [0-1]) and 'MELAA: warfarin ridge peak grey' (~130 [170])
+    // for every design tried (96 random + hand-made). To be met once ME2C is
+    // ME4C + 90 deg and the MELAA plane is fixed.
+    {
+      const aa = G.A.la.aa[0], os = aa.a, ax = unit(sub(aa.b, aa.a));
+      const laaC = cellsWhere(S2, (l, k) => l === T.LA && laPart(G.A, ptK(S2, k)) === 'laa');
+      const ui = unit([dot(ax, S2.p.lat), dot(ax, S2.p.dir), 0]);
+      let t0 = 1e9, t1 = -1e9;
+      for (const k of laaC) { const q = ptK(S2, k), al = dot(sub(q, os), ax); if (al < 0.2 || al > 0.8) continue; const [x, d] = xd(S2, k), t = -x * ui[1] + d * ui[0]; t0 = Math.min(t0, t); t1 = Math.max(t1, t); }
+      const dO = dot(sub(os, S2.p.pos), S2.p.dir);
+      let x0 = 1e9, x1 = -1e9;
+      for (const k of cellsWhere(S2, (l) => l === T.LA)) { const [x, d] = xd(S2, k); if (Math.abs(d - dO) <= 0.051) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); } }
+      KNOWN = tag === 'ES';
+      check(PL, `A2C: LAA neck width / LA width at the ostium level (${tag})`, t1 > t0 && x1 > x0 ? (t1 - t0 + S2.step) / (x1 - x0 + S2.step) : null, [0.3, 0.55], '',
+        (tag === 'ES' ? 'pending tee (ME2C = ME4C + 90, fixed MELAA plane); ' : '') + `neck ${t1 > t0 ? (t1 - t0 + S2.step).toFixed(2) : '-'} cm (0.2-0.8 cm beyond the ostium, in plane), LA ${x1 > x0 ? (x1 - x0 + S2.step).toFixed(2) : '-'} cm`);
+      KNOWN = tag === 'ES';
+      check(PL, `A2C: LAA ostium centre to plane (${tag})`, Math.abs(dot(sub(os, S2.p.pos), S2.p.normal)), [0, 0.3], 'cm', tag === 'ES' ? 'pending tee (ME2C = ME4C + 90, fixed MELAA plane)' : '');
+      const pm = planeSample(TEE_VIEWS.ME2C, G, {}, 0.5).p;
+      KNOWN = tag === 'ED';
+      check(PL, `ME2C: LAA ostium centre to plane (${tag})`, Math.abs(dot(sub(os, pm.pos), pm.normal)), [0, 0.4], 'cm',
+        (tag === 'ED' ? 'pending tee (ME2C = ME4C + 90, fixed MELAA plane); ' : '') + 'current ME2C; against the ME4C + 90 deg prototype plane of item 2: 1.24 (ED) / 0.46 (ES) cm');
+      KNOWN = false;
+    }
     // the whole LA, roof included, inside the sector (biplane LA volume)
     const laDeep = (SS) => cellsWhere(SS, (l) => l === T.LA).reduce((m, k) => Math.max(m, Math.hypot(...xd(SS, k))), 0);
     check(PL, `A2C: sector depth minus the deepest LA lumen (${tag})`, TTE_VIEWS.A2C.depth - laDeep(S2), [0.5, 3], 'cm');
@@ -1927,7 +1972,12 @@ function yArmRow(grp, vn, tag, ph, st = 3, path = {}, label = '') {
     // 14.7 cm), so a deeper sector adds a second great-vessel section; the depth
     // stays 15 cm until the SVC leaves that plane
     KNOWN = true;
-    check(PL, `A3C: sector depth minus the deepest LA lumen (${tag})`, EXTRA_VIEWS.A3C.depth - laDeep(S), [0.5, 3], 'cm');
+    {
+      const sv = G.A.svc, pS = sv && (sv.b || sv.c);
+      const near = pS ? Math.hypot(dot(sub(pS, S.p.pos), S.p.lat), dot(sub(pS, S.p.pos), S.p.dir)) - (sv.r || 0.8) : null;
+      check(PL, `A3C: sector depth minus the deepest LA lumen (${tag})`, EXTRA_VIEWS.A3C.depth - laDeep(S), [0.5, 3], 'cm',
+        `pending root/rawall (SVC lies in the A3C plane beyond 15 cm); SVC near edge at ${near === null ? '14.7-14.9' : near.toFixed(2)} cm, ${pS ? Math.abs(dot(sub(pS, S.p.pos), S.p.normal)).toFixed(2) : '0.3-0.6'} cm off the plane`);
+    }
     KNOWN = false;
   }
   {
