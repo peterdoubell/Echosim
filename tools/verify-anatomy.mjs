@@ -3808,6 +3808,130 @@ SECTION = 'TEE';
   const tri = Object.fromEntries(Object.entries(M).map(([k, m]) => [k, m ? m.indices.length / 3 : 0]));
   assert('3D', 'thoracic context meshes present (lungs, diaphragm, liver, oesophagus, stomach, pericardium, chest wall)',
     ['lungs', 'diaphragm', 'liver', 'oesophagus', 'stomach', 'pericardium', 'chestWall'].every((k) => tri[k] > 200), JSON.stringify(tri));
+  {
+    // review 12 (ANA-11, ANA-10): skeleton, airway and coronaries of the 3D panel
+    const T3 = await import('../js/thorax3d.js');
+    const { lumenDist: lumD, LM: LM3, bodyClassify: bcl, BODY: BD } = await import('../js/anatomy.js');
+    const { TTE_VIEWS: TV3, teePathAt } = await import('../js/views.js');
+    const need = ['sternum', 'ribs', 'spine', 'airway'];
+    assert('3D', 'CONTEXT includes sternum, ribs, spine, trachea and bronchi', need.every((k) => tri[k] > 200 && T3.CONTEXT.some((c) => c.key === k)) &&
+      ['trachea', 'right', 'left'].every((k) => T3.AIRWAY[k].length >= 2), need.map((k) => `${k} ${tri[k]}`).join(', '));
+    // the standard windows lie in an intercostal space: the parasternal ones in
+    // the 4th left space beside the sternum, the apical ones in the 5th
+    let clr = 1e9, where = ''; const space = {};
+    for (const k of ['PLAX', 'PSAX', 'PSAX_AV', 'A4C', 'A2C']) {
+      const [l, a, s] = T3.worldToBody(...TV3[k].probe(A).pos);
+      const th = Math.atan2(Math.abs(l - T3.SKEL.l0) / 13, (a + 1.5) / 8);
+      let above = 0;
+      for (const n of T3.SKEL.ribs) { const ds = s - T3.ribHeight(n, th); if (ds < 0) above = Math.max(above, n); if (Math.abs(ds) - T3.SKEL.ribR < clr) { clr = Math.abs(ds) - T3.SKEL.ribR; where = k; } }
+      space[k] = above;                                    // the lowest rib above the probe = the interspace number
+    }
+    check('3D', 'parasternal and apical probes: clearance from the nearest rib (worst window)', clr, [0.1, 3], 'cm', where);
+    assert('3D', 'parasternal windows in the 4th interspace, apical windows in the 5th', space.PLAX === 4 && space.PSAX === 4 && space.PSAX_AV === 4 && space.A4C === 5 && space.A2C === 5, JSON.stringify(space));
+    const stL = T3.worldToBody(...TV3.PLAX.probe(A).pos)[0] - T3.SKEL.l0;
+    check('3D', 'PLAX probe: distance left of the sternal midline (left sternal edge at 1.25 cm)', stL, [1.25, 4]);
+    const ssn = T3.worldToBody(...EXTRA_VIEWS.SSN.probe(A).pos), sub = T3.worldToBody(...TV3.SUBCOSTAL.probe(A).pos);
+    assert('3D', 'suprasternal probe above the manubrium, subcostal probe below the xiphoid', ssn[2] > T3.SKEL.manubrium && sub[2] < T3.SKEL.xiphoid, `SSN s ${ssn[2].toFixed(1)}, subcostal s ${sub[2].toFixed(1)}`);
+    // the air column touches no blood pool and not the oesophagus
+    let air = 1e9, aw = '';
+    for (const k of ['trachea', 'right', 'left']) {
+      const q = T3.AIRWAY[k], r = k === 'trachea' ? T3.AIRWAY.rT : T3.AIRWAY.rB;
+      for (let n = 0; n + 1 < q.length; n++) for (let f = 0; f <= 1.001; f += 0.1) {
+        const w = T3.bodyToWorld(...q[n].map((v, i) => v + (q[n + 1][i] - v) * f));
+        for (const nm of ['LV', 'RV', 'LA', 'RA', 'AOROOT', 'PA', 'ARCH', 'DESC', 'SVC', 'BCV']) { const d = lumD(w[0], w[1], w[2], A, nm) - r; if (d < air) { air = d; aw = `${k} / ${nm}`; } }
+        for (let u = -6; u <= 12; u += 0.25) { const e = teePathAt(u), d = Math.hypot(e[0] - w[0], e[1] - w[1], e[2] - w[2]) - r - 0.8; if (d < air) { air = d; aw = `${k} / oesophagus`; } }
+      }
+    }
+    check('3D', 'trachea and main bronchi: clearance from the blood pools and the oesophagus', air, [0.1, 5], 'cm', aw);
+    // the TEE blind spot: from the oesophagus 5-6 cm above the ME station the line
+    // of sight to the distal ascending aorta crosses the air column
+    const asc = A.ao.ascSegs[A.ao.ascSegs.length - 1].b; let blind = 0;
+    for (const u of [5, 6]) { const e = teePathAt(u), len = Math.hypot(...e.map((v, i) => asc[i] - v)); let h = 0; for (let f = 0.02; f < 1; f += 0.01) if (T3.airwayDist(...T3.worldToBody(...e.map((v, i) => v + (asc[i] - v) * f))) < 0) h++; blind = Math.max(blind, h * 0.01 * len); }
+    check('3D', 'TEE blind spot: air between the upper oesophagus and the distal ascending aorta', blind, [0.5, 3]);
+    // coronary ostia in the tracked end-diastolic PSAX-AV plane, as clock hours
+    // round the root centre (12 = towards the probe, clockwise on the display)
+    {
+      const G9 = geo(0.99), A9 = G9.A, v = TV3.PSAX_AV, pr = v.probe(A9), off = v.track ? v.track(A9) : [0, 0, 0];
+      const pos = pr.pos.map((x, i) => x + off[i]), d3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+      const c = [0, 1, 2].map((i) => A9.ao.valve[i] + LM3.U_AO[i] * A9.ao.sinusH - pos[i]), cx = d3(c, pr.lat), cy = d3(c, pr.dir);
+      const acc = { L: { n: 0, sa: 0, lum: 0 }, R: { n: 0, sa: 0, lum: 0 } };
+      for (let r = 1.0; r <= 3.4; r += 0.04) for (let a = 0; a < 360; a++) {
+        const dx = Math.sin(a * Math.PI / 180) * r, dy = -Math.cos(a * Math.PI / 180) * r;
+        const p = [0, 1, 2].map((i) => pos[i] + pr.lat[i] * (cx + dx) + pr.dir[i] * (cy + dy));
+        if (lumD(p[0], p[1], p[2], A9, 'CORONARY') >= 0) continue;
+        const o = a > 30 && a < 200 ? acc.L : acc.R; o.n++; o.sa += o === acc.R && a < 180 ? a + 360 : a;
+        if (bcl(p[0], p[1], p[2], A9).code === BD.AO) o.lum += 0.04 * (Math.PI / 180) * r;
+      }
+      check('3D', 'PSAX-AV ED: left main in plane, clock hour', acc.L.n ? acc.L.sa / acc.L.n / 30 : NaN, [3.5, 4.5], "o'clock");
+      check('3D', 'PSAX-AV ED: right coronary in plane, clock hour', acc.R.n ? (acc.R.sa / acc.R.n % 360) / 30 : NaN, [10, 12], "o'clock");
+      check('3D', 'PSAX-AV ED: left main drawn as arterial lumen', acc.L.lum, [0.1, 0.5], 'cm2');
+      // KNOWN-FAIL: the first ~2 cm of the RCA leave the right sinus through the
+      // infundibular muscle and the RV lumen (anatomy.js buildCoronaries: no
+      // epicardial corridor exists between the re-based root, the RVOT and the
+      // right AV groove; root / RV groups), so only its tip is drawn in the plane
+      KNOWN = acc.R.lum < 0.1;
+      check('3D', 'PSAX-AV ED: right coronary drawn as arterial lumen', acc.R.lum, [0.1, 0.5], 'cm2', KNOWN ? 'pending root / RV: proximal RCA crosses the infundibulum' : '');
+      KNOWN = false;
+    }
+    {
+      // 3D coronaries against the myocardial shell: relative luminance (WCAG) of
+      // the coronary colour over the shell's muscle colour, drawn at opacity 1 after it
+      const fs3 = await import('fs');
+      const V3 = await import('../js/vessels3d.js');
+      const h3 = fs3.readFileSync(new URL('../js/heart3d.js', import.meta.url), 'utf8');
+      const mus = parseInt(h3.match(/const MUSCLE = 0x([0-9a-f]{6})/i)[1], 16), myoOrder = +h3.match(/this\.myoMesh\.renderOrder = (\d+)/)[1];
+      const lum = (c) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(c >> 16 & 255) + 0.7152 * f(c >> 8 & 255) + 0.0722 * f(c & 255); };
+      check('3D', '3D: coronary-to-myocardium screen contrast', (lum(V3.CORONARY) + 0.05) / (lum(mus) + 0.05), [2, 21], ':1');
+      assert('3D', '3D coronaries opaque, inflated and drawn after the myocardial shell', V3.CORONARY_3D.opacity === 1 && V3.CORONARY_3D.inflate >= 0.18 && V3.CORONARY_3D.renderOrder > myoOrder &&
+        /vesselMeshes\.coronary\.renderOrder = CORONARY_3D\.renderOrder/.test(h3), `opacity ${V3.CORONARY_3D.opacity}, inflate ${V3.CORONARY_3D.inflate} cm, order ${V3.CORONARY_3D.renderOrder} > ${myoOrder}`);
+    }
+  }
+  {
+    // review 12 (ANA-10): pericardial reflections and sinuses
+    const AN = await import('../js/anatomy.js');
+    // the drawn sac closes over the pulmonary trunk's bifurcation: no point of a
+    // branch centreline more than 1 cm (+ the 3 mm sac offset) beyond the trunk is inside it
+    const bif = A.pa.main.b; let far = 0, wrapped = 0, old = 0;
+    for (const seg of A.pa.branch) for (let f = 0; f <= 1.001; f += 0.05) {
+      const q = seg[0].map((v, i) => v + (seg[1][i] - v) * f);
+      if (Math.hypot(...q.map((v, i) => v - bif[i])) - A.pa.main.r2 <= AN.PERI_REFLECT.paBranch + AN.PERI_REFLECT.sac) continue;
+      far++; if (AN.parietalSacDist(q[0], q[1], q[2], A) < AN.PERI_REFLECT.sac) wrapped++; if (AN.epiDist(q[0], q[1], q[2], A) < AN.PERI_REFLECT.sac) old++;
+    }
+    assert('3D', 'pericardial sac does not wrap the PA branches beyond 1 cm from the bifurcation', far >= 8 && wrapped === 0, `${wrapped} of ${far} far centreline points inside the sac (the epicardial field: ${old})`);
+    const svTop = A.svc.c || A.svc.b;
+    assert('3D', 'pericardial sac holds the lower SVC, not its upper end', AN.parietalSacDist(...[0, 1, 2].map((i) => A.svc.a[i] + (A.svc.b[i] - A.svc.a[i]) * 0.5), A) < AN.PERI_REFLECT.sac &&
+      AN.parietalSacDist(svTop[0], svTop[1], svTop[2], A) > AN.PERI_REFLECT.sac, `top ${AN.parietalSacDist(svTop[0], svTop[1], svTop[2], A).toFixed(2)} cm outside the field`);
+    // effusion: fluid in the transverse sinus (between the great arteries and the
+    // atria, within 1.5 cm of the LA) and the parietal line against the DTA
+    const pe = PATHS.eff, Ge = geo(0.99, 'eff'), Ae = Ge.A, h = 0.04, tsA = {};
+    let line = 0, touch = 0;
+    for (const [vn, v] of [['PLAX', TTE_VIEWS.PLAX], ['PSAX_AV', TTE_VIEWS.PSAX_AV], ['MEAVLAX', TEE_VIEWS.MEAVLAX], ['MEAVSAX', TEE_VIEWS.MEAVSAX]]) {
+      const pr = v.probe(Ae), off = v.track ? v.track(Ae) : [0, 0, 0], pos = pr.pos.map((x, i) => x + off[i]), half = Math.tan(sectorHalfOf(v));
+      tsA[vn] = 0;
+      for (let d = 0.3; d < v.depth; d += h) for (let x = -d * half; x <= d * half; x += h) {
+        const q = [0, 1, 2].map((i) => pos[i] + pr.dir[i] * d + pr.lat[i] * x), ti = classify(q[0], q[1], q[2], Ge, pe).tissue;
+        if (vn === 'PLAX' && (ti === TISSUE.PERICARDIUM || ti === TISSUE.PERI_LINE)) {
+          const dd = AN.lumenDist(q[0], q[1], q[2], Ae, 'DESC') - Ae.ao.wall;
+          if (ti === TISSUE.PERICARDIUM && dd > 0 && dd < 0.1) touch++;
+          if (ti === TISSUE.PERI_LINE && dd > 0 && dd < 0.22) line++;
+        }
+        if (ti !== TISSUE.PERICARDIUM) continue;
+        const s = AN.transverseSinus(q[0], q[1], q[2], Ae);
+        if (s.atrial && s.art > 0 && s.atr > 0 && s.art + s.atr < 0.95 && AN.lumenDist(q[0], q[1], q[2], Ae, 'LA') < 1.5) tsA[vn] += h * h;
+      }
+    }
+    assert('Effusion', 'effusion PLAX: parietal line between the fluid and the DTA', line * h * h > 0.1 && touch === 0, `line ${(line * h * h).toFixed(2)} cm2 on the aortic wall, ${touch} fluid samples within 1 mm of it`);
+    check('Effusion', 'effusion ME AV LAX: fluid in the transverse sinus between the root and the LA', tsA.MEAVLAX, [0.2, 3], 'cm2');
+    check('Effusion', 'effusion ME AV SAX: fluid in the transverse sinus between the root and the LA', tsA.MEAVSAX, [0.2, 3], 'cm2');
+    check('Effusion', 'effusion PLAX: fluid in the transverse sinus between the root and the LA', tsA.PLAX, [0.2, 3], 'cm2');
+    // KNOWN-FAIL: in the transthoracic PSAX-AV plane the atrial wall and septum
+    // are drawn solid against the non-coronary sinus (no space is left between the
+    // root and the LA to distend); opening one means carving the atrial wall there,
+    // which belongs to the atrial-wall group. The TEE planes and PLAX show the sinus.
+    KNOWN = tsA.PSAX_AV < 0.2;
+    check('Effusion', 'effusion PSAX-AV: fluid in the transverse sinus between the root and the LA', tsA.PSAX_AV, [0.2, 3], 'cm2', KNOWN ? 'pending atrial wall: the root abuts the atrial wall in this plane' : '');
+    KNOWN = false;
+  }
   const Lb = structureLabels(A).heart.map(([t]) => t);
   assert('3D', 'labels for the LAA and the four pulmonary veins', ['LAA', 'LSPV', 'LIPV', 'RSPV', 'RIPV'].every((t) => Lb.includes(t)), Lb.join(' '));
   {

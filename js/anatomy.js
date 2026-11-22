@@ -1503,6 +1503,7 @@ function lvEpiRadiusAt(y, L) {
 // the PDA descends the inferior interventricular groove. On echo the ostia are
 // the landmark of the PSAX-AV view (LM at ~4 o'clock off the left cusp, RCA at
 // ~10-11 o'clock off the right cusp). Calibres: LM ~4.5 mm, LAD / RCA ~3.5 mm.
+export const LM_OSTIUM_DEG = 300;
 const CONUS_LIFT = 2.3;                 // conus branch: distance off the RVOT axis (cm)
 function buildCoronaries(L, ao, T, tvN) {
   const segs = [];
@@ -1533,8 +1534,11 @@ function buildCoronaries(L, ao, T, tvN) {
   };
   const axis = mad(ao.valve, U_AO, ao.sinusH);
   const dirAt = (deg) => { const a = deg * Math.PI / 180; return add(mul(E_SCR, Math.cos(a)), mul(E_ANT, Math.sin(a))); };
-  // left main from the left-coronary sinus (330 deg in the PSAX-AV frame)
-  const lmO = mad(axis, dirAt(330), ao.sinusOff + ao.sinusR - 0.12);
+  // left main from the left-coronary sinus (centred on 330 deg in the PSAX-AV
+  // frame). The ostium lies in the posterior half of the sinus, 300 deg, so the
+  // left main is cut at ~4 o'clock off the root in the PSAX-AV plane (review 12:
+  // at 330 deg it read 3.2 o'clock, and 0.15 cm clear of the sinus wall)
+  const lmO = mad(axis, dirAt(LM_OSTIUM_DEG), ao.sinusOff + ao.sinusR - 0.12);
   const bif = mad(lmO, unit(add(add(mul(E_SCR, 0.75), mul(E_ANT, 0.45)), mul(U_AO, -0.25))), 1.1);
   chain([lmO, bif], 0.23, 0.22);
   const yb = L.base;
@@ -2355,6 +2359,57 @@ export function epiDist(x, y, z, A) {
   d = smin(d, dAOroot(x, y, z, A) - A.ao.wall, 0.4);
   d = smin(d, dPAlumen(x, y, z, A) - A.pa.wall, 0.4);
   return d;
+}
+
+// ---- pericardial reflections and sinuses (review 12) --------------------------
+// The fibrous (parietal) sac does not follow the great vessels out of the chest:
+// it reflects onto the ascending aorta ~1 cm below the innominate artery, onto
+// the pulmonary trunk at its bifurcation (the right and left pulmonary arteries
+// are extrapericardial beyond their first centimetre), onto ~2 cm of the SVC,
+// and onto the pulmonary-vein ostia and the IVC at the atrial walls (the venous
+// tubes pierce it, they are not wrapped).
+export const PERI_REFLECT = { paBranch: 1.0, svc: 2.0, sac: 0.3 };   // (sac: the drawn 3D sac lies 3 mm outside this field's zero)
+// Distance to the heart as the PARIETAL SAC wraps it: the epicardium of the four
+// chambers, the aortic root and ascending aorta, the pulmonary trunk with the
+// first centimetre of each branch, and the intrapericardial SVC. Kept apart from
+// epiDist (the visceral surface every wall is drawn from) and from the effusion's
+// visceralDist: this one only says where the sac is.
+export function parietalSacDist(x, y, z, A) {
+  let d = myoParts(x, y, z, A).core;
+  d = smin(d, dAOroot(x, y, z, A) - A.ao.wall, 0.4);
+  const pa = A.pa, bif = pa.main.b;
+  let dp = sdRoundCone(x, y, z, pa.main.a[0], pa.main.a[1], pa.main.a[2], bif[0], bif[1], bif[2], pa.main.r1, pa.main.r2);
+  // the branches as far as the reflection: each one clipped by a sphere about the bifurcation
+  let db = 1e9;
+  for (const seg of pa.branch) db = Math.min(db, sdCapsule(x, y, z, seg[0][0], seg[0][1], seg[0][2], seg[1][0], seg[1][1], seg[1][2], seg[2]));
+  // (the drawn sac, PERI_REFLECT.sac outside, then closes 1 cm beyond the trunk)
+  const reach = Math.hypot(x - bif[0], y - bif[1], z - bif[2]) - (pa.main.r2 + PERI_REFLECT.paBranch - PERI_REFLECT.sac - pa.wall);
+  dp = smin(dp, Math.max(db, reach), 0.3);
+  d = smin(d, dp - pa.wall, 0.4);
+  // the SVC for its last ~2 cm above the cavo-atrial junction
+  const sv = A.svc, ax = [sv.b[0] - sv.a[0], sv.b[1] - sv.a[1], sv.b[2] - sv.a[2]], al = Math.hypot(ax[0], ax[1], ax[2]) || 1;
+  const k = Math.min(1, PERI_REFLECT.svc / al), e = [sv.a[0] + ax[0] * k, sv.a[1] + ax[1] * k, sv.a[2] + ax[2] * k];
+  d = smin(d, sdCapsule(x, y, z, sv.a[0], sv.a[1], sv.a[2], e[0], e[1], e[2], sv.r + 0.15), 0.3);
+  return d;
+}
+// The transverse sinus: the passage of the pericardial space behind the two
+// great arteries and in front of the atria (the classic TEE site of fluid, and
+// of a pseudo-abscess, beside the aortic root). Returns the two wall distances
+// of a point: `art` to the outer wall of the aortic root / ascending aorta or
+// pulmonary trunk, `atr` to the atrial epicardium; a point is IN the sinus when
+// both are positive, the nearest chamber is an atrium and art + atr is less
+// than the width the sinus is distended to.
+const _ts = { art: 0, atr: 0, atrial: false };
+export function transverseSinus(x, y, z, A) {
+  const pa = A.pa;
+  const dtr = sdRoundCone(x, y, z, pa.main.a[0], pa.main.a[1], pa.main.a[2], pa.main.b[0], pa.main.b[1], pa.main.b[2], pa.main.r1, pa.main.r2) - pa.wall;
+  _ts.art = Math.min(dAOroot(x, y, z, A) - A.ao.wall, dtr);
+  _ts.atrial = false; _ts.atr = 1e9;
+  if (_ts.art > 2) return _ts;
+  const dat = Math.min(dLAlumen(x, y, z, A), dRAlumen(x, y, z, A));
+  _ts.atrial = dat < Math.min(dLVlumen(x, y, z, A), dRVlumen(x, y, z, A));
+  _ts.atr = myoParts(x, y, z, A).core;
+  return _ts;
 }
 
 // The visceral envelope an effusion is measured from: the epicardium plus the

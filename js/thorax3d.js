@@ -8,7 +8,7 @@
 // (anatomy.js bodyClassify), so the 3D context is the tissue the imaging plane
 // cuts through; the stomach and the diaphragm come from their shared SDFs.
 
-import { bodyClassify, BODY, BODY_AX, LM, diaphragmBelow, stomachDist, epiDist } from './anatomy.js';
+import { bodyClassify, BODY, BODY_AX, LM, diaphragmBelow, stomachDist, parietalSacDist, PERI_REFLECT } from './anatomy.js';
 import { TEE_VIEWS, teePathPolyline, TEE_PATH_TOP, TEE_GEJ } from './views.js';
 
 const { L, P, S, A: AN } = BODY_AX;
@@ -60,6 +60,81 @@ function capsule(p, a, b, r) {
   return Math.hypot(ap[0] - ab[0] * t, ap[1] - ab[1] * t, ap[2] - ab[2] * t) - r;
 }
 
+// ---- skeleton and airway (review 12) ------------------------------------------
+// Landmarks the probe positions are read against: the sternum (manubrium under
+// the suprasternal window, xiphoid above the subcostal window), ribs 2-6 with
+// their interspaces (parasternal windows in the 4th space at the left sternal
+// edge, the apical window in the 5th space), the thoracic spine behind the
+// oesophagus and descending aorta, and the trachea with the two main bronchi
+// (carina at the sternal angle, T4-5, under the arch; the air column between the
+// oesophagus and the distal ascending aorta is the TEE blind spot).
+// All in body coordinates (l, a, s). The model's mediastinal midline (the
+// oesophagus, the suprasternal window) lies ~1 cm right of l = 0, so the
+// sternum and spine are centred there.
+export const SKEL = {
+  l0: -1.0,                                  // sternal / vertebral midline
+  manubrium: 13.0, angle: 8.9, body: -5.6, xiphoid: -8.6,   // s of the notch, sternal angle, xiphisternal joint, tip
+  ribs: [2, 3, 4, 5, 6], pitch: 3.0,         // sternal ends 3 cm apart below the angle (rib 2 at the angle)
+  ribR: 0.5, drop: 5.0,                      // rib half-height; the head is ~5 cm above the sternal end
+  dip: [0, 0.8, 1.6, 2.7, 3.3],              // the costal cartilages of the lower ribs climb to the sternum
+  spineR: 1.6, vertebra: 2.3,
+};
+const wallA = (s) => { const k = s > THX.sTaper ? Math.sqrt(Math.max(0.02, 1 - ((s - THX.sTaper) / (THX.sTop - THX.sTaper)) ** 2)) : 1; return THX.ra * (0.55 + 0.45 * k); };
+const sstep = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+// angle round the chest from the anterior midline (0) to the spine (pi)
+const chestAngle = (l, a) => Math.atan2(Math.abs(l - SKEL.l0) / THX.rl, (a - THX.ac) / THX.ra);
+// height (s) of rib n's centreline at chest angle th: from the sternal end the
+// cartilage dips to the costochondral junction, then the shaft climbs to its head
+export function ribHeight(n, th) {
+  const i = n - 2, sAnt = SKEL.angle - SKEL.pitch * i;
+  return sAnt - SKEL.dip[i] * sstep(0.08, 0.6, th) * (1 - sstep(1.1, 2.2, th)) + SKEL.drop * sstep(0.9, 3.0, th);
+}
+// distance fields in body coordinates
+export function ribsDist(l, a, s) {
+  const th = chestAngle(l, a);
+  if (th < 0.12) return 1;                                           // the ribs end at the sternal edge
+  const rad = cavity(l, a, s, 0.9);                                  // the rib cage lies in the chest wall
+  let d = 1e9;
+  for (const n of SKEL.ribs) d = Math.min(d, Math.hypot(rad * 1.4, s - ribHeight(n, th)) - SKEL.ribR);
+  return d;
+}
+export function sternumDist(l, a, s) {
+  const hw = s > SKEL.angle ? 2.2 : s > SKEL.body ? 1.25 : 0.6;      // manubrium, body, xiphoid
+  const sc = Math.max(SKEL.xiphoid, Math.min(SKEL.manubrium, s));
+  return Math.hypot(Math.max(0, Math.abs(l - SKEL.l0) - hw), a - (THX.ac + wallA(sc) + 0.95), s - sc) - 0.45;
+}
+export function spineDist(l, a, s) {
+  const sc = Math.max(-17, Math.min(15, s));
+  const r = SKEL.spineR + 0.14 * Math.cos(2 * Math.PI * sc / SKEL.vertebra);   // bodies and discs
+  return Math.hypot(l - SKEL.l0, a - (THX.ac - wallA(sc) + 1.2), s - sc) - r;
+}
+// Airway centrelines (body coordinates): the trachea descends just in front of
+// the oesophagus and to the right of the arch to the carina; the right main
+// bronchus is short and steep, the left longer, passing under the arch and
+// over the left atrium towards the left hilum.
+export const AIRWAY = {
+  trachea: [[-2.7, -2.3, 16], [-3.0, -2.5, 10], [-3.0, -2.6, 6.2]], rT: 0.9,
+  right: [[-3.0, -2.6, 6.2], [-4.8, -3.2, 4.8]],
+  // (drawn to the point where it passes under the arch: beyond it the model's
+  // arch, pulmonary bifurcation and descending aorta leave it no room)
+  left: [[-3.0, -2.6, 6.2], [0, -1.6, 5.1]], rB: 0.6,
+};
+const cap3 = (p, a, b, r) => {
+  const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], ap = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
+  const t = Math.max(0, Math.min(1, dot(ap, ab) / dot(ab, ab)));
+  return Math.hypot(ap[0] - ab[0] * t, ap[1] - ab[1] * t, ap[2] - ab[2] * t) - r;
+};
+export function airwayDist(l, a, s) {
+  const p = [l, a, s]; let d = 1e9;
+  for (const [k, r] of [['trachea', AIRWAY.rT], ['right', AIRWAY.rB], ['left', AIRWAY.rB]]) {
+    const q = AIRWAY[k]; for (let n = 0; n + 1 < q.length; n++) d = Math.min(d, cap3(p, q[n], q[n + 1], r));
+  }
+  return d;
+}
+export const bodyToWorld = (l, a, s) => world(l, a, s);
+export const worldToBody = (x, y, z) => bodyOf(x, y, z);
+export const SKELETON_CELL = 0.4;
+
 // Context organs, drawn back to front (renderOrder) under the heart. Colours are
 // the panel's: grey-blue aerated lung, brown liver, muscle-red diaphragm,
 // pink-tan gut, pale fibrous pericardium, and a faint chest wall.
@@ -71,6 +146,11 @@ export const CONTEXT = [
   { key: 'stomach', color: 0xc99a7c, opacity: 0.32 },
   { key: 'oesophagus', color: 0xd09080, opacity: 0.5 },
   { key: 'pericardium', color: 0xeadfc6, opacity: 0.09 },
+  // (review 12) bone a pale ivory, the air column a pale cyan; drawn with the organs
+  { key: 'spine', color: 0xe6dcc0, opacity: 0.3 },
+  { key: 'ribs', color: 0xe6dcc0, opacity: 0.26 },
+  { key: 'sternum', color: 0xe6dcc0, opacity: 0.3 },
+  { key: 'airway', color: 0x9fd8e6, opacity: 0.34 },
 ];
 
 // Build the context meshes from the end-diastolic anatomy A with the mesher
@@ -140,9 +220,14 @@ export function buildContext(A, buildMesh, heartBox) {
   };
   const out = {};
   for (const [k, f] of Object.entries(fields)) out[k] = buildMesh(f, box, c);
+  // skeleton and airway: thin parts, meshed on a finer grid
+  const inBody = (f) => (x, y, z) => { const [l, a, s] = bodyOf(x, y, z); return f(l, a, s); };
+  for (const [k, f] of [['spine', spineDist], ['ribs', ribsDist], ['sternum', sternumDist], ['airway', airwayDist]]) out[k] = buildMesh(inBody(f), box, SKELETON_CELL);
   // the fibrous pericardium: a sac ~3 mm outside the epicardium of the chambers
-  // and the roots of the great vessels, meshed in the (finer) heart box
-  out.pericardium = heartBox ? buildMesh((x, y, z) => epiDist(x, y, z, A) - 0.3, heartBox, 0.45) : null;
+  // and the great vessels as far as its reflections (anatomy.js parietalSacDist:
+  // ascending aorta, pulmonary trunk to the bifurcation, ~2 cm of the SVC),
+  // meshed in the (finer) heart box
+  out.pericardium = heartBox ? buildMesh((x, y, z) => parietalSacDist(x, y, z, A) - PERI_REFLECT.sac, heartBox, 0.45) : null;
   return out;
 }
 

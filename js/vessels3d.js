@@ -10,7 +10,11 @@
 import { lumenDist } from './anatomy.js';
 
 export const ARTERIAL = 0xc0392b;      // = the LV / 'Oxygenated / left' legend swatch
-export const CORONARY = 0xff7f66;      // lighter arterial red (small epicardial arteries)
+export const CORONARY = 0xffb199;      // light arterial red (small epicardial arteries)
+// The coronaries are thin tubes under a translucent muscle-red shell: drawn
+// opaque, after the myocardium, self-lit and a little inflated they trace the
+// grooves on the epicardium instead of dissolving into it (review 12).
+export const CORONARY_3D = { opacity: 1, inflate: 0.2, emissive: 0x7a2416, emissiveIntensity: 0.55, renderOrder: 5 };
 export const VENOUS = 0x2b6cb0;        // = the RV / 'Deoxygenated / right' legend swatch
 export const VENOUS_DEEP = 0x203f79;   // cavae and coronary sinus: the RA's deeper venous tint
 
@@ -27,7 +31,7 @@ export const VESSEL_CELL = 0.4;
 export const VESSELS = [
   { key: 'aorticRoot', color: ARTERIAL, moving: true, fn: (x, y, z, A) => lumenDist(x, y, z, A, 'AOROOT') },
   { key: 'PA', color: VENOUS, moving: true, fn: (x, y, z, A) => lumenDist(x, y, z, A, 'PA') },
-  { key: 'coronary', color: CORONARY, moving: true, fn: (x, y, z, A) => lumenDist(x, y, z, A, 'CORONARY') - 0.16 },
+  { key: 'coronary', color: CORONARY, moving: true, fn: (x, y, z, A) => lumenDist(x, y, z, A, 'CORONARY') - CORONARY_3D.inflate },
   { key: 'CS', color: VENOUS_DEEP, moving: true, fn: (x, y, z, A) => lumenDist(x, y, z, A, 'CS') - 0.08 },
   { key: 'arch', color: ARTERIAL, moving: false, fn: (x, y, z, A) => lumenDist(x, y, z, A, 'ARCH') },
   { key: 'desc', color: ARTERIAL, moving: false, fn: (x, y, z, A) => lumenDist(x, y, z, A, 'DESC') },
