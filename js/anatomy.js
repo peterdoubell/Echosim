@@ -2787,6 +2787,9 @@ export function bodyClassify(x, y, z, A, periOff = 0) {
     // the RA wall (the ME bicaval far field is RA wall, pericardium and fat)
     const lbR = x * BL[0] + y * BL[1] + z * BL[2] - MIDLINE;
     if (lbR < RIGHT_LUNG_L + 1.0) gap = Math.max(gap, LUNG_GAP_RA * smoothstep(RIGHT_LUNG_L + 1.0, RIGHT_LUNG_L - 0.5, lbR));
+    // (the mediastinal pleura follows the sac at a distance that varies with the
+    // pericardial fat: the same lobulation as the rest of the lung margin)
+    gap = Math.max(0.15, gap + LUNG_LOBE.sac * lungLobulation(lbR, -(x * BP[0] + y * BP[1] + z * BP[2]), x * BS[0] + y * BS[1] + z * BS[2]));
     if (sac > gap && isLung(x, y, z)) return bc(BODY.LUNG, 0.9);
   }
   return bc(BODY.OUT, 0);
@@ -2815,12 +2818,36 @@ const LUNG_WINDOWS = (() => {
   const wp = mad([-0.35, 0.3, 0.35], BODY_AX.A, 7.0);                 // left parasternal window
   return [wa, wp].map((w) => ({ w, u: unit(sub(_HC, w)), tan: Math.tan(32 * Math.PI / 180) }));
 })();
+// Lobulation of the visceral pleura where it borders the acoustic windows and the
+// posterior mediastinum: a smooth field (cm; body left / anterior / superior
+// coordinates) added to the lung boundary, so that no plane cuts it in a straight
+// line. Six waves along the six icosahedral axes (so every plane sees several of
+// them at close to their true wavelength), about LUNG_LOBE.wl cm long and
+// LUNG_LOBE.amp cm each, with a finer octave (x LUNG_LOBE.fine); the mediastinal
+// pleura's distance from the sac varies by LUNG_LOBE.sac of the same field.
+export const LUNG_LOBE = { wl: 2.8, amp: 0.3, sac: 0.8, fine: 0.5 };
+const _LOBE_W = (() => {
+  const f = (1 + Math.sqrt(5)) / 2, n = Math.hypot(1, f);
+  return [[0, 1, f], [0, 1, -f], [1, f, 0], [1, -f, 0], [f, 0, 1], [-f, 0, 1]].map((d, i) =>
+    [d[0] / n, d[1] / n, d[2] / n, 1 + 0.07 * (i - 2.5), 1.3 + 2.4 * i]);   // direction, wavelength factor, phase
+})();
+function lungLobulation(l, a, s) {
+  const k = 2 * Math.PI / LUNG_LOBE.wl;
+  let v = 0;
+  for (const w of _LOBE_W) {
+    const ph = k / w[3] * (l * w[0] + a * w[1] + s * w[2]);
+    // (with a finer octave: an irregular margin has no long inflections)
+    v += Math.sin(ph + w[4]) + LUNG_LOBE.fine * Math.sin(2.13 * ph + 1.7 * w[4]);
+  }
+  return LUNG_LOBE.amp * v;
+}
 function isLung(x, y, z) {
   const lb = x * BL[0] + y * BL[1] + z * BL[2] - MIDLINE;
   const ab = -(x * BP[0] + y * BP[1] + z * BP[2]);                     // + anterior
   // the right lung covers the anterolateral wall of the RA (there is no acoustic
   // window there: the cardiac notch is on the left)
-  if (lb < RIGHT_LUNG_L && ab > RIGHT_LUNG_A) return true;
+  const lob = lungLobulation(lb, ab, x * BS[0] + y * BS[1] + z * BS[2]);
+  if (Math.min(RIGHT_LUNG_L - lb, ab - RIGHT_LUNG_A) + lob > 0) return true;
   // general lung boundary (negative = aerated): everywhere outside the two
   // acoustic-window cones and, posteriorly, outside the posterior mediastinum
   let g = ab < 0 ? 2.8 - Math.hypot(lb, Math.min(0, ab + 1.5)) : -1e9;   // posterior mediastinum (rounded)
@@ -2832,6 +2859,9 @@ function isLung(x, y, z) {
     const c = al * W.tan + 1.2 - Math.sqrt(px * px + py * py + pz * pz);
     if (c > g) g = c;
   }
+  // the lung's edge is a lobulated margin (the lingula, the cardiac notch, the
+  // fissures), not the ruled surface of a cone: the boundary undulates
+  g += lob;
   if (ab < 0) {
     // the left pleura/lung wraps the descending aorta posterolaterally: aerated lung
     // from AORTA_PLEURA behind the aortic wall (the bright pleural line behind it

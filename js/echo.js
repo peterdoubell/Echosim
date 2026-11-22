@@ -1002,7 +1002,7 @@ export class EchoView {
           const vel = velocityAt(wx, wy, wz, G, path);
           if (vel && vel.speed > 0.05) {
             // line-of-sight velocity: beamDir points away from probe
-            const los = vel.vx * bd[0] + vel.vy * bd[1] + vel.vz * bd[2];
+            let los = vel.vx * bd[0] + vel.vy * bd[1] + vel.vz * bd[2];
             const alos = Math.abs(los);
             // Steer the spectral gate to the TRUE peak-SPEED sample anywhere along
             // the beam — tracked independently of the wall filter / line-of-sight
@@ -1042,6 +1042,16 @@ export class EchoView {
                   jitter = scatGauss(cx0, cy0, cz0, bloodSalt ^ 0x2545f491) * nyqEff * vr * Math.min(1.1, 0.35 + alos / (3 * nyqEff));
                   // per-cell variance estimate: noisy, as a scanner's is
                   vr = clamp(vr * (0.75 + 0.5 * hash01(cx0 * 73856093 ^ cy0 * 19349663, cz0 ^ bloodSalt)), 0, 1);
+                } else {
+                  // Laminar flow is not a flat fill either: each ~2 mm colour cell
+                  // holds an autocorrelation ESTIMATE of the mean velocity from a
+                  // few pulses, so it scatters about the true value (here ~12 % of
+                  // the velocity plus a small floor), re-drawn every frame: a
+                  // mottled column whose mean is still the flow's velocity.
+                  const jc = 5, cx0 = Math.floor(wx * jc), cy0 = Math.floor(wy * jc), cz0 = Math.floor(wz * jc);
+                  const dv = clamp(scatGauss(cx0, cy0, cz0, bloodSalt ^ 0x51ed270b), -2, 2) * (LAMINAR_MOTTLE * alos + 0.02 * nyqEff);
+                  // (the estimate keeps the flow's sign: noise does not flip a cell)
+                  los = los < 0 ? Math.min(-0.5 * wf, los + dv) : Math.max(0.5 * wf, los + dv);
                 }
                 const col = dopplerColor(los, nyqEff, vr, jitter);
                 // colour REPLACES the grey wherever flow is detected (write priority)
@@ -1580,7 +1590,9 @@ export class EchoView {
     // already-composited part of the same beam. Modelled for the descending-aorta
     // views, where the lung meets the aorta face-on; the lung at the edges of the
     // other TEE sectors and the transthoracic pleura are not mirrored here.
-    const mirAmp = (this.nearFieldCm || 0) < 0.5 && this.viewName === 'DESCAO' ? 0.38 : 0;
+    // (short axis and long axis alike: in the long axis the pleura runs parallel to
+    // the aorta and a second, fainter and blurred tube lies beyond it)
+    const mirAmp = (this.nearFieldCm || 0) < 0.5 && (this.viewName === 'DESCAO' || this.viewName === 'DESCAOLAX') ? 0.38 : 0;
     // the reflecting plane: tangent to the pleura on the beam that meets it most
     // squarely (well inside the line), as [x, y, nx, ny] in buffer px
     let mirP = null;
@@ -1656,6 +1668,14 @@ export class EchoView {
               const q = (depth - m * dl) / (sig * (1 + 0.3 * (m - 1))), g = amp * Math.exp(-q * q);
               if (m === 1) pl = g * spec * tp * gr; else al += g * sp * tp;
             }
+            // The line is a rough air interface, not a wire: besides the coarse
+            // lateral grain it carries the system's own speckle along its length
+            // (granular, of varying intensity), and it rings: a short comet-tail of
+            // reverberation clutter trails just beyond it, speckled and decaying
+            // over a few mm.
+            const sP = spk[idx] * 1.128;
+            pl *= 0.62 + 0.38 * sP;
+            if (depth > dl) pl += 0.22 * pleuraAmp * spec * tp * gr * sP * Math.exp(-(depth - dl) / 0.3);
             // 'dirty' acoustic shadow beyond the air: low-level reverberation clutter
             // (~ -40 dB, below tissue) that carries the system's speckle like any echo
             // (fully developed: the PSF-convolved speckle field, mean-normalised) — no
@@ -1664,7 +1684,7 @@ export class EchoView {
             // the beam grazes sends its echo away and leaves a darker, noisier shadow)
             // and fades slowly with distance beyond the line.
             const sN = spk[idx] * 1.128;
-            let haze = 0.007 * (0.35 + 0.65 * spec) * (0.45 + 0.55 * Math.exp(-(depth - dl) / 3)) * sN;
+            let haze = 0.007 * (0.35 + 0.65 * spec) * (0.6 + 0.4 * Math.exp(-(depth - dl) / 3)) * sN;
             // mirror image of the tissue in front of the pleura (TEE): the beam
             // reflects off the pleura, so the echo at depth d comes from the point
             // the reflected beam reaches, i.e. the image point mirrored across the
@@ -2461,6 +2481,8 @@ function specBeats(path) {
 // high-variance cell the mean of the broad spectrum still leans the flow's way,
 // so the hue follows the true direction (with a random magnitude), and only an
 // occasional cell wraps.
+// cell-to-cell scatter of the colour velocity estimate in laminar flow (fraction of the velocity, 1 SD)
+export const LAMINAR_MOTTLE = 0.12;
 export function dopplerColor(los, nyq, variance, jitter) {
   const raw = Number.isFinite(los) ? los : 0;
   const jit = Number.isFinite(jitter) ? jitter : 0;

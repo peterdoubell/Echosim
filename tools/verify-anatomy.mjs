@@ -1307,6 +1307,7 @@ function erodeSurvivors(S, k, r) {
     check('B-mode', `${nm}: posterior pericardial peak above the wall (median over beams)`, diffs.length > 5 ? diffs[diffs.length >> 1] : null, [8, 30], 'dB', `${diffs.length} beams`);
   }
   const norm = [], steep = [], ends = [];
+  let faded = 0;                                      // line ends lost in the neighbouring tissue speckle
   for (const nm of ['SUBCOSTAL', 'SSN', 'PLAX', 'A4C', 'A2C', 'PSAX_MV']) {
     const R = renderBmode(nm, ED, {}), L = R.lungD, NA = R.NA, dTh = 2 * R.half / NA;
     const pk = new Float32Array(NA).fill(-1);
@@ -1331,8 +1332,18 @@ function erodeSurvivors(S, k, r) {
       seg.sort((x, y) => x - y);
       const med = seg.length >= 8 ? seg[seg.length >> 1] : 0;
       if (med >= 130) {
-        if (a > 0 && pk[a] >= 0) ends.push([nm, a, dB(med - pk[a])]);
-        if (b < NA - 1 && pk[b] >= 0) ends.push([nm, b, dB(med - pk[b])]);
+        // (An end beam that is no brighter than the tissue speckle on the beam just
+        // outside the line, at the same depth, has faded out completely: what is
+        // measured there is the mediastinal tissue beside the lung, not the line.
+        // A dim line 14 cm deep in the suprasternal view is only ~8 dB above that
+        // speckle, so its ends cannot be 10 dB below it however they taper.)
+        const bg = (c, d0) => {
+          const th = -R.half + (c + 0.5) * dTh; let m = -1;
+          for (let d = d0 - 0.25; d <= d0 + 0.25; d += 0.02) { const q = beamSample(R, th, d); if (q && R.mask[q.idx]) m = Math.max(m, q.grey); }
+          return m;
+        };
+        if (a > 0 && pk[a] >= 0) { if (dB(pk[a] - bg(a - 1, L[a])) > 2) ends.push([nm, a, dB(med - pk[a])]); else faded++; }
+        if (b < NA - 1 && pk[b] >= 0) { if (dB(pk[b] - bg(b + 1, L[b])) > 2) ends.push([nm, b, dB(med - pk[b])]); else faded++; }
       }
       a = b;
     }
@@ -1340,7 +1351,47 @@ function erodeSurvivors(S, k, r) {
   const mean = (v) => v.reduce((x, y) => x + y, 0) / v.length;
   check('B-mode', 'pleural line: fall-off from < 25 deg to > 60 deg incidence', norm.length && steep.length ? dB(mean(norm) - mean(steep)) : null, [16, 60], 'dB', `${norm.length} / ${steep.length} beams (SUBCOSTAL SSN PLAX A4C A2C PSAX-MV)`);
   ends.sort((x, y) => x[2] - y[2]);
-  check('B-mode', 'pleural line: end beam below the segment median (weakest end)', ends.length ? ends[0][2] : null, [10, 60], 'dB', ends.length ? `${ends.length} ends, worst ${ends[0][0]} beam ${ends[0][1]}` : '');
+  check('B-mode', 'pleural line: end beam below the segment median (weakest end)', ends.length ? ends[0][2] : faded ? 60 : null, [10, 60], 'dB', (ends.length ? `${ends.length} ends, worst ${ends[0][0]} beam ${ends[0][1]}` : '') + (faded ? ` (${faded} ends at the tissue speckle level)` : ''));
+  {
+    // The lung margin has no geometric edges: in the views where the acoustic
+    // window's border crosses the sector, no 3 cm of the lung boundary (tissue
+    // grid, 1 mm cells, beyond the chest wall) is a straight line (same line-fit
+    // form as the liver-edge row); the PLAX pleural line behind the descending
+    // aorta is one smooth curve (no cusps in the per-beam pleural depth).
+    const lungEdgeFit = (view) => {
+      const g = sectorGrid(view, GED), B = [];
+      const at = (i, j) => { const c = g.cells.get(`${i},${j}`); return c && Math.hypot(c.u, c.v) > 2.5 ? c.t : -1; };
+      for (const [k, c] of g.cells) {
+        if (c.t !== TISSUE.LUNG || Math.hypot(c.u, c.v) <= 2.5) continue;
+        const [i, j] = k.split(',').map(Number);
+        for (const [a, b] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const n = at(i + a, j + b); if (n !== -1 && n !== TISSUE.LUNG) { B.push([c.u, c.v]); break; } }
+      }
+      let worst = 1e9, where = ''; const R = 1.5;
+      for (let k = 0; k < B.length; k += 2) {
+        const [cx, cy] = B[k], P = B.filter(([x, y]) => (x - cx) ** 2 + (y - cy) ** 2 < R * R);
+        if (P.length < 20) continue;
+        const mx = P.reduce((s, q) => s + q[0], 0) / P.length, my = P.reduce((s, q) => s + q[1], 0) / P.length;
+        let sxx = 0, syy = 0, sxy = 0;
+        for (const [x, y] of P) { sxx += (x - mx) ** 2; syy += (y - my) ** 2; sxy += (x - mx) * (y - my); }
+        const tr = sxx + syy, l1 = tr / 2 + Math.sqrt(Math.max(0, tr * tr / 4 - (sxx * syy - sxy * sxy)));
+        let e = [sxy, l1 - sxx]; if (Math.hypot(e[0], e[1]) < 1e-9) e = sxx > syy ? [1, 0] : [0, 1];
+        const el = Math.hypot(e[0], e[1]), u = [e[0] / el, e[1] / el];
+        let lo = 1e9, hi = -1e9, res = 0;
+        for (const [x, y] of P) { const s = (x - mx) * u[0] + (y - my) * u[1]; lo = Math.min(lo, s); hi = Math.max(hi, s); res = Math.max(res, Math.abs(-(x - mx) * u[1] + (y - my) * u[0])); }
+        if (hi - lo < 2 * R - 0.3) continue;
+        if (res < worst) { worst = res; where = `at (${cx.toFixed(1)}, ${cy.toFixed(1)}) cm`; }
+      }
+      return [worst === 1e9 ? null : worst, where];
+    };
+    for (const nm of ['PSAX', 'PSAX_MV', 'SUBCOSTAL']) {
+      const [w, where] = lungEdgeFit(TTE_VIEWS[nm] || EXTRA_VIEWS[nm]);
+      check('B-mode', `${nm}: straightest 3 cm of lung border (max line-fit residual)`, w, [0.15, 99], 'cm', where);
+    }
+    for (const nm of ['TG2C', 'TGLAX']) {
+      const [w, where] = lungEdgeFit(TEE_VIEWS[nm]);
+      check('B-mode', `${nm}: straightest 3 cm of pleural border (max line-fit residual)`, w, [0.15, 99], 'cm', where);
+    }
+  }
   {
     // speckle grain follows the beam geometry: the autocorrelation's major axis
     // lies along the depth arc (perpendicular to the beam), also at the fan edges
@@ -4837,6 +4888,49 @@ SECTION = 'Pathology';
   let sideT = 0;
   for (let j = 0; j < RT.SH; j++) if (RT.mask[j * RT.SW] || RT.mask[j * RT.SW + RT.SW - 1]) sideT++;
   check('B-mode', 'ME4C 16 cm (90 deg TEE sector): sector rows touching the buffer side edges', sideT, [0, 0], 'rows');
+  SECTION = sec0;
+}
+// (also rendered last, for the same reason) the PLAX pleural line is one smooth
+// curve; the descending-aorta long axis has its mirror image; laminar colour is mottled
+{
+  const sec0 = SECTION; SECTION = 'Normal';
+  {
+    const R = renderBmode('PLAX', ED, {}), L = R.lungD;
+    let d2 = 0, nb = 0;
+    for (let a = 1; a < R.NA - 1; a++) if (L[a - 1] < 1e8 && L[a] < 1e8 && L[a + 1] < 1e8) { nb++; d2 = Math.max(d2, Math.abs(L[a - 1] - 2 * L[a] + L[a + 1])); }
+    check('B-mode', 'PLAX pleural line: max |second difference| of per-beam depth', nb ? d2 : null, [0, 0.3], 'cm', `${nb} beams`);
+  }
+  {
+    // the long-axis view mirrors too: a second, fainter tube beyond the pleura. The
+    // mirrored lumen (the points beyond the plane whose mirror image is aortic
+    // lumen) is darker than the rest of the far field at the same range
+    const R = renderBmode('DESCAOLAX', ED, {}), M = R.mirP, W = R.SW, lum = [], rest = [];
+    if (M) for (let j = 0; j < R.SH; j++) for (let i = 0; i < W; i++) {
+      const p = j * W + i; if (!R.mask[p]) continue;
+      const dist = (i - M[0]) * M[2] + (j - M[1]) * M[3];
+      if (dist < 0.3 * R.pxPerCm || dist > 3 * R.pxPerCm) continue;           // 0.3-3 cm beyond the plane
+      if (R.depth[p] < R.lungD[Math.round(R.abin[p])] + 0.2) continue;
+      const th = Math.atan2(i - R.cx, j - R.apexY); if (Math.abs(th) > R.half - 0.2) continue;
+      const mx = Math.round(i - 2 * dist * M[2]), my = Math.round(j - 2 * dist * M[3]);
+      if (mx < 0 || mx >= W || my < 0 || my >= R.SH || !R.mask[my * W + mx]) continue;
+      (R.kind[my * W + mx] === TISSUE.AORTA ? lum : rest).push(R.grey[p]);
+    }
+    const mean = (v) => v.reduce((x, y) => x + y, 0) / v.length;
+    assert('B-mode', 'DESCAOLAX: mirror plane found on the pleura behind the aorta', !!M);
+    check('B-mode', 'DESCAOLAX: mirrored aortic lumen below the rest of the mirrored far field', M && lum.length > 200 && rest.length > 200 ? (mean(rest) - mean(lum)) / 255 * 55 : null, [6, 40], 'dB', `${lum.length} / ${rest.length} px`);
+  }
+  {
+    // laminar inflow is a mottled column, not a flat fill: coefficient of variation
+    // of the colour intensity (R + G + B) over the tricuspid inflow in the RV inflow view
+    const D = renderDoppler('RVIT', 0.56, {}, {}), v = [];
+    for (let q = 0; q < D.SW * D.SH; q++) {
+      if (!D.alpha[q] || (D.kind[q] !== TISSUE.RV && D.kind[q] !== TISSUE.RA)) continue;
+      v.push(D.rgb[q * 3] + D.rgb[q * 3 + 1] + D.rgb[q * 3 + 2]);
+    }
+    const m = v.length ? v.reduce((x, y) => x + y, 0) / v.length : 0;
+    const sd = v.length ? Math.sqrt(v.reduce((x, y) => x + (y - m) ** 2, 0) / v.length) : 0;
+    check('B-mode', 'RVIT inflow colour: coefficient of variation of the colour intensity', v.length > 300 ? sd / m : null, [0.05, 0.3], '', `${v.length} px`);
+  }
   SECTION = sec0;
 }
 
