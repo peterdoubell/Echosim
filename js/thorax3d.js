@@ -112,9 +112,14 @@ export function spineDist(l, a, s) {
 // the oesophagus and to the right of the arch to the carina; the right main
 // bronchus is short and steep, the left longer, passing under the arch and
 // over the left atrium towards the left hilum.
+// (The right pulmonary artery crosses IN FRONT of the right bronchus below the
+// carina, rising to the right hilum: the right main bronchus therefore runs to
+// the right and back, above and behind the artery, and its continuation (the
+// bronchus intermedius) descends behind it. Straight down and to the right from
+// the carina it ran through the artery's lumen where the artery reaches the hilum.)
 export const AIRWAY = {
   trachea: [[-2.7, -2.3, 16], [-3.0, -2.5, 10], [-3.0, -2.6, 6.2]], rT: 0.9,
-  right: [[-3.0, -2.6, 6.2], [-4.8, -3.2, 4.8]],
+  right: [[-3.0, -2.6, 6.2], [-4.3, -4.2, 5.5], [-5.3, -4.9, 3.8]],
   // (drawn to the point where it passes under the arch: beyond it the model's
   // arch, pulmonary bifurcation and descending aorta leave it no room)
   left: [[-3.0, -2.6, 6.2], [0, -1.6, 5.1]], rB: 0.6,
