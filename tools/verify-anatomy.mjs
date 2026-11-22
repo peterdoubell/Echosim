@@ -4496,6 +4496,14 @@ SECTION = 'Pathology';
     const sTr = hemoSummary(PATHS.tr), sNo = hemoSummary({});
     check(gV, 'severe TR: RA volume (maximum)', sTr.RAVmax, [100, 220], 'mL', `minimum ${sTr.RAVmin.toFixed(0)} mL`);
     check(gV, 'severe TR: RA v minus a', sTr.RAPvWave - sTr.RAPaWave, [3, 20], 'mmHg', `a ${sTr.RAPaWave.toFixed(1)}, v ${sTr.RAPvWave.toFixed(1)}, mean ${sTr.RAP.toFixed(1)}`);
+    {
+      // the low-pressure RV finishes relaxing first: the tricuspid valve opens
+      // before the mitral (RV isovolumic relaxation is shorter than the LV's)
+      const N = 2000, ev = {}, open = (v) => v > 0.1; let prev = geometryAt(1 - 1 / N, {}).valves;
+      for (let i = 0; i < N; i++) { const v = geometryAt(i / N, {}).valves; for (const nm of ['mitral', 'tricuspid']) if (open(v[nm]) && !open(prev[nm])) ev[nm] = i / N; prev = v; }
+      let d = ev.mitral - ev.tricuspid; if (d > 0.5) d -= 1; if (d < -0.5) d += 1;
+      check(gV, 'TVO precedes MVO', d * 833, [0, 40], 'ms');
+    }
     check(gV, 'normal RA: a minus v', sNo.RAPaWave - sNo.RAPvWave, [0, 3], 'mmHg', `a ${sNo.RAPaWave.toFixed(1)}, v ${sNo.RAPvWave.toFixed(1)}`);
     check(gV, 'PH: PASP minus RVSP', sP.PASP - sP.RVSP, [-3, 1], 'mmHg', `PASP ${sP.PASP.toFixed(1)}, RVSP ${sP.RVSP.toFixed(1)}`);
     // MOT-8: PH LV filling (ventricular interdependence, slow LV relaxation)
@@ -4576,6 +4584,9 @@ SECTION = 'Pathology';
   // the giant RA c-v wave of severe TR reverses systolic caval flow (the TR
   // right-atrial retune of the right-heart work item)
   assert(g, 'severe TR HV: systolic flow reversed (S < 0)', htr.Srev > htr.S, `S fwd ${htr.S.toFixed(2)}, reversed ${htr.Srev.toFixed(2)} m/s`);
+  // ... with a margin: the reversal is at least 1.5 x any forward flow before
+  // end-systole (the end-diastolic inflow that runs on until the c-v wave arrives)
+  check(g, 'severe TR HV: systolic reversal peak / forward systolic peak', htr.S > 0 ? htr.Srev / htr.S : 99, [1.5, 99], '', `S fwd ${htr.S.toFixed(2)}, reversed ${htr.Srev.toFixed(2)} m/s`);
   // pulmonary veins: velocity along a vein's axis ~1 cm up from its ostium,
   // sampled through the cycle (+ toward the LA)
   const pvTrace = (p) => {
@@ -4610,6 +4621,12 @@ SECTION = 'Pathology';
   // end-diastole: Ar stayed < 0.08 m/s, or E/A, DT and the diastasis nadir left
   // their rows. It needs the PA outflow routed through a compliant venous bed
   // into the LA (the pulmonary Windkessel is the right heart's).
+  // (Integration repair, same result on the merged model: an ostial vein node of
+  // 0.6-2 mL/mmHg gives Ar <= 0.07 m/s and takes the a-wave from 12.3 to 8-10 mmHg
+  // (E/A 2.4-3.1); with a stronger kick and more PA pulse Ar reaches 0.09-0.17 but
+  // E/A 2.2-4.5 and S/D 0.45-0.62; Rpv 0.03-0.05 gives Ar up to 0.16 with a
+  // diastasis nadir of 0.26-0.47; a compliant bed fed by the mean flow gives
+  // Ar <= 0.02. The LA fit has to be redone on a new vein structure.)
   KNOWN = true;
   check(g, 'normal PV: Ar', pn.Ar, [0.1, 0.35], 'm/s', 'pending circ');
   KNOWN = false;

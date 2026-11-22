@@ -51,7 +51,8 @@ const TR = 0.14;              // relaxation: activation decays back to zero
 // relax: RV activation decay time (cycle fraction; the LV's is TR), shorter than
 // the LV's: the RV only has to fall from ~25 to ~5 mmHg, so its isovolumic
 // relaxation is brief (~50 ms against the LV's ~75) and the tricuspid valve opens
-// within a few ms of the mitral.
+// ~7 ms before the mitral (relax 0.075; the pressure-loaded RV of pulmonary
+// hypertension or mitral stenosis relaxes more slowly, TRrv in rightHeartParams).
 // raLead: how far (cycle fraction) the RA booster peaks ahead of the LA's: 0.02,
 // ~17 ms, as in vivo (the sinus node is in the RA, which is activated 10-20 ms
 // before the LA). In this lumped model an AV valve shuts when its flow stops. The
@@ -61,7 +62,7 @@ const TR = 0.14;              // relaxation: activation decays back to zero
 // annular descent was modelled the RA kick had to lag the LA's, -0.02, to hold
 // the tricuspid valve open that long.)
 // A pathology may override it (p.raLead: the ASD's shunt calibration).
-export const RV_TIMING = { delay: 0.03, contract: 0.41, relax: 0.09, raLead: 0.02 };
+export const RV_TIMING = { delay: 0.03, contract: 0.41, relax: 0.075, raLead: 0.02 };
 const NSAMPLE = 240;          // samples stored per output cycle
 const STEPS = 3000;           // integration steps per cycle
 const NCYCLE = 60;            // cycles run to reach the limit cycle (the right heart's volumes settle slowly)
@@ -439,7 +440,7 @@ function rightHeartParams(path, g) {
   // one, so it still holds pressure as the LV starts to fill)
   if (path.rvpo) Object.assign(r, { Rpvr: 0.78, Ermax: 0.81, Ermin: 0.0898, V0rv: 26.6, Era: 0.0567, V0ra: 37, Atr: 0.0997, Cpa: 1.2,
     Zpa: 0.045, reflG: 1.0, reflT: 0.065, Lpa: 0.0009, TRrv: 0.12, aRa: 1.0 });
-  if (path.mitralStenosis) Object.assign(r, { Rpvr: ({ mild: 0.12, moderate: 0.22, severe: 0.40 })[g], Ermax: 0.425, Ermin: 0.0544, V0rv: 26, Cpa: 2.2, Atr: g === 'severe' ? 0.04 : 0 });
+  if (path.mitralStenosis) Object.assign(r, { Rpvr: ({ mild: 0.12, moderate: 0.22, severe: 0.40 })[g], Ermax: 0.425, Ermin: 0.0544, V0rv: 26, Cpa: 2.2, Atr: g === 'severe' ? 0.04 : 0, TRrv: 0.09 });
   // TR: the RV-RA gradient falls as the regurgitant volume swells the RA v-wave;
   // (review 12: the TR flows only in systole and isovolumic relaxation, simulate)
   // severe TR comes with a mildly raised PA pressure and a plethoric IVC (RAP ~12)
@@ -456,7 +457,11 @@ function rightHeartParams(path, g) {
     // reversed. With the annular-descent capacity of a competent valve the RA would
     // absorb the regurgitant volume at an almost flat pressure: v - a ~2.6 mmHg and
     // forward systolic hepatic flow, the picture of mild TR.)
-    severe: { Atr: 0.8, Era: 0.4, V0ra: 80, aRa: 0.1, raDesc: 0, V0rv: 23.5, Ermin: 0.065, Ermax: 0.55, Rpvr: 0.199 },
+    // (Rsv 0.012: the dilated cavae and hepatic veins of severe TR (IVC ~2.5 cm)
+    // resist less than normal veins, so the end-diastolic forward flow is small
+    // when the c-v wave arrives and the systolic reversal is well above any
+    // forward systolic flow: reversed / forward ~1.7.)
+    severe: { Atr: 0.9, Era: 0.4, V0ra: 80, aRa: 0.1, raDesc: 0, Rsv: 0.012, V0rv: 23.5, Ermin: 0.065, Ermax: 0.55, Rpvr: 0.199 },
   })[g]);
   if (path.dilated) Object.assign(r, ({
     borderline: { Ermax: 0.5, Ermin: 0.04 }, impaired: { Ermax: 0.4, Ermin: 0.055, V0rv: 40 },
