@@ -69,15 +69,18 @@ const CALC_NODULE_GAIN = 2.0, SCLEROTIC_GAIN = 1.4;
 // centre (cm, squared) — the cusps lie within ~1.5 cm of it (<= ~1 cm
 // downstream, <= the annular radius ~1.2 cm out)
 const THIN_GUARD_R2 = 1.7 * 1.7;
-// Spontaneous echo contrast: amplitude gain (x3..x27, mean ~x10, about +20 dB) of
-// LA blood in a smooth cloud pattern that swirls about the LA centre with the
-// cardiac phase, so the smoke drifts rather than flickering like the speckle.
+// Spontaneous echo contrast: amplitude gain (x1.5..x6, mean ~x3: +3.5 to +15.5 dB
+// over blood at -60 dB, so the densest wisps reach -44 dB and stay >= 16 dB below
+// myocardium at -28 dB) of LA blood in a smooth cloud pattern that swirls about
+// the LA centre with the cardiac phase, so the smoke drifts rather than
+// flickering like the speckle. Faint smoke with crisp LA walls: echogenicity
+// near that of tissue would be 'sludge' (pre-thrombotic) and reads as a mass.
 function secSmoke(x, y, z, G) {
   const c = G.A.la.c, a = 2 * Math.PI * G.phase * 0.5;
   const dx = x - c[0], dz = z - c[2], dy = y - c[1];
   const u = dx * Math.cos(a) - dz * Math.sin(a), w = dx * Math.sin(a) + dz * Math.cos(a);
   const f = 0.5 + 0.5 * Math.sin(2.3 * u + 0.7 + 0.9 * dy) * Math.cos(1.9 * w - 0.4) * Math.sin(1.7 * dy + 1.6 * u + 1.1);
-  return 3 + 24 * f * f;
+  return 1.5 + 4.5 * f * f;
 }
 // Legacy linear echogenicity (0..1, tuned for the old power-law display) mapped
 // onto the same log scale, for the body-wall layers and effusion lines.
