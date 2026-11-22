@@ -2091,8 +2091,13 @@ function dLAlumen(x, y, z, A, body = false, folds = true) {
   if (body) {
     if (e > 3.2) return e;
   } else if (e > 3.2) {                                                     // far away: only the vein tubes matter
-    const v = Math.min(e, dPV(x, y, z, A));
-    return v > 1.5 ? v : clearRPA(ssub(v, dAOarchDTA(x, y, z, A) - A.ao.wall - 0.15, 0.2), x, y, z, A);
+    // (and the appendage, whose tip lies beyond this bound: near it the full
+    // lumen below is evaluated, so the tip is not cut off where e reaches 3.2)
+    const dAp = dAppendage(x, y, z, A.la.aa, 0.22);
+    if (dAp > 1.2) {
+      const v = Math.min(e, dPV(x, y, z, A), dAp);
+      return v > 1.5 ? v : clearRPA(ssub(v, dAOarchDTA(x, y, z, A) - A.ao.wall - 0.15, 0.2), x, y, z, A);
+    }
   }
   const M = A.lv.M;                                                  // mitral orifice
   const ym = y - mitralLift(x, y, z, A);                             // (saddle deepens in systole)
@@ -2420,11 +2425,22 @@ function myoParts(x, y, z, A) {
   // (the LA wall also covers the mitral inflow funnel, which bulges beyond the
   // chamber ellipsoid at the annulus: no blood touches the pericardium there)
   if (la < 1.5) la = smin(la, laInflow(x, y - mitralLift(x, y, z, A), z, A) - 0.22, 0.6);
-  const sep = (la < 3.2 || ra < 4.0) ? iasAt(x, y, z, A).s : 0;
-  if (la < 3.2) {
-    d = smin(d, smin(smax(la, sep - 0.02, 0.1), dAppendage(x, y, z, A.la.aa, 0.22) - 0.15, 0.35), 0.4);
+  // (the tip of the tubular appendage lies up to ~4 cm from the body's surface:
+  // beyond the 3.2 cm bound its wall, and the pericardium over it, were cut off)
+  // (a sphere round the appendage first: this runs for every sample)
+  let dAp = 1e9;
+  if (la >= 3.2) {
+    const aa = A.la.aa, p0 = aa[0].a, p1 = aa[aa.length - 1].b;
+    const cx = 0.5 * (p0[0] + p1[0]) - x, cy = 0.5 * (p0[1] + p1[1]) - y, cz = 0.5 * (p0[2] + p1[2]) - z;
+    const R = 0.5 * Math.hypot(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]) + 2.6;
+    if (cx * cx + cy * cy + cz * cz < R * R) dAp = dAppendage(x, y, z, aa, 0.22) - 0.15;
+  }
+  const nearLA = la < 3.2 || dAp < 1.0;
+  const sep = (nearLA || ra < 4.0) ? iasAt(x, y, z, A).s : 0;
+  if (nearLA) {
+    d = smin(d, smin(smax(la, sep - 0.02, 0.1), la < 3.2 ? dAppendage(x, y, z, A.la.aa, 0.22) - 0.15 : dAp, 0.35), 0.4);
     tubes = dPV(x, y, z, A) - 0.1;
-  } else d = Math.min(d, la);
+  } else d = Math.min(d, la, dAp);
   if (ra < 4.0) {
     d = smin(d, smin(smax(ra, -sep - 0.02, 0.1), dAppendage(x, y, z, A.ra.aa, 0.3) - 0.15, 0.4), 0.4);
     const v = A.svc, iv = A.ivc;
@@ -2776,6 +2792,8 @@ export const BODY = {
 // epicardium by a virtual space (which an effusion opens up). Epicardial fat sits
 // in the AV and interventricular grooves.
 export const PERI = { gap: 0.1, thick: 0.15 };
+const COR_SHEATH = 0.45;                                 // fat round an epicardial coronary, from its lumen surface (cm)
+const PERI_SINUS = 1.4;                                  // widest gap between an atrium and a great artery with no parietal layer in it (cm)
 
 // Classify a point as blood / myocardium / vessel / surrounding tissue (valves &
 // effusion handled by the caller). Returns { code, echo }. `periOff` (>=0, cm)
@@ -2828,13 +2846,15 @@ export function bodyClassify(x, y, z, A, periOff = 0) {
   // myocardium / vessel walls: inside the epicardial body but outside every lumen
   const m = myoParts(x, y, z, A);
   // epicardial coronary arteries: arterial lumen, bright wall, a sheath of fat
-  if (m.all < 1.0 && m.all > -0.35) {
-    const dc = dCoronary(x, y, z, A, 0, 0.45);
-    if (dc < 0.45) {
+  let dsh = 1e9;                                           // to the surface of a coronary's fat sheath
+  if (m.all < 1.5 && m.all > -0.35) {
+    const dc = dCoronary(x, y, z, A, 0, COR_SHEATH + 0.3);
+    if (dc < COR_SHEATH) {
       if (dc < 0) return bc(BODY.AO, 0.03);
       if (dc < 0.06) return bc(BODY.VESSELWALL, 0.5);
       if (m.all > -0.05) return bc(BODY.FAT, 0.5);
     }
+    dsh = dc - COR_SHEATH;
   }
   // venous tubes (SVC, IVC, pulmonary veins, CS) have thin fibrous walls, not
   // muscle: a grazing cut through one must read as a faint line, not a solid mass
@@ -2882,13 +2902,19 @@ export function bodyClassify(x, y, z, A, periOff = 0) {
   // fluid inside it) starts outside it and never runs between the CS and the heart
   if (periOff > 0 && dcs < 0.35) return bc(BODY.FAT, 0.62);
   const mCore = periOff > 0 ? Math.min(m.core, dcs - 0.35) : m.core;   // (m is shared scratch: keep it)
-  if (below < 0.1 + periOff && mCore < off + PERI.thick + 0.3) {   // (an effusion sac bulges the tendon down)
+  if (below < 0.1 + periOff && (mCore < off + PERI.thick + 0.3 || (periOff === 0 && dsh < PERI.gap + PERI.thick))) {   // (an effusion sac bulges the tendon down)
     const dr = dAOroot(x, y, z, A) - A.ao.wall;
     const epi = Math.min(mCore, dr, dpa - A.pa.wall);
     // (not in the transverse sinus — the potential space squeezed between the
     // great arteries and the atria, where no parietal layer is seen)
     // nor in the interatrial groove between the two atria (only fat enters it)
-    const squeezed = periOff === 0 && (Math.max(mCore, Math.min(dr, dpa - A.pa.wall)) < 0.7 ||
+    // (The sinus proper lies between the arteries and the ATRIA, and there the two
+    // walls part further than between a ventricle and its own artery: the left
+    // atrium and its appendage lie up to ~1.1 cm from the pulmonary trunk and its
+    // bifurcation, and more in systole than in diastole. With one 0.7 cm limit a
+    // 2 cm arc of 'pericardium' appeared in that pocket in systole and vanished
+    // in diastole; PERI_SINUS is the limit where the nearest chamber is an atrium.)
+    const squeezed = periOff === 0 && (Math.max(mCore, Math.min(dr, dpa - A.pa.wall)) < (Math.min(dla, dra) < Math.min(dlv, drv) ? PERI_SINUS : 0.7) ||
       (dla < 2.0 && dra < 2.0));
     // The layer is a fixed ~1.5 mm in SPACE. The blended epicardial field is not
     // a true distance where two parts of the heart meet (its gradient drops on
@@ -2897,7 +2923,16 @@ export function bodyClassify(x, y, z, A, periOff = 0) {
     // along the gradient (value / |grad|) before it is tested. (An effusion's
     // sac, pushed well off the heart, is left as it is: there the field is
     // smooth and the ridges would only break the parietal line.)
-    if (epi > 0 && epi < off + PERI.thick && !squeezed) {
+    // The coronaries and their fat lie under the visceral layer: the parietal
+    // layer passes OUTSIDE a coronary's fat sheath, at the same offset from it as
+    // from the bare epicardium. (Measured from the epicardium alone the line fell
+    // inside the 4.5 mm sheath and was not drawn at all: wherever a coronary ran
+    // in the imaging plane the pericardium had a gap, which opened and closed as
+    // the vessel moved through the plane with the beat.)
+    const sp = periOff === 0 ? dsh - PERI.gap : 1e9;       // (to the parietal surface over a sheath)
+    if (sp < PERI.thick && !squeezed) {
+      if (sp > -0.02 && (epi >= off + PERI.thick || epi / epiGrad(x, y, z, A, epi) > off - 0.02)) return bc(BODY.PERI, 0.3);
+    } else if (epi > 0 && epi < off + PERI.thick && !squeezed) {
       const en = periOff > 0 ? epi : epi / epiGrad(x, y, z, A, epi);
       if (en < off + PERI.thick && en > off - 0.02) return bc(BODY.PERI, 0.3);
     }
