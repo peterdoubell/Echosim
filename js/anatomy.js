@@ -777,6 +777,9 @@ export function ivcOfRap(rap) {
 // systole (eccentricity index ES > ED); VOLUME overload (severe TR, ASD) flattens
 // it in diastole only, and its systolic recovery is the paradoxical septal motion.
 const gradeKey = (path) => (path.grade === 'mild' || path.grade === 'moderate' ? path.grade : 'severe');
+// tamponade: inspiratory diastolic septal flattening (fraction of the LV radius;
+// 0.4: an end-diastolic PSAX eccentricity index ~1.14 in inspiration, ~0.97 in expiration)
+const TAMP_SEPT_BOW = 0.4;
 export function rightHeartLoad(path = {}) {
   const g = gradeKey(path);
   const msPH = path.mitralStenosis && g === 'severe';           // secondary (post-capillary) PH
@@ -791,9 +794,15 @@ export function rightHeartLoad(path = {}) {
   // end-systole (Ryan et al., JACC 1985;5:918-27); review 12: the RV drawn at its
   // solved size needs 0.46 for an end-diastolic index of ~1.2)
   const vol = path.asd ? 1 : trVol;
+  // tamponade (review 12, MOT-2): ventricular interdependence inside the tense
+  // sac — on inspiration the venous surge into the RV pushes the septum into the
+  // LV in diastole and it swings back in systole and on expiration (the
+  // inspiratory share of a breath: hemodynamics respPath, 'insp' or a 'mix' blend)
+  const insp = path.tamponade ? (path.resp === 'insp' ? 1 : path.resp === 'mix' ? path.respW || 0 : 0) : 0;
   const septum = path.rvpo ? (kR) => 0.34 + 0.22 * kR   // (review 12: 0.34 at ED — the RV drawn at its solved size is a little smaller than the old fixed 1.3x)
     : msPH ? (kR) => 0.06 + 0.12 * kR
-    : vol ? (kR) => (path.asd ? 0.55 : 0.46) * vol * (1 - kR) : null;   // (the ASD's larger diastolic RV load)
+    : vol ? (kR) => (path.asd ? 0.55 : 0.46) * vol * (1 - kR)   // (the ASD's larger diastolic RV load)
+    : insp > 0 ? (kR) => TAMP_SEPT_BOW * insp * (1 - kR) : null;
   return { rvC, rvL, septum, msPH, trVol };
 }
 // Anterior systolic swing of the aortic root above its annulus (cm): gain x the LA reservoir filling

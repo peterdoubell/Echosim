@@ -5026,9 +5026,12 @@ SECTION = 'Pathology';
     // the free walls move in: the modelled indentation (RV in early diastole, RA
     // from late diastole into early systole), and the geometry honours it — a
     // point well inside the original free wall is no longer blood
-    const { tamponadeCollapse } = await import('../js/cardiac-model.js');
+    const { tamponadeCollapse, phaseOfTime, respPath, swingOffset, breathPath } = await import('../js/cardiac-model.js');
+    // (sampled through the case's own cycle — 110 bpm — uniformly in TIME: the
+    // share of the cycle is a share of its duration; phases reported are cardiac
+    // phases, phaseOfTime)
     let rvMax = 0, rvPh = 0, raN = 0; const NP = 40;
-    for (let i = 0; i < NP; i++) { const c = tamponadeCollapse(geometryAt(i / NP, TP)); if (c.rv > rvMax) { rvMax = c.rv; rvPh = i / NP; } if (c.ra > 0.15) raN++; }
+    for (let i = 0; i < NP; i++) { const ph = phaseOfTime(i / NP, TP), c = tamponadeCollapse(geometryAt(ph, TP)); if (c.rv > rvMax) { rvMax = c.rv; rvPh = ph; } if (c.ra > 0.15) raN++; }
     check(gT, 'RV free wall early-diastolic inward motion', rvMax, [0.3, 1], 'cm', `deepest at phase ${rvPh.toFixed(3)}`);
     assert(gT, 'RV collapse falls in early diastole', rvPh > 0.45 && rvPh < 0.7, `${rvPh}`);
     check(gT, 'RA free wall visibly inverted (> 1.5 mm) / cycle', raN / NP, [0.3, 0.6], '');
@@ -5044,6 +5047,130 @@ SECTION = 'Pathology';
     const pr = probe(rvPh, 'RV'), pa = probe(0.02, 'RA');
     check(gT, 'RV free-wall dent drawn: RV blood displaced along the free-wall axis', pr ? pr.depth : 0, [0.2, 1.2], 'cm', pr ? `modelled ${pr.d.toFixed(2)} cm` : 'no dent');
     check(gT, 'RA free-wall inversion drawn at the QRS: RA blood displaced', pa ? pa.depth : 0, [0.2, 1.2], 'cm', pa ? `modelled ${pa.d.toFixed(2)} cm` : 'no dent');
+    // ---- review 12 (MOT-2, PAT-9, MOT-9): sinus tachycardia, the respiratory
+    // B-mode with ventricular interdependence, the swinging heart with electrical
+    // alternans, and atrial filling preserved ----
+    const sI = hemoSummary(respPath(TP, 'insp')), sX = hemoSummary(respPath(TP, 'exp'));
+    check(gT, 'heart rate', sT.hr, [100, 130], 'bpm', `cycle ${(sT.cycle * 1000).toFixed(0)} ms, CO ${(sT.SV * sT.hr / 1000).toFixed(1)} L/min`);
+    {
+      const fs = await import('fs');
+      const mj = fs.readFileSync(new URL('../js/main.js', import.meta.url), 'utf8');
+      assert(gT, 'the tamponade case loads at its own heart rate (main.js preset)', /tamponade:\s*\{\s*flags:\s*\{[^}]*\bhr:/.test(mj));
+    }
+    check(gT, 'pulsus paradoxus (aortic systolic, exp minus insp)', sX.PaoSys - sI.PaoSys, [10, 30], 'mmHg',
+      `exp ${sX.PaoSys.toFixed(0)}/${sX.PaoDia.toFixed(0)}, insp ${sI.PaoSys.toFixed(0)}/${sI.PaoDia.toFixed(0)}, apnoea ${sT.PaoSys.toFixed(0)}/${sT.PaoDia.toFixed(0)} mmHg`);
+    check(gT, 'QtvA / QtvE in inspiration', sI.QtvA / sI.QtvE, [0.25, 1], '', `E ${sI.QtvE.toFixed(0)}, A ${sI.QtvA.toFixed(0)} mL/s`);
+    check(gT, 'QtvA / QtvE in expiration', sX.QtvA / sX.QtvE, [0.25, 1], '', `E ${sX.QtvE.toFixed(0)}, A ${sX.QtvA.toFixed(0)} mL/s`);
+    assert(gT, 'mitral A wave present in inspiration', !!sI.aPresent, `E/A ${sI.eaFlow != null ? sI.eaFlow.toFixed(2) : '-'} (expiration ${sX.eaFlow != null ? sX.eaFlow.toFixed(2) : '-'})`);
+    // at 110 bpm E and A stay two waves: after the E peak the inflow falls to a
+    // trough and the atrial kick lifts it again (the A peak above that trough, %
+    // of the trough), on each valve in each respiratory phase — not one wave fused
+    // across the short diastole. Sampled through the case's own cycle in time.
+    {
+      const { phaseOfTime: pot } = await import('../js/cardiac-model.js');
+      const lift = (P, key) => {
+        const N = 240, q = [];
+        for (let i = 0; i < N; i++) q.push(hemodynamics(pot(i / N, P), P)[key]);
+        let iE = -1;   // the first local maximum of the inflow after the valve opens (the E peak)
+        for (let i = Math.round(0.45 * N); i < N - 1; i++) if (q[i] > 5 && q[i] >= q[i - 1] && q[i] > q[i + 1]) { iE = i; break; }
+        if (iE < 0) return 0;
+        let iD = iE; for (let i = iE; i < N - 1 && q[i + 1] <= q[i]; i++) iD = i + 1;   // the trough after it
+        let A = 0; for (let i = iD; i < N; i++) A = Math.max(A, q[i]);
+        return q[iD] > 0 ? (A - q[iD]) / q[iD] * 100 : 0;
+      };
+      for (const [nm, P] of [['inspiration', respPath(TP, 'insp')], ['expiration', respPath(TP, 'exp')]]) {
+        check(gT, `tricuspid A wave above the E-wave trough, ${nm}`, lift(P, 'Qtv'), [4, 80], '%');
+        check(gT, `mitral A wave above the E-wave trough, ${nm}`, lift(P, 'Qmv'), [8, 80], '%');
+      }
+      check(gT, 'cardiac output (apnoea): the tachycardia holds it up as the SV falls', sT.SV * sT.hr / 1000, [3.5, 5.5], 'L/min', `SV ${sT.SV.toFixed(0)} mL x ${sT.hr} bpm; aortic ${sT.PaoSys.toFixed(0)}/${sT.PaoDia.toFixed(0)} mmHg`);
+      const { heartRate: hrOf, timeOfPhase: top } = await import('../js/cardiac-model.js');
+      assert(gT, 'heart-rate support is the identity at 72 bpm (normal case: rate, cycle, phase map)',
+        hrOf({}) === 72 && sN.cycle === 0.833 && [0, 0.2, 0.513, 0.7, 0.8, 0.95].every((x) => top(x, {}) === x));
+    }
+    // the drawn RA inversion starts once the atrium has contracted (after the A
+    // wave's onset at phase 0.80) and runs into systole: the onset of the longest
+    // visibly inverted (> 1.5 mm) run, in each respiratory state
+    {
+      const onset = (P) => {
+        const N = 120, inv = [];
+        for (let i = 0; i < N; i++) inv.push(tamponadeCollapse(geometryAt(phaseOfTime(i / N, P), P)).ra > 0.15);
+        let best = 0, on = null;
+        for (let i = 0; i < N; i++) if (inv[i] && !inv[(i + N - 1) % N]) { let n = 0; while (n < N && inv[(i + n) % N]) n++; if (n > best) { best = n; on = i; } }
+        return on == null ? null : { ph: phaseOfTime(on / N, P), frac: best / N };
+      };
+      const oA = onset(TP), oX = onset(respPath(TP, 'exp')), oI = onset(respPath(TP, 'insp'));
+      check(gT, 'RA inversion onset phase', oA ? oA.ph : null, [0.85, 1.0], '', `${oA ? (oA.frac * 100).toFixed(0) : 0} % of the cycle; expiration ${oX ? oX.ph.toFixed(3) : '-'}, inspiration ${oI ? oI.ph.toFixed(3) : '-'}`);
+      check(gT, 'RA inversion onset phase, expiration', oX ? oX.ph : null, [0.85, 1.0], '');
+    }
+    // inspiration: the RV fills more and the septum is pushed toward the LV in
+    // diastole (ventricular interdependence), swinging back on expiration — on the
+    // B-mode of each respiratory phase (no swing: the respiratory change alone)
+    {
+      const PI = respPath(TP, 'insp'), PX = respPath(TP, 'exp');
+      // (the RV cavity as traced: all of its lumen in the plane — the moderator
+      // band and the collapsing free wall can split it into pieces)
+      const rvArea = (P, ph) => {
+        const S = planeSample(TTE_VIEWS.A4C, geometryAt(ph, P), P, 0.1);
+        return components(S, (l) => l === TISSUE.RV).comps.reduce((m, x) => m + x.length, 0) * 0.01;
+      };
+      const aI = rvArea(PI, 0.6), aX = rvArea(PX, 0.6);
+      check(gT, 'A4C early-diastolic RV area, insp / exp', aX > 0 ? aI / aX : null, [1.15, 1.6], '', `insp ${aI.toFixed(1)}, exp ${aX.toFixed(1)} cm2 (phase 0.6); RVEDV ${sI.RVEDV.toFixed(0)} / ${sX.RVEDV.toFixed(0)} mL`);
+      const eiP = (P, ph) => {
+        const G = geometryAt(ph, P), S = planeSample(TTE_VIEWS.PSAX, G, P, 0.1);
+        const big = (pred) => components(S, pred).comps.reduce((m, c) => (c.length > m.length ? c : m), []);
+        const lv = big((l, k) => l === TISSUE.LV || (l === TISSUE.MYO && isPapAt(G, ptK(S, k)))), rv = big((l) => l === TISSUE.RV);
+        const cen = (cs) => { let x = 0, y = 0; for (const k of cs) { x += S.X(k % S.nx); y += S.D(Math.floor(k / S.nx)); } return [x / cs.length, y / cs.length]; };
+        const c = cen(lv), r = cen(rv), inLv = new Set(lv);
+        let u = [r[0] - c[0], r[1] - c[1]]; const L = Math.hypot(u[0], u[1]); u = [u[0] / L, u[1] / L];
+        const chord = (d) => {
+          let n = 0;
+          for (let t = -6; t <= 6; t += 0.02) {
+            const x = c[0] + d[0] * t, y = c[1] + d[1] * t, i = Math.round((x + S.X(0) * -1) / S.step), j = Math.round(y / S.step);
+            if (i >= 0 && i < S.nx && j >= 0 && j < S.nd && inLv.has(j * S.nx + i)) n++;
+          }
+          return n * 0.02;
+        };
+        return chord([-u[1], u[0]]) / chord(u);
+      };
+      const eI = eiP(PI, 0.99), eX = eiP(PX, 0.99);
+      check(gT, 'PSAX diastolic eccentricity index, insp minus exp', eI - eX, [0.1, 0.4], '', `insp ${eI.toFixed(2)}, exp ${eX.toFixed(2)} (end-diastole)`);
+      // across a breath the B-mode moves smoothly from one respiratory state to
+      // the next (breathPath): no jump in LV volume at a beat boundary
+      const v0 = hemodynamics(0.999, breathPath(TP, 0, 0.999)).Vlv, v1 = hemodynamics(0, breathPath(TP, 1, 0)).Vlv;
+      check(gT, 'B-mode LV volume step across the exp -> insp beat boundary', Math.abs(v1 - v0), [0, 2], 'mL', `${v0.toFixed(1)} -> ${v1.toFixed(1)} mL (insp EDV ${sI.EDV.toFixed(0)}, exp EDV ${sX.EDV.toFixed(0)})`);
+    }
+    // swinging heart: the heart moves within the fixed sac with a two-beat period;
+    // the parietal pericardium stays put while the fluid thins on one side and
+    // thickens on the other; the ECG voltage alternates with it
+    {
+      const sw0 = swingOffset(TP, 0, 0), sw1 = swingOffset(TP, 1, 0);
+      check(gT, 'heart translation between alternate beats', Math.hypot(...sub(sw0, sw1)), [0.5, 1.5], 'cm');
+      // drawn: along the swing axis through the LV centre, the epicardium-to-sac
+      // distance (the fluid) on either side, beat 0 vs beat 1 at the same phase
+      const G0 = geometryAt(0, TP), G1 = geometryAt(0, TP);
+      G0.swing = swingOffset(TP, 0, 0); G1.swing = swingOffset(TP, 1, 0);
+      const ax = unit(sub(sw1, sw0)), c0 = G0.A.lv.c;
+      const fluid = (G, sgn) => {
+        let n = 0, last = -1;
+        for (let t = 0; t < 7; t += 0.02) { const q = add(c0, mul(ax, sgn * t)); if (classify(q[0], q[1], q[2], G, TP).tissue === TISSUE.PERICARDIUM) { n++; last = t; } }
+        return { thick: n * 0.02, outer: last };
+      };
+      const a0 = fluid(G0, 1), a1 = fluid(G1, 1), b0 = fluid(G0, -1), b1 = fluid(G1, -1);
+      check(gT, 'swing: fluid thickness change on the swing side between alternate beats', a0.thick - a1.thick, [0.4, 1.4], 'cm', `swing side ${a0.thick.toFixed(2)} -> ${a1.thick.toFixed(2)}, far side ${b0.thick.toFixed(2)} -> ${b1.thick.toFixed(2)} cm`);
+      check(gT, 'swing: the parietal sac stays (outer edge of the fluid, alternate beats)', Math.max(Math.abs(a0.outer - a1.outer), Math.abs(b0.outer - b1.outer)), [0, 0.1], 'cm');
+      // electrical alternans: lead II QRS amplitude of alternate beats
+      const { Heartbeat } = await import('../js/electrophysiology.js');
+      const h = new Heartbeat(); h.setPathology(TP); h.setHR(sT.hr);
+      const amp = new Map();
+      for (let i = 0; i < 2000 * 5; i++) {
+        h.advance(1 / 2000); const v = h.leads().II, b = h._beats.reduce((m, x) => (x.t <= h.time + 1e-9 ? x : m), h._beats[0]);
+        if (h.time - b.t < 0.05 && b.n > 1) amp.set(b.n, Math.max(amp.get(b.n) || 0, v));
+      }
+      const ev = [], od = [];
+      for (const [n, v] of amp) (n % 2 ? od : ev).push(v);
+      const mean = (a) => a.reduce((x, y) => x + y, 0) / Math.max(1, a.length);
+      check(gT, 'ECG QRS amplitude ratio, alternate beats', mean(ev) > 0 ? mean(od) / mean(ev) : null, [0.7, 0.9], '', `lead II R ${mean(ev).toFixed(2)} / ${mean(od).toFixed(2)} mV over ${amp.size} beats`);
+    }
     // the plain effusion is haemodynamically the normal heart
     const sE = hemoSummary({ effusion: true });
     assert(gT, 'plain effusion preset matches the normal circulation', ['EDV', 'SV', 'PaoSys', 'RAP', 'RVSP', 'eaFlow'].every((k) => Math.abs(sE[k] - sN[k]) < 1e-9));
@@ -5117,11 +5244,13 @@ SECTION = 'Pathology';
     // through the case's tricuspid orifice (a breath does not resize the annulus)
     {
       const TPt = { effusion: true, tamponade: true }, sTt = hemoSummary(TPt);
+      const { phaseOfTime } = await import('../js/cardiac-model.js');
       const sp = trace('A4C', TPt, 'tvTips'), n = sp.cols, nb = sp.beats || 1, E = [];
       for (let b = 0; b < nb; b++) {
         let m = 0;
         for (let c = Math.floor(b * n / nb); c < Math.floor((b + 1) * n / nb); c++) {
-          const ph = (c - b * n / nb) / (n / nb);
+          // (the trace runs in time; its E window in cardiac phase, as the solved E: phaseOfTime)
+          const ph = phaseOfTime((c - b * n / nb) / (n / nb), TPt);
           if (ph > 0.45 && ph < 0.8) m = Math.max(m, Math.abs(sp.vs[c]));
         }
         E.push(m);

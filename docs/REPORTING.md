@@ -432,8 +432,8 @@ your own write-up.
 | Dilated cardiomyopathy | 1. Severely impaired LV systolic function, LVEF 27%. 2. Severely dilated LV (LVEDVi 120 mL/m²). 3. Moderate functional mitral regurgitation (RF 33%). 4. Dilated left atrium (LAVi 67 mL/m²). 5. RV dilatation (RVD1 48 mm) with impaired RV systolic function (TAPSE 10 mm, FAC 20%). |
 | Regional wall motion abnormality | 1. Impaired LV systolic function, LVEF 41%. 2. Regional wall motion abnormality: septal and apical hypokinesis (LAD territory). |
 | Pericardial effusion | 1. Large pericardial effusion (2.3 cm). |
-| Cardiac tamponade | 1. Large pericardial effusion (2.4 cm) with echocardiographic features of tamponade (RA inversion, RV diastolic collapse, plethoric IVC, mitral E variation 32%, tricuspid E 48%). Tamponade is a clinical diagnosis. |
-| Tricuspid regurgitation | 1. Severe tricuspid regurgitation (TR Vmax 2.5 m/s). 2. RV dilatation (RVD1 53 mm). |
+| Cardiac tamponade | 1. Large pericardial effusion (2.5 cm) with echocardiographic features of tamponade (RA inversion, RV diastolic collapse, plethoric IVC, mitral E variation 28%, tricuspid E 46%). Tamponade is a clinical diagnosis. |
+| Tricuspid regurgitation | 1. Severe tricuspid regurgitation (TR Vmax 2.4 m/s). 2. RV dilatation (RVD1 52 mm). |
 | Pulmonary hypertension | 1. High echocardiographic probability of pulmonary hypertension (TR Vmax 4.3 m/s, PASP ~89 mmHg). 2. RV dilatation (RVD1 48 mm) with impaired RV systolic function (TAPSE 15 mm, FAC 33%). |
 | Atrial septal defect | 1. Secundum ASD (Qp:Qs 1.7). 2. RV dilatation (RVD1 57 mm). |
 | Ventricular septal defect | 1. Mildly dilated LV (LVEDVi 83 mL/m²). 2. Dilated left atrium (LAVi 39 mL/m²). 3. Restrictive muscular VSD (Qp:Qs 1.3). |
@@ -458,11 +458,17 @@ A few reporting points from these cases:
 - **Aortic stenosis, diastole.** The concentric LVH relaxes slowly: E/A ~0.8,
   DT ~270 ms, IVRT ~110 ms, with a vigorous atrial kick and an enlarged LA. That
   is grade I diastolic dysfunction, not a normal filling pattern.
-- **Cardiac tamponade.** Pericardial pressure (~13 mmHg) is transmitted to every
-  chamber. The RA free wall inverts from late diastole into early systole (about
-  40% of the cycle) and the RV free wall is pushed in in early diastole. The IVC
-  is plethoric (RAP ~15 mmHg). The PW trace shows three beats across a breath:
-  mitral E falls about 32% in inspiration while tricuspid E rises about 48%.
+- **Cardiac tamponade.** Pericardial pressure (~14 mmHg) is transmitted to every
+  chamber, so the diastolic pressures equalise (RAP ~15 mmHg). The case runs in
+  sinus tachycardia (110 bpm), which holds the cardiac output (~4.2 L/min) as the
+  stroke volume falls (~38 mL); the small LV stays hyperdynamic (LVEF ~57%). The
+  RA free wall inverts from the end of atrial contraction into systole (about 40%
+  of the cycle) and the RV free wall is pushed in in early diastole. The IVC is
+  plethoric. The PW trace shows three beats across a breath: mitral E falls about
+  28% in inspiration while tricuspid E rises about 46%, and at this rate E and A
+  stay two waves on both valves. On the B-mode the septum shifts toward the LV on
+  the inspiratory beat (pulsus paradoxus ~27 mmHg in the model), and the heart
+  swings in the fluid every other beat, with electrical alternans on the ECG.
 - **Right-heart pressures.** RV, PA and RA pressures are solved by the
   circulation, so the TR Vmax, the RAP behind the IVC and the VSD gradient all
   follow from the same right heart. In severe DCM the failing RV raises RAP to
