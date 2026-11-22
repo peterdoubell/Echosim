@@ -1695,7 +1695,7 @@ const JET_LEN = { mild: 1.6, moderate: 3.0, severe: 4.6 };
 // restrictive VSD: a ~0.5 cm vena contracta, a flame of ~12 deg half-angle,
 // reaching ~3.5 cm from the defect (2-4 cm into the RV)
 const VSD_JET_PARAMS = { vc: 0.25, spread: 0.22, L: 1.8, pisa: 0.3, pisaR: 1.5, wallAttach: 1.4, flow: FLOW.VSD_JET };
-const VSD_JET_LEN = 2.6;
+const VSD_JET_LEN = 2.8;
 const _negAxes = new WeakMap();
 function negAxis(a) { let n = _negAxes.get(a); if (!n) { n = [-a[0], -a[1], -a[2]]; _negAxes.set(a, n); } return n; }
 
