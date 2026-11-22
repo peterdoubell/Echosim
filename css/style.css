@@ -144,6 +144,10 @@ body {
 
 .spectral-wrap { padding: 0 10px 10px; }
 .sp-label { font-size: 10px; color: var(--muted); display: block; margin-bottom: 3px; }
+.trace-ctl { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; font-size: 11px; color: var(--muted); flex-wrap: wrap; }
+.trace-ctl select, .trace-ctl button { font-size: 11px; padding: 2px 6px; width: auto; }
+.trace-ctl #sniffBtn { margin-left: auto; }
+#spectral.mm-cal { cursor: crosshair; }
 #spectral { width: 100%; height: 100px; background: #04060a; border-radius: 6px; display: block; }
 
 /* ---------- console ---------- */
@@ -287,6 +291,8 @@ button.small { padding: 6px; font-size: 12px; margin-top: 8px; }
 .severity-ctl.hidden { display: none; }
 .modality-ctl { margin-bottom: 8px; }
 #teeBtns.hidden, #viewBtns.hidden { display: none; }
+/* the TEE probe panel (omniplane, advance, turn, flex, spectral site) only for TEE views */
+#teeProbeCtl.hidden, #teeSiteRow.hidden { display: none; }
 
 /* ---------- haemodynamics: PV loop + readout ---------- */
 .pv-wrap { background: var(--panel-2); border-radius: 8px; padding: 6px; margin-bottom: 8px; }

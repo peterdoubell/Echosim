@@ -83,6 +83,12 @@ const BS = _roll([0.775, 0.500, 0.386]);    // patient superior
 export const BODY_AX = {
   L: BL, R: mul(BL, -1), P: BP, A: mul(BP, -1), S: BS, I: mul(BS, -1),
 };
+// Body coordinates of a point: cm to the patient's left of the mid-sagittal plane
+// (p . L = MIDLINE), anterior and superior. The great vessels beyond the root lie
+// in the mediastinum, so their landmarks are laid out in this frame.
+const MIDLINE = -2.0;                                  // p . L of the body mid-sagittal plane
+const bodyAt = (l, a, s) => add(add(mul(BL, l + MIDLINE), mul(BODY_AX.A, a)), mul(BS, s));
+const bodyDir = (l, a, s) => unit(add(add(mul(BL, l), mul(BODY_AX.A, a)), mul(BS, s)));
 
 // ---- landmarks (end-diastolic reference geometry) --------------------------
 // LV: a truncated prolate profile about x = z = 0. ED cavity length 8.3 cm
@@ -121,7 +127,11 @@ const D_AO0 = unit([A0[0], 0, A0[2]]);
 const U_AO = unit(add(mul([0, 1, 0], Math.cos(AO_TILT)), mul(D_AO0, Math.sin(AO_TILT))));
 // the Ao/LA M-mode line: perpendicular to the root, pointing away from the chest wall
 const AO_LA_DIR = unit(add(mul([0, 1, 0], Math.sin(AO_TILT)), mul(D_AO0, -Math.cos(AO_TILT))));
-const AO = { annR: 1.15, sinusR: 1.65, stjR: 1.4, ascR: 1.5 };  // d 2.3 / 3.3 / 2.8 / 3.0
+// annulus, sinus (max, at the cusp centres), sino-tubular junction, ascending:
+// d 2.3 / 3.3 / 2.8 / 3.0 (stjR is the calibre at which the root cone meets the
+// tubular aorta; the sino-tubular ridge, STJ_RIDGE, narrows the lumen at the
+// junction itself to d ~2.5)
+const AO = { annR: 1.15, sinusR: 1.65, stjR: 1.4, ascR: 1.5 };
 // LV outflow tract: from the anteroseptal LV cavity up to the aortic annulus,
 // d 2.2 cm, running close to the septum.
 const LVOT0 = [-0.95, -2.1, 0.55];
@@ -150,9 +160,16 @@ const TV_R = 1.7;
 // PSAX-at-aortic-valve frame: looking up the root axis from the apex, anterior
 // (toward the probe) up, patient-left to the right. Used to place the pulmonary
 // valve and RVOT in the positions the PSAX-AV view shows them.
-// root frame (cusps, PV, coronary ostia) is rigid with the heart: unrolled anterior
+// The root frame (cusps, PV, coronary ostia) is built on the BODY anterior (the
+// rolled axes the views use), so 12 o'clock of this frame is 12 o'clock on the
+// PSAX-AV screen: closed commissures at ~2 / 10 / 6 o'clock and the infundibulum
+// over the front of the root at ~11-12 o'clock (so the PLAX plane cuts the RVOT
+// in front of the root). Built on the UNROLLED anterior it was turned ~31 deg
+// about the root. _ANT0 (LM.ANT_HEART) stays the unrolled heart anterior: the
+// short-axis probes use it.
 const _ANT0 = mul(BP0, -1);
-const E_ANT = unit(sub(_ANT0, mul(U_AO, dot(_ANT0, U_AO))));
+const _ANTB = mul(BP, -1);
+const E_ANT = unit(sub(_ANTB, mul(U_AO, dot(_ANTB, U_AO))));
 const E_SCR = unit(cross(U_AO, E_ANT));
 const avFrame = (deg, r, h) => {
   const a = deg * Math.PI / 180;
@@ -161,31 +178,60 @@ const avFrame = (deg, r, h) => {
 // Pulmonary valve: anterior, leftward and ~1.2 cm higher than the aortic valve
 // (~1-2 o'clock in PSAX-AV). The RVOT arcs over the front of the aortic root from
 // the tricuspid side (~10 o'clock) to it — the RV "wraps" the aorta.
-const PV0 = avFrame(58, 3.05, 1.25);
+const PV0 = avFrame(26.46, 3.05, 1.25);            // the same world point as before the frame re-base
 const PV_R = 1.1;                                    // annulus d 2.2
 // Main PA: from the pulmonary valve it courses POSTERIORLY along the left of the
-// aortic root (screen-right in PSAX-AV) to bifurcate at about the depth of the
-// LA, just above its roof (the RPA then passes behind the ascending aorta, over
-// the LA roof) — the PSAX-AV view of the trunk, its bifurcation and the RPA.
-const U_PA = unit(add(add(mul(BS, 0.1), BP), mul(BL, 0.1)));
-const PA_BIF = mad(PV0, U_PA, 4.4);
-// the RPA passes to the right BEHIND the ascending aorta and SVC, beneath the arch:
-// it leaves the underside of the bifurcation and dips onto the LA roof (where the
-// suprasternal plane cuts it, the LA a few mm beneath), then runs level to the
-// right hilum over the right upper pulmonary vein (two segments)
-const U_RPA = unit(add(add(mul(BODY_AX.R, 0.85), mul(BP, 0.45)), mul(BS, -0.5)));
-// (the hilar segment turns more directly rightward and ends at the hilum 3.2 cm
-// from its origin: running on further back, it crossed the PLAX / APLAX plane
-// and was cut as a second great-vessel circle beyond the ascending aorta)
-const U_RPA2 = unit(add(add(mul(BODY_AX.R, 0.85), mul(BP, 0.3)), mul(BS, 0.1)));
+// aortic root (screen-right in PSAX-AV), a little up and to the left, to divide
+// in the concavity of the aortic arch, above the LA roof and in front of the
+// left main bronchus (2.2 cm left of the midline): the PSAX-AV view of the trunk,
+// its bifurcation and the branch origins. Its LPA then passes under the arch,
+// in front of the descending aorta, and its RPA dips onto the LA roof and runs to
+// the right behind the ascending aorta and the SVC.
+// The valve and the infundibulum face along U_PA (back, a little up and left);
+// above the sinuses the trunk bends ~17 deg further up and to the left, so it is
+// 4.2 cm long (adult 4-5 cm) and divides high in the arch concavity:
+// the apical two-chamber plane then cuts ONE oval of trunk beyond the appendage
+// (not the bifurcation and both branch origins), and the left AV groove between
+// the LV base and the trunk is free for the appendage.
+const PA_BIF = bodyAt(2.2, -1.2, 4.8);
+const U_PA = unit(sub(bodyAt(1.6, -0.9, 3.8), PV0));
+// The RPA leaves the underside of the bifurcation and dips back onto the LA roof
+// (RPA_M, where the suprasternal plane cuts it, the LA a few mm beneath), then
+// runs to the right hilum (RPA_E, 5.3 cm right of the midline) behind the
+// ascending aorta and the SVC, over the right upper pulmonary vein and under the
+// arch, rising ~1 cm: it crosses the parasternal long-axis plane (which rises
+// toward the patient's right) beyond the sides of the PLAX and A3C sectors.
+// (Back onto the posterior LA roof, rather than straight to the right, it crosses
+// the apical two-chamber plane steeply, as one small round section.)
 const RPA_O = mad(PA_BIF, BS, -0.8);
-const RPA_M = mad(RPA_O, U_RPA, 1.0);
-const RPA_E = mad(RPA_M, U_RPA2, 2.2);
-const U_LPA = unit(add(add(mul(BL, 0.6), mul(BP, 0.7)), mul(BS, 0.25)));
+const RPA_M = bodyAt(1.2, -2.5, 2.7);
+const RPA_E = bodyAt(-5.6, -2.8, 4.6);
+const U_RPA = unit(sub(RPA_M, RPA_O));
+// The LPA's first 1.9 cm runs close to the root's short-axis plane (to the left
+// and a little back; U_LPA is taken perpendicular to the root axis and then
+// tipped 19 deg caudally, the short-axis plane itself climbing steeply to the
+// left and back): the standard PSAX-AV shows both branch origins ('trousers')
+// without tipping the probe, and the branch stays ~0.2 cm clear of the underside
+// of the arch. It then arches over the left main bronchus and descends to the
+// left hilum (LPA_E), under the distal arch and in front of the descending aorta.
+const U_LPA = (() => { const u = unit(add(add(mul(BL, 0.9), mul(BP, 0.3)), mul(BS, 0.1))); return unit(mad(unit(sub(u, mul(U_AO, dot(u, U_AO)))), U_AO, -0.35)); })();
+const LPA_K = mad(PA_BIF, U_LPA, 1.9);
+const LPA_E = bodyAt(5.2, -1.8, 4.4);
 // (the infundibulum is separated from the LVOT / aortic root by the muscular
 // outlet septum, so on PLAX its centre lies ~3.4 cm in front of the aortic-root
 // centre, clear of the basal LV)
-const RVOT_PTS = [avFrame(132, 3.4, -1.0), avFrame(90, 4.1, 0.5), mad(PV0, U_PA, -0.25)];
+// In the root frame (on the body axes) the outflow channel starts in the RV
+// inflow beneath the tricuspid annulus (165 deg, ~9.5 o'clock; the valve itself
+// lies at ~147 deg) and runs forward under the supraventricular crest, and the
+// mid-infundibulum arches over the front of the root at ~12.3 o'clock (80 deg):
+// it lies in the PLAX plane (0.5 cm off it), so the PLAX beam through the aortic
+// valve crosses 2-3 cm of RVOT before the anterior root wall, and in the ME RV
+// inflow-outflow plane the inflow and the outflow are one chamber. (Toward
+// 12 o'clock or higher, the infundibulum fills the anterior edge of the A3C
+// sector; lower, it splits the ME RV inflow-outflow RV in two. Started further
+// forward, at ~100-130 deg, the channel leaves the basal RV crescent of the
+// mitral-level PSAX at end-systole.)
+const RVOT_PTS = [avFrame(165, 3.4, -1.0), avFrame(80, 4.1, 0.2), mad(PV0, U_PA, -0.25)];
 
 // Atria. Each sits on its (moving) AV annulus with a roof fixed in the chest, so
 // the systolic descent of the AV plane STRETCHES them: that is how the atrial
@@ -206,7 +252,7 @@ const RA_FLOOR0 = add(T0, [0.45, 0.1, -0.2]);
 const LA_ES = { len: 5.0, w1: 1.55, w2: 1.75 };       // A4C major 5.0, (cut) minor ~4.0, PLAX AP ~3.4
 // the LA body sits back along the Ao/LA line, behind the root (PLAX AP ~3.3 cm)
 const LA_POST = 0.8;
-const RA_ES = { len: 4.0, w1: 2.15, w2: 1.9 };       // A4C major ~4.6, (cut) minor ~4.1, area ~17.9 cm2
+const RA_ES = { len: 4.0, w1: 1.95, w2: 1.9 };       // A4C major ~4.6, (cut) minor ~3.6, area ~17.4 cm2 (ES): ~10 % smaller than the LA
 // Roofs follow part of their annulus's excursion (the atria are not pinned),
 // placed so the end-systolic floor-to-roof length is exactly the ES value above.
 // The LA roof follows only 12 %: the annular descent then stretches the LA long
@@ -229,8 +275,14 @@ const TV_SEPT_FRAC = TV_SEPT_REF / TAPSE_REF;
 const RA_FLOOR_ES = TV_SEPT_REF + 0.5 * TV_FW;
 // the RA body lies right-posterior of the aortic root: the non-coronary sinus
 // indents only its anteromedial wall, it does not sit in the chamber's middle
+// (RA_POST stays 1.0: moving the body forward to 0.5-0.6 cm shrinks the RA in the
+// A4C and the ME4C, and leaves it unchanged (~3.2 cm2 at ED for RA_POST 0-1.5) in
+// an apex-aimed, mitral-centred ME4C, which cuts the RA only at its edge)
 const RA_POST = 1.0;
-const RA_LAT = 0.2;
+// RA_LAT: the body's offset along e1 (toward the septum); with the septal
+// anchor the free wall then sits closer in, so the normal RA reads ~10 %
+// smaller than the LA in the A4C (ASE: RA area <= 18 cm2) without shortening it
+const RA_LAT = 0.4;
 const RA_AWAY = (() => {
   const mid = mad(RA_FLOOR0, A_RA, 2.0), root = mad(A0, U_AO, 1.0);
   const v = sub(mid, root);
@@ -251,7 +303,8 @@ const FOSSA0 = [-2.33, 1.65, -0.8];
 const SEPT_V = unit(cross(IAS_N, unit(sub(BS, mul(IAS_N, dot(BS, IAS_N))))));
 const ASD_HOLE = { up: 0.72, bk: 0.15, r: 0.39, rb: 1.0 };   // ASD centre offset in the septal frame (cm); half-heights up/down and front/back
 const IAS = {
-  tLimbus: 0.16, tFossa: 0.05, rFossa: 0.6,
+  // half-thicknesses: a ~6 mm muscular limbus round a ~1 mm fibrous fossa membrane
+  tLimbus: 0.27, tFossa: 0.05, rFossa: 0.6,
   pen: { la: 0.5, ra: 1.3 },                          // septal-face overlap across the plane (cm)
   fossaC: sub(FOSSA0, mul(IAS_N, dot(sub(FOSSA0, IAS_P), IAS_N))),
 };
@@ -274,6 +327,10 @@ const IAS = {
 // SVC -> IVC, svBulge off the septum, its upper end svFwd forward along the
 // septum so the RA covers the septum up to the SVC); flare*: the SVC orifice
 // funnel toward the tricuspid valve.
+// SVC course: the lower segment (cm, straight up the caval line), the height of
+// the SVC top above its orifice (cm), and the side-to-side distance of the top to
+// the patient's right of the ascending-aorta top (cm, centre to centre)
+const SVC_LOW = 1.8, SVC_H = 3.9, SVC_SIDE = 2.8;
 const CAVA = {
   svcSd: 1.0, svcV: 0.5, svcUp: 1.2, svcR: 0.8, aoGap: 0.15,
   ivcSd: 0.95, ivcV: -1.0, ivcTilt: 0.25,
@@ -286,16 +343,22 @@ const CAVA = {
 // PLAX it is the round echo-free structure just behind the atrioventricular
 // groove — the landmark that separates a pericardial effusion (tracks ANTERIOR
 // to it) from a left pleural effusion (posterior to it).
-// beyond the sino-tubular junction the ascending aorta turns cranially (it lies
-// just right of the sternum, not far out to the right)
-// beyond the STJ the ascending aorta runs almost straight up, just right of the
-// sternum (a body-fixed direction, independent of the root's tilt)
-const U_ASC = unit(add(add(mul(BS, 0.85), mul(BODY_AX.R, 0.15)), mul(BODY_AX.A, 0.2)));
+// The vessels beyond the root are laid out in BODY coordinates — cm to the
+// patient's left of the mid-sagittal plane (MIDLINE), anterior, superior — since
+// they are fixed in the mediastinum, not to the beating heart.
+// Beyond the sino-tubular junction the ascending aorta turns from the root's
+// (rightward) axis onto a course straight up and a little forward behind the
+// sternum: one evenly curved tube (radius ~3 cm, no kink at the STJ) whose
+// rightmost point, ~2.7 cm right of the midline, is its top; the arch then curves
+// back to the LEFT from there, so the head vessels arise at and left of the
+// midline. (The root axis points mostly to the right, so a gentler or later turn
+// carried the ascending aorta ~3.2 cm right and the arch with it.)
+const U_ASC = bodyDir(0, 0.3, 0.95);
 const AO_STJ = mad(A0, U_AO, 2.1);
 // The ascending aorta leaves the sino-tubular junction along the root axis and
 // turns onto its cranial course at a constant rate over ASC_BEND cm (one evenly
 // curved tube, no kink at the STJ), then runs straight to the top
-const ASC_BEND = 3.0, ASC_LEN = 4.6;
+const ASC_BEND = 3.2, ASC_LEN = 4.0;
 const ASC_PTS = (() => {
   const th = Math.acos(Math.max(-1, Math.min(1, dot(U_AO, U_ASC))));
   const w = unit(sub(U_ASC, mul(U_AO, Math.cos(th))));        // U_AO -> U_ASC rotation, in their plane
@@ -317,37 +380,93 @@ const hermite = (p0, t0, p1, t1, t) => {
   const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
   return [0, 1, 2].map((k) => h00 * p0[k] + h10 * t0[k] + h01 * p1[k] + h11 * t1[k]);
 };
-// The descending aorta: vertical below the LA level (DTA_P), its upper part
-// inclined forward and medially to the end of the arch, so the arch's limbs are
-// ~6 cm apart and the descending limb tapers away down and back from the arch.
-const DTA_TOP = add(add(DTA_P, mul(BS, 6.6)), add(mul(BP, -1.8), mul(BL, -1.2)));
-// (between them it bows DTA_MID_OFF cm posteriorly and to the left, so behind
-// the atria it runs posterolateral to the oesophagus — the TEE probe's path —
-// instead of across it)
+// The descending aorta begins at the end of the arch beside the left side of the
+// spine, ~2.5 cm left of the midline at the depth of the oesophagus and behind it
+// (posterolateral to it, the oesophagus to its right and in front), and runs down
+// along the spine: vertical, drifting a few mm back and toward the midline to the
+// aorta behind the LA (DTA_P). (Before, its top lay 0.9 cm left of the midline and
+// 1.2 cm in front of the oesophagus, the upper limb inclined forward and medially:
+// the oesophagus ran through the proximal DTA.)
+const DTA_TOP = bodyAt(2.9, -4.4, 5.6);
+// The posterior mediastinal bed behind the atria that the oesophagus occupies:
+// an enlarged LA abuts it but never overruns it (dLAlumen). It is the straight
+// course from 6.6 cm above the aorta behind the LA, 1.8 cm in front and 1.2 cm to
+// the right, down to it.
+const POST_BED_TOP = add(add(DTA_P, mul(BS, 6.6)), add(mul(BP, -1.8), mul(BL, -1.2)));
+// Behind the atria the aorta bows DTA_MID_OFF cm posteriorly and to the left of
+// that bed (2.6 cm above the aorta behind the LA, 3.1 cm left of the midline), so
+// it runs posterolateral to the oesophagus — the TEE probe's path — instead of
+// across it; the bow is unchanged by the rebuilt arch above it.
 const DTA_MID_OFF = [-0.2, 1.7];                       // cm: posterior, left
-const DTA_MID = add(lerp3(DTA_P, DTA_TOP, 0.6), add(mul(BP, DTA_MID_OFF[0]), mul(BL, DTA_MID_OFF[1])));
+const DTA_MID = add(lerp3(DTA_P, POST_BED_TOP, 0.6), add(mul(BP, DTA_MID_OFF[0]), mul(BL, DTA_MID_OFF[1])));
 const DTA_BOT = mad(DTA_P, BS, -9.0);
 const DTA_R = 1.12;                                   // d 2.25
-// The arch: a round candy-cane curve (radius ~3 cm) tangent to the ascending
-// aorta at its top and to the descending aorta at the end of the arch, tapering
-// from the ascending calibre to the descending, with its three head and neck
-// branches (brachiocephalic, left common carotid, left subclavian) fanning from
-// its upper convexity over ~3.5 cm — the suprasternal long-axis landmarks.
+// The arch: a candy cane. From the top of the ascending aorta it rises up and to
+// the left in front of the trachea, crests 1.1 cm left of the midline (a round
+// summit, radius 3.1 cm, at the level of the head and neck branches), and runs back
+// along the left side of the trachea and oesophagus, turning down into the
+// descending aorta beside the spine. It is built in the plane of its three
+// landmarks (ascending top, summit, descending top): the circular summit spans
+// ARCH.A1 deg toward the ascending side and ARCH.A2 deg toward the descending
+// side, and Hermite flanks (handles k1 / k2 x their chords) join it to the
+// ascending and descending aorta along their own axes. The flanks open downward
+// (~45 deg between the limbs in the suprasternal view), the ascending one to the
+// right and front, the descending one back to the spine. It tapers from the
+// ascending calibre to the descending.
+const ARCH = { summit: bodyAt(1.0, -0.7, 9.15), R: 3.1, A1: 55, A2: 75, k1: 1.0, k2: 0.8 };
 const ARCH_CURVE = (() => {
-  const tIn = U_ASC, tOut = unit(sub(DTA_P, DTA_TOP));
-  const th = Math.acos(Math.max(-1, Math.min(1, dot(tIn, tOut))));
-  const chord = Math.hypot(...sub(DTA_TOP, AO_ASC_TOP));
-  const r = chord / (2 * Math.sin(th / 2));
-  // (Hermite tangents 3.5x the circular-arc Bezier handle 4/3 tan(th/4) r: a
-  // round summit rising ~3.5 cm above the ascending top, not a flat goal-post)
-  const h = 3.5 * (4 / 3) * Math.tan(th / 4) * r;
-  const pts = [];
-  const N = 16;
-  for (let i = 0; i <= N; i++) pts.push(hermite(AO_ASC_TOP, mul(tIn, h), DTA_TOP, mul(tOut, h), i / N));
-  return { pts, r };
+  const tIn = U_ASC, tOut = unit(sub(DTA_MID, DTA_TOP));
+  const Sm = ARCH.summit, R = ARCH.R;
+  const n = unit(cross(sub(Sm, AO_ASC_TOP), sub(DTA_TOP, AO_ASC_TOP)));
+  const hx = unit(sub(sub(DTA_TOP, AO_ASC_TOP), mul(n, dot(sub(DTA_TOP, AO_ASC_TOP), n))));   // toward the descending side
+  let up = cross(n, hx);
+  if (dot(up, BS) < 0) up = mul(up, -1);
+  const Cc = mad(Sm, up, -R);
+  const arcP = (th) => add(Cc, add(mul(hx, R * Math.sin(th)), mul(up, R * Math.cos(th))));
+  const arcT = (th) => unit(add(mul(hx, Math.cos(th)), mul(up, -Math.sin(th))));
+  const t1 = -ARCH.A1 * Math.PI / 180, t2 = ARCH.A2 * Math.PI / 180;
+  const P1 = arcP(t1), P2 = arcP(t2);
+  const c1 = Math.hypot(...sub(P1, AO_ASC_TOP)), c2 = Math.hypot(...sub(DTA_TOP, P2));
+  const dense = [];
+  for (let k = 0; k < 60; k++) dense.push(hermite(AO_ASC_TOP, mul(tIn, ARCH.k1 * c1), P1, mul(arcT(t1), ARCH.k1 * c1), k / 60));
+  for (let k = 0; k < 60; k++) dense.push(arcP(t1 + (t2 - t1) * k / 60));
+  for (let k = 0; k <= 60; k++) dense.push(hermite(P2, mul(arcT(t2), ARCH.k2 * c2), DTA_TOP, mul(tOut, ARCH.k2 * c2), k / 60));
+  // resampled at N equal steps of arc length
+  const cum = [0];
+  for (let i = 1; i < dense.length; i++) cum.push(cum[i - 1] + Math.hypot(...sub(dense[i], dense[i - 1])));
+  const N = 16, tot = cum[cum.length - 1], pts = [];
+  let j = 1;
+  for (let i = 0; i <= N; i++) {
+    const s = tot * i / N;
+    while (j < dense.length - 1 && cum[j] < s) j++;
+    const f = (s - cum[j - 1]) / ((cum[j] - cum[j - 1]) || 1);
+    pts.push(lerp3(dense[j - 1], dense[j], Math.max(0, Math.min(1, f))));
+  }
+  return { pts, r: R };
 })();
 const AO_ARCH_MID = ARCH_CURVE.pts[ARCH_CURVE.pts.length >> 1];
 const ARCH_HEADS = 3;                                // brachiocephalic, left carotid, left subclavian (last in ARCH_SEGS)
+// head and neck vessels: [origin as arc length from the summit (cm), radius,
+// course (body l, a, s), length]: the innominate (largest, first) up and to the
+// right toward the right sternoclavicular joint, the left common carotid straight
+// up, the left subclavian up, left and back toward the left thoracic outlet —
+// origins ~0.1 cm left of the midline, 1.2 cm and 2.2 cm left
+const ARCH_BRANCHES = [
+  [-1.6, 0.6, bodyDir(-0.35, 0.1, 1), 3.2],
+  [0.0, 0.38, bodyDir(0.05, 0, 1), 3.4],
+  [1.6, 0.42, bodyDir(0.4, -0.25, 1), 3.2],
+];
+// the point of the arch centreline at arc length s from the ascending top
+const ARCH_CUM = (() => { const p = ARCH_CURVE.pts, c = [0]; for (let i = 1; i < p.length; i++) c.push(c[i - 1] + Math.hypot(...sub(p[i], p[i - 1]))); return c; })();
+function archAt(s) {
+  const pts = ARCH_CURVE.pts, cum = ARCH_CUM;
+  let i = 1;
+  while (i < pts.length - 1 && cum[i] < s) i++;
+  const f = Math.max(0, Math.min(1, (s - cum[i - 1]) / (cum[i] - cum[i - 1])));
+  return lerp3(pts[i - 1], pts[i], f);
+}
+// arc length of the summit (the arch's most cranial point)
+const ARCH_SUMMIT_S = (() => { const p = ARCH_CURVE.pts; let k = 0; for (let i = 1; i < p.length; i++) if (dot(p[i], BS) > dot(p[k], BS)) k = i; return ARCH_CUM[k]; })();
 const ARCH_SEGS = (() => {
   const pts = ARCH_CURVE.pts;
   const segs = [];
@@ -356,34 +475,22 @@ const ARCH_SEGS = (() => {
     segs.push([pts[i], pts[i + 1], AO.ascR * 0.95 + (DTA_R - AO.ascR * 0.95) * f]);
   }
   // head and neck vessels: origins spread along the upper convexity of the arch
-  // (cumulative arc length), each with its own course — the innominate (largest,
-  // first) up and to the right, the left carotid straight up, the left subclavian
-  // up, left and back
-  const cum = [0];
-  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(...sub(pts[i], pts[i - 1])));
-  const at = (s) => {
-    let i = 1;
-    while (i < pts.length - 1 && cum[i] < s) i++;
-    const f = (s - cum[i - 1]) / (cum[i] - cum[i - 1]);
-    return { p: lerp3(pts[i - 1], pts[i], f), t: unit(sub(pts[i], pts[i - 1])) };
-  };
+  // (cumulative arc length), centred on its summit
   const centre = lerp3(lerp3(AO_ASC_TOP, DTA_TOP, 0.5), AO_ARCH_MID, 0.5);
-  const along = unit(sub(DTA_TOP, AO_ASC_TOP));
-  // centred on the summit of the arch (its most cranial point)
-  let iTop = 0;
-  for (let i = 1; i < pts.length; i++) if (dot(pts[i], BS) > dot(pts[iTop], BS)) iTop = i;
-  const sMid = cum[iTop];
-  for (const [ds, r, dir, len] of [
-    [-1.5, 0.6, unit(add(add(BS, mul(BODY_AX.R, 0.12)), mul(BODY_AX.A, 0.22))), 3.2],   // brachiocephalic (innominate)
-    [0.0, 0.38, unit(add(BS, mul(along, 0.05))), 3.4],                               // left common carotid
-    [1.5, 0.42, unit(add(add(add(BS, mul(along, 0.3)), mul(BL, 0.05)), mul(BP, 0.15))), 3.2], // left subclavian
-  ]) {
-    const { p } = at(sMid + ds);
-    const out = unit(sub(p, centre));
-    const o = mad(p, out, 0.5);
+  for (const [ds, r, dir, len] of ARCH_BRANCHES) {
+    const p = archAt(ARCH_SUMMIT_S + ds);
+    const o = mad(p, unit(sub(p, centre)), 0.5);
     segs.push([o, mad(o, dir, len), r]);
   }
   return segs;
+})();
+// The suprasternal descending-aorta PW gate: in the proximal descending aorta
+// DTA_PW_PAST cm (along the centreline) beyond the left subclavian origin, at the
+// isthmus where the arch turns down, with the flow direction there (p, u).
+const DTA_PW_PAST = 1.5;
+const DTA_PW = (() => {
+  const s = ARCH_SUMMIT_S + ARCH_BRANCHES[2][0] + DTA_PW_PAST;
+  return { p: archAt(s), u: unit(sub(archAt(s + 0.4), archAt(s - 0.4))) };
 })();
 
 // Left brachiocephalic (innominate) vein: from behind the left sternoclavicular
@@ -393,7 +500,7 @@ const ARCH_SEGS = (() => {
 // live SVC top; its course is pushed forward until it clears every arch segment.
 const BCV_R = 0.5, BCV_UP = 2.2, BCV_PUSH = 0.5, BCV_RUN = 2.8;       // d ~1 cm; height above the arch summit; in-plane run
 function buildBCV(svc) {
-  const top = svc.b;
+  const top = svc.c || svc.b;                               // the SVC top
   // the suprasternal (arch) plane: it crosses it in the near field, above the
   // ascending limb and in front of the brachiocephalic trunk, then runs out of the
   // plane to the patient's left
@@ -474,7 +581,6 @@ const GASTRIC = (() => {
 // diaphragmatic surface and does not climb its sides, so the liver stays below the
 // RV and RA instead of riding up beside them into the parasternal far field.
 const DIAPH_WRAP = 1.5;
-const MIDLINE = -2.0;                                  // p . L of the body mid-sagittal plane
 
 // Everything the rest of the app needs to place valves, flows, labels and views.
 export const LM = {
@@ -482,7 +588,7 @@ export const LM = {
   PA_BIF, U_RPA, U_LPA, RVOT: RVOT_PTS, E_ANT, E_SCR,
   LV: LVP, apex: [0, LVP.apexY, 0],
   LA_ROOF, RA_ROOF, A_LA, A_RA, LA_FLOOR0, RA_FLOOR0, LA_ES, RA_ES,
-  IAS_P, IAS_N, IAS, AO_STJ, AO_ASC_TOP, AO_ARCH_MID, DTA_P, DTA_TOP, DTA_BOT, DTA_R,
+  IAS_P, IAS_N, IAS, AO_STJ, AO_ASC_TOP, AO_ARCH_MID, DTA_P, DTA_TOP, DTA_BOT, DTA_R, DTA_PW,
   GASTRIC, DIAPH_N, A4C_TILT, ANT_HEART: _ANT0, A4C_Z: (x, y) => onA4C(x, y), MIDLINE, MAPSE_REF, TAPSE_REF, TV_SEPT_FRAC,
 };
 
@@ -552,11 +658,19 @@ const A_PEAK = A_MIN + A_RES;
 // `amp` (optional, from the circulation: hemodynamics laPhasic) scales the
 // conduit (c) and booster (b) emptying against the normal atrium; the reservoir
 // fill is their sum, so the curve stays periodic and peaks at A_PEAK.
-export function atrialFill(phase, amp = null) {
+// tm (optional) = { mvo, aAt }: the case's solved mitral-opening phase and LA
+// activation peak. The reservoir phase fills the atrium until the mitral valve
+// opens, the conduit phase empties it over the next 0.18 of the cycle, and the
+// booster runs from the atrial kick to the QRS. Without tm the normal timing
+// (MVO 0.51, kick 0.89) is used. (Severe AS: a long IVRT puts MVO at ~0.60, so
+// a fixed 0.51 emptied the LA through a shut mitral valve.)
+export function atrialFill(phase, amp = null, tm = null) {
   const p = phase - Math.floor(phase);          // wrap into [0,1)
-  const reservoir = smoothstep(0.00, 0.51, p);
-  const conduit   = smoothstep(0.51, 0.69, p);
-  const booster   = smoothstep(0.89, 1.00, p);
+  const mvo = tm && tm.mvo > 0.3 && tm.mvo < 0.75 ? tm.mvo : 0.51;
+  const aOn = tm && tm.aAt > 0.8 && tm.aAt < 0.97 ? Math.max(0.89, tm.aAt) : 0.89;
+  const reservoir = smoothstep(0.00, mvo, p);
+  const conduit   = smoothstep(mvo, Math.min(aOn - 0.02, mvo + 0.18), p);
+  const booster   = smoothstep(aOn, 1.00, p);
   if (amp) {
     const ac = A_COND * amp.c, ab = A_BOOST * amp.b;
     return A_PEAK - (ac + ab) * (1 - reservoir) - ac * conduit - ab * booster;
@@ -633,16 +747,25 @@ function anchorToSeptum(E, sgn, pen) {
 // diameter <= 2.1 cm collapsing > 50 % on sniff -> 3 mmHg; > 2.1 cm collapsing
 // < 50 % -> 15 mmHg; anything in between -> 8 mmHg.
 export function rapEstimate(ivc) {
-  const d = 2 * ivc.r, small = d <= 2.1, collapses = (ivc.collapse != null ? ivc.collapse : 0.55) > 0.5;
+  const d = 2 * (ivc.rMax != null ? ivc.rMax : ivc.r), small = d <= 2.1, collapses = (ivc.collapse != null ? ivc.collapse : 0.55) > 0.5;
   return small && collapses ? 3 : !small && !collapses ? 15 : 8;
 }
 // IVC radius (cm) and sniff collapse (fraction) for a mean RA pressure (mmHg), the
 // inverse of rapEstimate: <= ~5 mmHg a 1.8 cm IVC halving on sniff (RAP 3); 7-9
 // a dilated (> 2.1 cm) IVC that still collapses (RAP 8); >= ~10 a plethoric
 // 2.5 cm IVC collapsing < 50 % (RAP 15).
+// Respiration. The IVC narrows as the intrathoracic pressure falls: by its sniff
+// collapse fraction on a full sniff (breath 1) and by about a quarter of that in
+// quiet inspiration (ASE 2010/2015 RA-pressure estimate: the maximum, expiratory
+// diameter 1-2 cm from the RA and its percentage collapse on a sniff). The UI's
+// respiratory clock sets the breath with setIvcBreath (0 = end expiration);
+// path.sniff (0..1) overrides it, so a case can be drawn at a stated breath.
+let _ivcBreath = 0;
+export function setIvcBreath(s) { _ivcBreath = Math.max(0, Math.min(1, +s || 0)); }
+export function ivcBreath(path = {}) { return path.sniff != null ? Math.max(0, Math.min(1, +path.sniff || 0)) : _ivcBreath; }
 export function ivcOfRap(rap) {
   const t = (x, a, b) => Math.max(0, Math.min(1, (x - a) / (b - a)));
-  return { r: 0.9 + 0.35 * t(rap, 4.6, 9), collapse: 0.55 - 0.35 * t(rap, 9.4, 11) };
+  return { r: 0.9 + 0.35 * t(rap, 4.6, 9), collapse: 0.55 - 0.4 * t(rap, 9.4, 10.6) };
 }
 // Right-heart loading per pathology (shared by the anatomy and the coarse proxies
 // in cardiac-model). rvC scales RV contractility — TAPSE, free-wall (FAC) and
@@ -654,6 +777,9 @@ export function ivcOfRap(rap) {
 // systole (eccentricity index ES > ED); VOLUME overload (severe TR, ASD) flattens
 // it in diastole only, and its systolic recovery is the paradoxical septal motion.
 const gradeKey = (path) => (path.grade === 'mild' || path.grade === 'moderate' ? path.grade : 'severe');
+// tamponade: inspiratory diastolic septal flattening (fraction of the LV radius;
+// 0.4: an end-diastolic PSAX eccentricity index ~1.14 in inspiration, ~0.97 in expiration)
+const TAMP_SEPT_BOW = 0.4;
 export function rightHeartLoad(path = {}) {
   const g = gradeKey(path);
   const msPH = path.mitralStenosis && g === 'severe';           // secondary (post-capillary) PH
@@ -663,10 +789,20 @@ export function rightHeartLoad(path = {}) {
   // hardest — TAPSE falls to ~1.4 cm (the septal hinge still follows the LV)
   const rvL = path.rvpo ? 0.22 : rvC;
   // volume-overload septal pattern: severe TR, secundum ASD
+  // (severe TR 0.46: RV volume overload flattens the septum in diastole only —
+  // the LV eccentricity index is raised at end-diastole, ~1.2-1.3, and near 1 at
+  // end-systole (Ryan et al., JACC 1985;5:918-27); review 12: the RV drawn at its
+  // solved size needs 0.46 for an end-diastolic index of ~1.2)
   const vol = path.asd ? 1 : trVol;
-  const septum = path.rvpo ? (kR) => 0.32 + 0.22 * kR
+  // tamponade (review 12, MOT-2): ventricular interdependence inside the tense
+  // sac — on inspiration the venous surge into the RV pushes the septum into the
+  // LV in diastole and it swings back in systole and on expiration (the
+  // inspiratory share of a breath: hemodynamics respPath, 'insp' or a 'mix' blend)
+  const insp = path.tamponade ? (path.resp === 'insp' ? 1 : path.resp === 'mix' ? path.respW || 0 : 0) : 0;
+  const septum = path.rvpo ? (kR) => 0.34 + 0.22 * kR   // (review 12: 0.34 at ED — the RV drawn at its solved size is a little smaller than the old fixed 1.3x)
     : msPH ? (kR) => 0.06 + 0.12 * kR
-    : vol ? (kR) => (path.asd ? 0.42 : 0.36) * vol * (1 - kR) : null;   // (the ASD's larger diastolic RV load)
+    : vol ? (kR) => (path.asd ? 0.55 : 0.46) * vol * (1 - kR)   // (the ASD's larger diastolic RV load)
+    : insp > 0 ? (kR) => TAMP_SEPT_BOW * insp * (1 - kR) : null;
   return { rvC, rvL, septum, msPH, trVol };
 }
 // Anterior systolic swing of the aortic root above its annulus (cm): gain x the LA reservoir filling
@@ -676,8 +812,8 @@ export function rightHeartLoad(path = {}) {
 // and under 0.6 cm in DCM or MS. (gain: the swing at the sino-tubular junction)
 const ROOT_SWING = { gain: 0.5 };
 const SINUS_SHEAR = 0.6;    // the root shears over its first 0.6 cm above the annulus
-export function aorticRootSwing(phase, amp = null) {
-  const lo = atrialFill(0, amp), f = atrialFill(phase, amp);
+export function aorticRootSwing(phase, amp = null, tm = null) {
+  const lo = atrialFill(0, amp, tm), f = atrialFill(phase, amp, tm);
   const fill = A_PEAK - lo > 1e-6 ? Math.max(0, Math.min(1, (f - lo) / (A_PEAK - lo))) : 0;
   const swing = amp ? (A_COND * amp.c + A_BOOST * amp.b) / A_RES : 1;
   return ROOT_SWING.gain * fill * Math.min(1, swing);
@@ -691,17 +827,48 @@ const PM_ROOT = { ang: -2.7, up: 0.3, rb: 0.6, rt: 0.4 };
 // (rad, as papAt), base radius rb and head radius rt (cm). Above the base the
 // muscle stands free in the cavity, ~1-1.4 cm across with a 2-5 mm blood gap
 // from the free wall: the landmark of the mid-papillary short axis (TTE PSAX,
-// TEE TG mid SAX). The anterolateral muscle rises from ~3.4 o'clock in PSAX and
-// leans forward so its head lies at ~3 o'clock in TG SAX; the posteromedial one
+// TEE TG mid SAX). The anterolateral muscle rises from ~3 o'clock in PSAX and
+// leans forward so its head lies under its commissure; the posteromedial one
 // rises from ~7.4 o'clock and leans toward the inferior wall, its head clear of
 // the (posteriorly tilted) A4C plane, which shows the anterolateral muscle
 // alongside the lateral wall rather than an island in the mid cavity. The heads
 // move in with the wall in systole by tipK of the short-axis shortening (they
 // hang on the chordae under the commissures, which move in less than the wall).
+// Broad bases (review 12): the lower 40-45 % of each muscle is filleted into the
+// endocardium (fillet: blend width, cm; filTop: share of the base-to-head
+// height up to which it is full, fading over filFade), so oblique long-axis cuts (A4C, A2C, ME commissural)
+// show the base rising from the wall with no blood crevice beside it. Above
+// that the body stands free: at the mid-papillary short axis (TG mid SAX, ~0.57
+// of the height) the muscle keeps its 2-5 mm cleft from the wall, so a higher
+// fillet or a smaller inward lean closes that cleft (see the audit's TGSAX rows).
+// Anterolateral muscle (review 12 repair): its head sits under the anterolateral
+// commissure (~2.6 o'clock, 1.4 cm off the axis; the head is also shifted by
+// 0.3 x M0, so the nominal 0.45 rad lands at ~0.2 rad) and the body leans in by
+// only ~0.3 cm from a base at ~3.1 o'clock, 1.7 cm out (it ran from 2.1 to
+// 0.97 cm). The A4C plane passes through the base and, tilting posteriorly
+// toward the base of the heart, runs behind the muscle above it, so it cuts only
+// the filleted lower part (free body >= 0.12 cm clear of the plane): the A4C
+// shows a broad mound on the apical lateral wall instead of a finger with a
+// wedge of blood lateral to it. Each muscle keeps its own fillet height (filTop).
+// The posteromedial muscle is unchanged: the ME commissural planes (this one
+// and the ME4C + 60 deg rebuild) run within 0.6 cm of its axis along its whole
+// length, so the mid-body gap the TG mid SAX needs shows there as a channel;
+// moving the muscle trades that channel for a head island, closes the TG mid
+// SAX gap, shifts its 7 o'clock PSAX section (read by the TR eccentricity
+// index) or leaves the PSAX clock range (see the audit's papillary rows).
+// In systole the thickening bodies abut the wall: the fillet rises by filSys of
+// the height at full contraction (the TG mid SAX gap is an end-diastolic
+// landmark), so no systolic plane shows a cleft beside a muscle.
+// (The anterolateral head stands at 0.55 rad, ~1.4 mm further round the wall than
+// the 0.45 rad of the first placement: the two heads, at end-diastole and
+// end-systole, then lie within 0.38 cm of one transgastric two-chamber plane that
+// also holds the mitral valve in the sector (0.41 cm at 0.45 rad). At 0.6 rad the
+// body closes the TG mid SAX gap between the muscle and the wall.)
 const PAP = {
-  alpm: { r: [2.1, 0.95], ang: [-0.2, 0.25], rt: 0.5 },
-  pmpm: { r: [1.95, 1.15], ang: [-2.3, -1.8], rt: 0.46 },
+  alpm: { r: [1.7, 1.4], ang: [-0.05, 0.55], rt: 0.5, filTop: 0.45 },
+  pmpm: { r: [1.95, 1.15], ang: [-2.3, -1.8], rt: 0.46, filTop: 0.4 },
   rb: 0.72, tipK: 0.5,
+  fillet: 0.8, filTop: 0.4, filFade: 0.08, filSys: 0.4,
 };
 export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   // Remodelling: when coupled to the circulation the LV size follows the modelled
@@ -722,7 +889,11 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   // severe TR: a dilated RV (RVD1 > 4.1 cm) and RA; severe MS: the RV of its
   // secondary pulmonary hypertension
   const RH = rightHeartLoad(path);
-  const rvpoScale = (path.rvpo ? 1.3 : 1) * (path.asd ? 1.6 : path.tr && !path.rvpo ? 1.12 + 0.14 * RH.trVol : RH.msPH ? 1.15 : 1);
+  // RV size: coupled to the circulation (mech.rvSize, from the solved RV
+  // end-diastolic volume in cardiac-model) the drawn RV holds the solved RVEDV;
+  // standalone, the pathology flags give representative values
+  const rvpoScale = mech && mech.rvSize != null ? mech.rvSize
+    : (path.rvpo ? 1.3 : 1) * (path.asd ? 1.6 : path.tr && !path.rvpo ? 1.12 + 0.14 * RH.trVol : RH.msPH ? 1.15 : 1);
   const raScale = path.rvpo ? 1.3 : path.tr ? 1.35 + 0.05 * RH.trVol : path.asd ? 1.25 : RH.msPH ? 1.12 : 1;
 
   // LV cavity scale: volume-exact from the circulation when coupled.
@@ -767,20 +938,32 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   // septal rim, tethered to the fibrous skeleton, moves with the septal mitral
   // hinge (~1.2 cm) — so the annular plane tilts toward the free wall in systole.
   // (TAPSE is, by definition, the lateral-annulus excursion.)
-  // the right heart runs on its own, slightly offset clock (cardiac-model rvPhase:
-  // T1 after M1, RV ejection starting earlier and ending later than the LV's)
+  // the right heart follows its own solved volume (kR from the circulation's RV:
+  // delayed activation, T1 after M1, RV ejection starting earlier and ending later
+  // than the LV's)
+  // (kR: the solved RV's contraction fraction, (RVEDV - Vrv) / RV stroke volume)
   const kR = mech && mech.kRV != null ? mech.kRV : k;
-  const rvC = RH.rvC;                                      // RV contractility (rightHeartLoad)
+  // RV contractility (short-axis / FAC share) and its longitudinal (TAPSE) share:
+  // from the solved RV ejection fraction and afterload when coupled (mech.rvC,
+  // mech.rvL), else the representative rightHeartLoad values
+  const rvC = mech && mech.rvC != null ? mech.rvC : RH.rvC;
+  const rvL = mech && mech.rvL != null ? mech.rvL : RH.rvL;
   const rvS = 1 - kR * 0.34 * rvC;                         // RV short-axis shortening (FAC ~45-50 % normal)
-  const tapse = TAPSE_REF * kR * RH.rvL;
+  const tapse = TAPSE_REF * kR * rvL;
   const septFlat = RH.septum ? RH.septum(kR) : 0;          // phase-dependent septal flattening
   // tricuspid rims: septal on the fibrous skeleton (the septal mitral hinge's
   // descent, LV clock); lateral = septal + the free wall's own shortening (RV clock)
   const tvSep = -TV_SEPT_W * dM;
-  const tvLatDrop = tvSep + TV_FW * kR * RH.rvL;
+  const tvLatDrop = tvSep + TV_FW * kR * rvL;
   const tvDrop = 0.5 * (tvSep + tvLatDrop);                // annulus-centre (and RA floor) descent
   const Tlive = [T0[0], T0[1] - tvDrop, T0[2]];
-  const PVlive = mad(PV0, [0, 1, 0], -0.25 * tapse);
+  // The infundibulum and the pulmonary valve ride with the aortic root: they
+  // descend with it (the curtain's share of the annular descent) and swing
+  // anteriorly with it in systole (rootSwing; half of it at the proximal RVOT).
+  // Fixed in the chest, the RVOT was carved away by the root's clearance shell
+  // as the root swung toward it, and left the PSAX-AV plane that follows the root.
+  const rootDrop = [0, MV_W_CURTAIN * dM, 0];
+  const PVlive = add(add(PV0, rootDrop), rootSwing);
   const rvB = CFG.rvBody;
   // a dilated LV displaces the RV crescent outward rather than crushing it
   const push = (lvScale - 1) * LVP.b * 0.9;
@@ -800,14 +983,14 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   const tvLat = mad(Tlive, unit(sub(TV_LAT, mul(tvN, dot(TV_LAT, tvN)))), TV_R);   // lateral rim (TAPSE point)
   const inflow = { c: mad(Tlive, tvN, -1.6), r: [2.25 * rvS * rvpoScale, 1.8 * (1 - 0.15 * kR * rvC), 2.1 * rvS * rvpoScale] };
   const rvot = [
-    mad(RVOT_PTS[0], [0, 1, 0], -0.25 * tapse),
-    mad(RVOT_PTS[1], [0, 1, 0], -0.25 * tapse),
-    mad(RVOT_PTS[2], [0, 1, 0], -0.25 * tapse),
+    add(add(RVOT_PTS[0], rootDrop), mul(rootSwing, 0.5)),
+    add(RVOT_PTS[1], mul(rootSwing, 0.6)),
+    add(add(RVOT_PTS[2], rootDrop), rootSwing),
   ];
   const rvotR = [1.3 * (1 - kR * 0.18 * rvC) * rvpoScale, 1.1 * (1 - kR * 0.12 * rvC) * rvpoScale, PV_R * 1.02];
 
   // Atria: sit on the live annuli, fixed roofs, volume from the reservoir curve.
-  const aFill = atrialFill(phase, mech && mech.laAmp);
+  const aFill = atrialFill(phase, mech && mech.laAmp, mech && mech.laTiming);
   // the RA empties through the tricuspid, so its reservoir curve follows the
   // right heart's clock
   const aFillR = mech && mech.phaseRV != null ? atrialFill(mech.phaseRV) : aFill;
@@ -852,6 +1035,7 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
   const papBase = 1 + (papThick - 1) * 0.15;
   const out = (papBase - 1) * 0.62;                        // added base radius
   const sT = 1 - (1 - sS) * PAP.tipK;                    // (heads move in less than the wall)
+  const papSys = PAP.filSys * Math.min(1, Math.max(0, (1 - sS) / 0.28));   // systolic fillet rise
   const papAt = (ang, rb, rt, angT = ang) => {
     const c = Math.cos(ang), s = Math.sin(ang), ct = Math.cos(angT), st = Math.sin(angT);
     // the tip descends with the annular sector above it (mvWeight at its angle)
@@ -918,14 +1102,33 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
     const ivcS = ivcOfRap(hemoSummary(path).RAP);
     const ivcR = ivcS.r;
     const ia = seat(mad(mad(mad(rr.c, BS, -(hS + 0.4)), away, 1.0), BP, 1.0), Math.max(CAVA.ivcSd, ivcR + 0.05), CAVA.ivcV);
-    // the SVC abuts the aorta without indenting it: slide the orifice back along
-    // the septum until its first 3 cm clear the aortic wall
+    // The SVC lies to the patient's RIGHT of the ascending aorta (and a little
+    // behind it): it forms the right upper mediastinal border, centres ~2.5-3 cm
+    // apart side to side. Its orifice stays ~1 cm on the RA side of the septum,
+    // and its lower SVC_LOW cm run straight up the caval line (the SVC -> fossa
+    // -> IVC axis of the ME bicaval view; in this heart body-right is close to
+    // the septal normal, so neither the orifice nor that segment can move right
+    // without leaving the bicaval plane). Above it the SVC runs up to its top
+    // (the confluence of the brachiocephalic veins), SVC_H above the orifice and
+    // SVC_SIDE to the right of the ascending-aorta top, so the vein follows the
+    // aorta's own course in the mediastinum. (Straight up it ran 3.4 cm directly
+    // behind the ascending aorta: hidden behind it in every anterior view, and cut
+    // beyond the root by a basally tipped PLAX plane.) svc.a -> svc.b is the lower
+    // segment, svc.b -> svc.c the upper one. It abuts the aorta without indenting
+    // it: slide the orifice back along the septum until its first 3 cm clear the
+    // aortic wall.
     const aoA = { ao: buildAorta(A0, path) };
     const sDir = unit(add(mul(BS, 4.5), mul(BP, 0.3)));
+    const course = (q) => {
+      const b = mad(q, sDir, SVC_LOW), up = SVC_H - dot(sub(b, q), BS);
+      const c = mad(mad(b, BS, up), BP, up * 0.3 / 4.5);         // (the lower segment's slight backward run)
+      return { b, c: mad(c, BODY_AX.R, dot(sub(AO_ASC_TOP, c), BODY_AX.R) + SVC_SIDE) };
+    };
     const gap = (q) => {
+      const { b, c } = course(q), u = unit(sub(c, b));
       let g = 1e9;
       for (let t = 0; t <= 3.0; t += 0.25) {
-        const p = mad(q, sDir, t);
+        const p = t <= SVC_LOW ? mad(q, sDir, t) : mad(b, u, t - SVC_LOW);
         g = Math.min(g, dAOroot(p[0], p[1], p[2], aoA) - aoA.ao.wall - CAVA.svcR - CAVA.aoGap);
       }
       return g;
@@ -937,10 +1140,12 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
     const tether = mul(su, -ROOF_FOLLOW * tvDrop * su[1]);
     sa = add(sa, tether);
     return {
-      svc: { a: sa, b: mad(sa, sDir, 4.5), r: CAVA.svcR },     // d 1.6
+      svc: { a: sa, ...course(sa), r: CAVA.svcR },     // d 1.6
       // sniff: the IVC halves in calibre with normal RA pressure; plethoric with
       // raised RA pressure it barely collapses (< 50 %)
-      ivc: { a: add(ia, tether), b: mad(add(ia, tether), unit(mad(BODY_AX.I, SEPT_V, CAVA.ivcTilt)), 11.0), r: ivcR,
+      ivc: { a: add(ia, tether), b: mad(add(ia, tether), unit(mad(BODY_AX.I, SEPT_V, CAVA.ivcTilt)), 11.0),
+        // r is the calibre now (it breathes); rMax the expiratory one that is reported
+        r: ivcR * (1 - ivcS.collapse * ivcBreath(path)), rMax: ivcR,
         collapse: ivcS.collapse },
     };
   })();
@@ -957,8 +1162,7 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
     ra: { ...ra, aa: raaSegs(ra, cav.svc), sv: { a: mad(mad(lerp3(cav.svc.a, cav.ivc.a, CAVA.svT[0]), IAS_N, CAVA.svBulge), SEPT_V, -CAVA.svFwd), b: mad(lerp3(cav.svc.a, cav.ivc.a, CAVA.svT[1]), IAS_N, CAVA.svBulge), r: CAVA.svR },
       svcFlare: { a: mad(cav.svc.a, unit(sub(cav.svc.b, cav.svc.a)), CAVA.flareUp), b: mad(cav.svc.a, unit(sub(Tlive, cav.svc.a)), CAVA.flareLen) } },
     crista: null,                          // (seated on the live RA wall below)
-    eustachian: buildEustachian(ra),
-    eustachianRim: buildEustachianRim(cav.ivc),
+    eustachianRim: null,                   // (seated on the live RA wall below)
     // SVC: enters the POSTERO-superior RA roof, beside (not in line with) the
     // RA long axis, and runs cranially behind the ascending aorta
     // the venae cavae enter the RA's superior and posterior-inferior poles, in
@@ -976,15 +1180,15 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
     pa: {
       pv: PVlive,
       main: { a: mad(PVlive, U_PA, -0.1), b: PA_BIF, r1: 1.1 * (1 + (path.rvpo ? 0.35 : 0)), r2: 1.05 * (1 + (path.rvpo ? 0.35 : 0)) },
-      branch: [[RPA_O, RPA_M, 0.8], [RPA_M, RPA_E, 0.78], [PA_BIF, mad(PA_BIF, U_LPA, 2.8), 0.68]],
+      branch: [[RPA_O, RPA_M, 0.8], [RPA_M, RPA_E, 0.78], [PA_BIF, LPA_K, 0.68], [LPA_K, LPA_E, 0.66]],
       wall: 0.16,
     },
     valves: {
       mitral: { c: Mlive }, aortic: { c: Alive }, tricuspid: { c: Tlive, n: tvN, lat: tvLat }, pulmonic: { c: PVlive },
     },
     pap: [
-      { a: alpm.a, b: alpm.b, r: 0.5, rb: PAP.rb * papBase, rt: PAP.alpm.rt * papThick, drop: alpm.drop },
-      { a: pmpm.a, b: pmpm.b, r: 0.5, rb: PAP.rb * papBase, rt: PAP.pmpm.rt * papThick, root: pmRoot, drop: pmpm.drop },
+      { a: alpm.a, b: alpm.b, r: 0.5, rb: PAP.rb * papBase, rt: PAP.alpm.rt * papThick, drop: alpm.drop, filTop: PAP.alpm.filTop + papSys },
+      { a: pmpm.a, b: pmpm.b, r: 0.5, rb: PAP.rb * papBase, rt: PAP.pmpm.rt * papThick, root: pmRoot, drop: pmpm.drop, filTop: PAP.pmpm.filTop + papSys },
     ],
     // moderator band: crosses the lower third of the RV from the septum to the
     // base of the anterior papillary muscle on the free wall.
@@ -997,36 +1201,44 @@ export function anatomyParams(k, kick, path = {}, mech = null, phase = 0) {
     axial: { apexY, lsy: lsy * lvLong },
     trab: !path.noTrab,
   };
+  // (the middle band of the Eustachian flap: the valve's landmark for the plane checks)
+  params.eustachianRim = buildEustachianRim(params);
+  params.eustachian = params.eustachianRim[EUST_RIM.n >> 1];
   params.crista = buildCrista(params);
+  seatRidge(params);
   return params;
 }
 
 // Left atrial appendage: an oval ostium on the anterolateral LA opening into a
-// short neck, then a broad windsock body (one dominant lobe, its wall ridged by
+// neck, then a tubular, finger-like body (one dominant lobe, its wall ridged by
 // pectinate muscles) in the left AV groove over the circumflex. The neck is why
 // it is THE site of thrombus in atrial fibrillation.
 function laaSegs(la) {
   // ostium on the ANTEROLATERAL LA wall, ~1-1.5 cm in front of the LSPV across
-  // the warfarin ridge; a short neck, then a broad windsock body (~2 cm wide)
-  // running forward, down and laterally in the left AV groove over the
-  // circumflex, beside (not against) the aortic root, tapering to its tip.
-  // Ostium ~1.6 cm, depth ~3.6 cm (normal adult 1.5-2.5 cm, 2.5-4.5 cm).
+  // the warfarin ridge. Ostium ~1.6 cm, depth ~3.8 cm (normal adult 1.5-2.5 cm,
+  // 2.5-4.5 cm). (The ME LAA and ME two-chamber planes are aimed at this ostium
+  // and at the lumen beyond it, so it stays where those views were tuned: its
+  // centre lies 0.1 cm from the apical two-chamber plane at end-diastole and is
+  // carried 0.4 cm across it by the filling LA wall at end-systole.)
   const u = unit(add(add(mul(la.e1, 0.55), mul(la.e2, 0.75)), mul(la.a, -0.45)));
   const w = laWall(la, laIn(la), u);
-  // The ostium sits in the wall; the neck (~1.4 cm) leaves the LA body square to
-  // its anterior wall, so the appendage stands off the body (its own wall between
-  // them) beyond the first ~1 cm: a finger-like pouch at the screen-right of the
-  // LA, beside the anterior mitral annulus, in the TTE A2C and the ME2C.
+  // The neck (1.3 cm, narrowing to 1.35 cm) leaves the LA body square to its
+  // anterior wall, so the appendage stands off the body (its own wall between
+  // them); the body (1.4 cm long, ~1.5 cm wide) and the tapering tip then turn
+  // forward and down along the left AV groove, under the LV base and 0.3 cm or
+  // more clear of the pulmonary trunk: a tubular, finger-like pouch ~3.8 cm long
+  // at the screen-right of the LA, beside the anterior mitral annulus, in the
+  // TTE A2C and the ME2C. (The tip runs forward more than down: it ends at the
+  // AV-groove level, above the mitral leaflets, so the PSAX mitral-level plane
+  // stays clear of it.)
   const o = mad(w, u, -0.1);
-  const p1 = mad(o, unit([0.36, 0.02, 0.93]), 1.2);
-  const p2 = mad(p1, unit([0.35, -0.7, 0.6]), 1.4);
-  // (the tip runs forward more than down: it ends at the AV-groove level, above
-  // the mitral leaflets, so the PSAX mitral-level plane stays clear of it)
-  const p3 = mad(p2, unit([0.25, -0.75, 0.6]), 1.0);
+  const p1 = mad(o, [0.3445, 0, 0.9388], 1.3);
+  const p2 = mad(p1, [0.3424, -0.6971, 0.63], 1.4);
+  const p3 = mad(p2, [0.2403, -0.7413, 0.6267], 1.1);
   return [
-    { a: o, b: p1, r1: 0.8, r2: 0.68, w },
-    { a: p1, b: p2, r1: 0.68, r2: 0.82 },
-    { a: p2, b: p3, r1: 0.82, r2: 0.45 },
+    { a: o, b: p1, r1: 0.8, r2: 0.67, w },
+    { a: p1, b: p2, r1: 0.67, r2: 0.78 },
+    { a: p2, b: p3, r1: 0.78, r2: 0.49 },
   ];
 }
 // Right atrial appendage: BROAD-BASED and triangular, wide-mouthed — the key
@@ -1118,6 +1330,16 @@ function buildPV(la) {
   const aa = laaSegs(la);
   const uL = unit(sub(veins[0].w, o)), uA = unit(sub(aa[0].w, o));
   const ridge = { a: laWall(la, o, unit(lerp3(uL, uA, 0.45))), b: laWall(la, o, unit(lerp3(uL, uA, 0.6))), r: 0.18 };
+  // The ridge is an infolding of the lateral wall, so it is carved out of the
+  // lumen (dRidge) rather than drawn as a free body: a thin blade rising from the
+  // crotch where the LAA and LSPV lumens part, RIDGE.len long, to a bulbous tip
+  // ("Q-tip", RIDGE.rb) at about the level of the atrial wall, running RIDGE.run
+  // along the wall between the ostia (seatRidge). In any plane that holds both
+  // ostia (ME LAA, ME2C) it is a stalk with a knob, continuous with the wall.
+  const root = laWall(la, o, unit(lerp3(uL, uA, 0.5)));
+  const n = unit(sub(o, root));
+  const e = unit(sub(sub(aa[0].w, veins[0].w), mul(n, dot(sub(aa[0].w, veins[0].w), n))));
+  ridge.root = root; ridge.n = n; ridge.e = e; ridge.t = unit(cross(n, e));
   return { veins, ridge, mid: o };
 }
 
@@ -1134,19 +1356,24 @@ function raFramePoint(ra, u, f) {
   const d = add(add(mul(ra.e1, u[0] * ra.r1), mul(ra.a, u[1] * ra.rl)), mul(ra.e2, u[2] * ra.r2));
   return mad(ra.c, d, f);
 }
+// (how far from the RA centre the wall search runs: a dilated, full atrium —
+// severe TR at its end-systolic reservoir peak — reaches beyond 4 cm)
+const CRISTA_REACH = 6.0;
 function buildCrista(A) {
   const ra = A.ra, c = ra.c;
+  // (seated on the RA wall itself: dRAlumen without the folds, so the march never
+  // stops on the Eustachian flap at the IVC mouth)
   // the wall point along the ray from the RA centre through u (bisection on the lumen)
   const wall = (u) => {
     const dir = unit(sub(raFramePoint(ra, u, 1), c));
     let lo = 0, hi = 0.1;                   // march out to the first exit, then bisect
-    for (; hi < 4.0; lo = hi, hi += 0.1) {
+    for (; hi < CRISTA_REACH; lo = hi, hi += 0.1) {
       const q = mad(c, dir, hi);
-      if (dRAlumen(q[0], q[1], q[2], A) >= 0) break;
+      if (dRAlumen(q[0], q[1], q[2], A, false) >= 0) break;
     }
     for (let i = 0; i < 12; i++) {
       const m = 0.5 * (lo + hi), q = mad(c, dir, m);
-      if (dRAlumen(q[0], q[1], q[2], A) < 0) lo = m; else hi = m;
+      if (dRAlumen(q[0], q[1], q[2], A, false) < 0) lo = m; else hi = m;
     }
     return mad(c, dir, lo - (CRISTA.proud - CRISTA.r));   // the capsule's inner face stands `proud` off the wall
   };
@@ -1160,8 +1387,8 @@ function buildCrista(A) {
   const seatFrom = (q) => {
     const o = mad(sv.a, sax, dot(sub(q, sv.a), sax)), dir = unit(sub(q, o));
     let lo = 0, hi = 0.1;
-    for (; hi < 4.0; lo = hi, hi += 0.1) { const r = mad(o, dir, hi); if (dRAlumen(r[0], r[1], r[2], A) >= 0) break; }
-    for (let i = 0; i < 12; i++) { const m = 0.5 * (lo + hi), r = mad(o, dir, m); if (dRAlumen(r[0], r[1], r[2], A) < 0) lo = m; else hi = m; }
+    for (; hi < CRISTA_REACH; lo = hi, hi += 0.1) { const r = mad(o, dir, hi); if (dRAlumen(r[0], r[1], r[2], A, false) >= 0) break; }
+    for (let i = 0; i < 12; i++) { const m = 0.5 * (lo + hi), r = mad(o, dir, m); if (dRAlumen(r[0], r[1], r[2], A, false) < 0) lo = m; else hi = m; }
     return mad(o, dir, lo - (CRISTA.proud - CRISTA.r));
   };
   // (the crest lies between the SVC and the mouth of the appendage lobe at its
@@ -1170,48 +1397,86 @@ function buildCrista(A) {
   const bis = ra2 ? unit(add(sax, unit(sub(ra2.b, ra2.a)))) : unit(sub(IAS_N, mul(sax, dot(IAS_N, sax))));
   const o0 = mad(sv.a, sax, CRISTA.svcUp);
   let lo = 0, hi = 0.1;
-  for (; hi < 4.0; lo = hi, hi += 0.1) { const r = mad(o0, bis, hi); if (dRAlumen(r[0], r[1], r[2], A) >= 0) break; }
-  for (let i = 0; i < 12; i++) { const m = 0.5 * (lo + hi), r = mad(o0, bis, m); if (dRAlumen(r[0], r[1], r[2], A) < 0) lo = m; else hi = m; }
+  for (; hi < CRISTA_REACH; lo = hi, hi += 0.1) { const r = mad(o0, bis, hi); if (dRAlumen(r[0], r[1], r[2], A, false) >= 0) break; }
+  for (let i = 0; i < 12; i++) { const m = 0.5 * (lo + hi), r = mad(o0, bis, m); if (dRAlumen(r[0], r[1], r[2], A, false) < 0) lo = m; else hi = m; }
   const rim = mad(o0, bis, lo - (CRISTA.proud - CRISTA.rSvc)), first = wall(CRISTA_U[CRISTA.from]);
   pts.push(rim);
   const seatC = (q) => {                    // (as wall(): on the ray from the RA centre through q)
     const dir = unit(sub(q, c));
     let lo = 0, hi = 0.1;
-    for (; hi < 4.0; lo = hi, hi += 0.1) { const r = mad(c, dir, hi); if (dRAlumen(r[0], r[1], r[2], A) >= 0) break; }
-    for (let i = 0; i < 12; i++) { const m = 0.5 * (lo + hi), r = mad(c, dir, m); if (dRAlumen(r[0], r[1], r[2], A) < 0) lo = m; else hi = m; }
+    for (; hi < CRISTA_REACH; lo = hi, hi += 0.1) { const r = mad(c, dir, hi); if (dRAlumen(r[0], r[1], r[2], A, false) >= 0) break; }
+    for (let i = 0; i < 12; i++) { const m = 0.5 * (lo + hi), r = mad(c, dir, m); if (dRAlumen(r[0], r[1], r[2], A, false) < 0) lo = m; else hi = m; }
     return mad(c, dir, lo - (CRISTA.proud - CRISTA.r));
   };
   for (let k = 1; k < CRISTA.svc; k++) pts.push((k < CRISTA.svc / 2 ? seatFrom : seatC)(lerp3(rim, first, k / CRISTA.svc)));
-  for (let i = CRISTA.from; i < CRISTA_U.length - 1; i++) {
+  for (let i = CRISTA.from; i < CRISTA_U.length - 2; i++) {
     for (let k = 0; k < CRISTA.sub; k++) pts.push(wall(lerp3(CRISTA_U[i], CRISTA_U[i + 1], k / CRISTA.sub)));
   }
-  pts.push(wall(CRISTA_U[CRISTA_U.length - 1]));
+  // ...and ends on the lateral rim of the IVC orifice (not at the tricuspid
+  // annulus): the last span runs down the posterolateral wall to the IVC
+  const iv = A.ivc, ivAx = unit(sub(iv.b, iv.a));
+  const away = unit(sub(IAS_N, mul(ivAx, dot(IAS_N, ivAx))));
+  const ivRim = mad(iv.a, away, iv.r);
+  const pPrev = raFramePoint(ra, CRISTA_U[CRISTA_U.length - 2], 1);
+  for (let k = 0; k < CRISTA.sub; k++) pts.push(seatC(lerp3(pPrev, ivRim, k / CRISTA.sub)));
+  pts.push(seatC(ivRim));
   const segs = [];
   for (let i = 0; i + 1 < pts.length; i++) segs.push({ a: pts[i], b: pts[i + 1], r: i < CRISTA.svc ? CRISTA.rSvc + (CRISTA.r - CRISTA.rSvc) * i / CRISTA.svc : CRISTA.r });
   return segs;
 }
 // Eustachian valve: the crescentic flap at the IVC-RA junction directed toward
 // the fossa ovalis (in fetal life it streams IVC blood across the foramen ovale).
-function buildEustachian(ra) {
-  return { a: raFramePoint(ra, [-0.2, -0.85, -0.35], 0.9), b: raFramePoint(ra, [0.55, -0.75, -0.3], 0.82), r: 0.09 };
-}
-
-// ...and its attachment: a crescent along the anterior rim of the IVC orifice
-// (the side away from the septum), standing into the RA toward the fossa ovalis.
-// A fan of thin bands from the rim, ~1 cm long and ~2.5 mm thick: the flap seen
-// at the IVC-RA junction in the ME bicaval and subcostal IVC views.
-const EUST_RIM = { span: 70, n: 5, len: 0.8, r: 0.12, into: 0.1 };
-function buildEustachianRim(ivc) {
+// It arises from the anterior rim of the IVC orifice (the side away from the
+// septum) and stands into the RA toward the fossa ovalis: a dense fan of thin
+// bands from the rim, ~0.8 cm long, merged into one ~1.5 mm flap and carved from
+// the RA lumen (dRAlumen), so it is never a free bar in the cavity. (The flap
+// is the one seen at the IVC-RA junction in the ME bicaval, RV inflow and subcostal
+// IVC views.)
+// Medially the valve does not stop at the IVC rim: its horn runs on as the
+// Eustachian ridge (the sinus septum between the IVC and the coronary sinus,
+// carrying the tendon of Todaro) past the CS ostium on its fossa side — the
+// posterior border of the triangle of Koch — as a low fold (EUST_RIM.horn: n
+// bands along the RA floor from the medial end of the crescent to a point `off`
+// beyond the CS ostium centre toward the fossa, `len` tall at the crescent
+// tapering to `len1`). That is the part the parasternal RV inflow view, which
+// passes between the IVC and the CS ostium, cuts.
+const EUST_RIM = { span: 70, n: 11, len: 0.5, r: 0.075, rBase: 0.15, into: 0.1, horn: { n: 10, off: 0.6, reach: 0.65, len: 0.3, len1: 0.15 } };
+// (built on the live RA lumen once the chamber exists: each band's base is the
+// RA wall found outward from the IVC axis at the orifice, so the flap is rooted
+// on the wall at the IVC's anterior rim; the bands shorten toward the ends of
+// the crescent, where the flap merges with the wall)
+function buildEustachianRim(A) {
+  const ivc = A.ivc;
   const ax = unit(sub(ivc.b, ivc.a));                       // away from the RA
   const c = mad(ivc.a, ax, -EUST_RIM.into);
   const u0 = unit(sub(IAS_N, mul(ax, dot(IAS_N, ax))));     // away from the septum
   const v0 = cross(ax, u0);
   const segs = [];
   for (let k = 0; k < EUST_RIM.n; k++) {
-    const th = (-1 + 2 * k / (EUST_RIM.n - 1)) * EUST_RIM.span * Math.PI / 180;
-    const p = add(c, add(mul(u0, ivc.r * Math.cos(th)), mul(v0, ivc.r * Math.sin(th))));
-    segs.push({ a: p, b: mad(p, unit(sub(IAS.fossaC, p)), EUST_RIM.len), r: EUST_RIM.r });
+    const f = -1 + 2 * k / (EUST_RIM.n - 1), th = f * EUST_RIM.span * Math.PI / 180;
+    const dir = add(mul(u0, Math.cos(th)), mul(v0, Math.sin(th)));
+    let lo = 0, hi = 0.1;                                   // march out to the wall, then bisect
+    for (; hi < 3.0; lo = hi, hi += 0.1) { const q = mad(c, dir, hi); if (dRAlumen(q[0], q[1], q[2], A) >= 0) break; }
+    for (let i = 0; i < 12; i++) { const m = 0.5 * (lo + hi), q = mad(c, dir, m); if (dRAlumen(q[0], q[1], q[2], A) < 0) lo = m; else hi = m; }
+    const p = mad(c, dir, hi + 0.05);                       // (its root just inside the wall)
+    const len = EUST_RIM.len * Math.sqrt(Math.max(0, 1 - f * f * 0.85)) + 0.05;
+    segs.push({ a: p, b: mad(p, unit(sub(IAS.fossaC, p)), len), r: EUST_RIM.r, ra: EUST_RIM.rBase });
   }
+  // the medial horn along the Eustachian ridge, past the CS ostium: each band's
+  // root is the fold-free RA wall on the ray from the RA centre through a point
+  // on the line from the crescent's medial end to the end of the ridge
+  const H = EUST_RIM.horn, p0 = segs[0].a, cs = A.cs[A.cs.length - 1].b, rc = A.ra.c;
+  const end = mad(cs, unit(sub(IAS.fossaC, cs)), H.off);
+  for (let k = 1; k <= H.n; k++) {
+    const f = k / H.n, q = lerp3(p0, end, f * H.reach), dir = unit(sub(q, rc));
+    let lo = 0, hi = 0.1;
+    for (; hi < 5.0; lo = hi, hi += 0.1) { const r = mad(rc, dir, hi); if (dRAlumen(r[0], r[1], r[2], A, false) >= 0) break; }
+    for (let i = 0; i < 12; i++) { const m = 0.5 * (lo + hi), r = mad(rc, dir, m); if (dRAlumen(r[0], r[1], r[2], A, false) < 0) lo = m; else hi = m; }
+    const p = mad(rc, dir, hi + 0.05);
+    segs.push({ a: p, b: mad(p, unit(sub(IAS.fossaC, p)), H.len + (H.len1 - H.len) * f), r: EUST_RIM.r, ra: EUST_RIM.rBase });
+  }
+  segs.c = c; segs.R2 = 0;
+  for (const g of segs) segs.R2 = Math.max(segs.R2, (Math.hypot(...sub(g.a, c)) + EUST_RIM.len + 0.3) ** 2);
   return segs;
 }
 
@@ -1235,12 +1500,31 @@ function buildCS(M, raFloor) {
 // trilobed, not a tube), sino-tubular junction, ascending aorta, arch and the
 // descending thoracic aorta.
 const AS_POST_DIL = 0.36;                      // AS: ascending-aorta calibre gain above the STJ (~4 cm)
+// The sino-tubular ridge: a ring of wall round the root axis at the STJ (a torus
+// carved out of the lumen) narrows it to d ~2.5 over ~0.7 cm. That is the root's
+// 'tulip' — sinuses ~15-25 % wider than the waist in the long-axis cuts (ME AV
+// LAX 2.95 / 2.48 cm, PLAX 2.91 / 2.51 cm) — with the tubular aorta widening again
+// just above it. A ridge rather than a narrower junction calibre (stjR 1.4 ->
+// 1.25): that also narrowed the top of the sinuses, which the systolic descent of
+// the root brings into the PLAX M-mode line (the root walls then lost their
+// parallel motion), and the start of the tubular aorta (the AS post-stenotic
+// dilatation, the SVC's slide past the aorta). inR: the lumen radius at the
+// ridge; r: the ring's half-thickness; k: its blend into the wall (cm).
+const STJ_RIDGE = { inR: 1.25, r: 0.4, k: 0.1 };
 function buildAorta(A, path, swing = null) {
   const cuspDirs = [0, 1, 2].map((i) => {
-    const a = (90 + i * 120) * Math.PI / 180;               // RCC anterior, LCC left-posterior, NCC right-posterior
+    // RCC anterior, LCC left-posterior, NCC right-posterior. The NCC sinus bulges
+    // ~20 deg toward the RCC/NCC commissure: centred on its cusp (8 o'clock in
+    // PSAX-AV) it pressed into the RA over the fossa ovalis, which in this heart
+    // lies at ~7.7 o'clock only ~2.1 cm from the root axis at sinus height.
+    const a = (90 + i * 120 + (i === 1 ? -20 : 0)) * Math.PI / 180;
     return add(mul(E_SCR, Math.cos(a)), mul(E_ANT, Math.sin(a)));
   });
-  const sinusH = 0.85, sinusOff = 0.62, sinusR = AO.sinusR - 0.62; // sinus spheres -> root d 3.3
+  // sinus spheres (centre sinusH above the hinge line, sinusOff out from the axis
+  // toward each cusp centre) -> root d 3.3 at the cusp centres. (Larger, the
+  // non-coronary sinus presses into the RA over the fossa ovalis, and the right
+  // coronary sinus takes the PLAX root walls out of parallel motion.)
+  const sinusH = 0.85, sinusOff = 0.62, sinusR = AO.sinusR - sinusOff;
   const dil = path.dilatedAorta ? 1.25 : 1;
   // (swing: the systolic anterior displacement of the sinuses and the STJ; the
   // annulus stays on the fibrous skeleton, so the root shears just above it)
@@ -1249,8 +1533,10 @@ function buildAorta(A, path, swing = null) {
   return {
     valve: A,
     sinus: cuspDirs.map((d) => add(mad(mad(A, U_AO, sinusH), d, sinusOff), sw(sinusH))),
-    sinusR: sinusR * dil,
+    sinusR: sinusR * dil, sinusOff, sinusH,
     root: { a: mad(A, U_AO, -0.05), b: stj, r1: AO.annR, r2: AO.stjR * dil },
+    // the sino-tubular ridge: a ring round the root axis at the STJ (moving with it)
+    ridge: { c: stj, R: (STJ_RIDGE.inR + STJ_RIDGE.r) * dil, r: STJ_RIDGE.r * dil },
     asc: { a: stj, b: AO_ASC_TOP, r1: AO.stjR * dil, r2: AO.ascR * dil },
     // the curved ascending tube (STJ -> top), tapering from the STJ to the ascending calibre
     // (the STJ moves with the root while the top is fixed in the mediastinum: the
@@ -1299,6 +1585,7 @@ function lvEpiRadiusAt(y, L) {
 // the PDA descends the inferior interventricular groove. On echo the ostia are
 // the landmark of the PSAX-AV view (LM at ~4 o'clock off the left cusp, RCA at
 // ~10-11 o'clock off the right cusp). Calibres: LM ~4.5 mm, LAD / RCA ~3.5 mm.
+export const LM_OSTIUM_DEG = 300;
 const CONUS_LIFT = 2.3;                 // conus branch: distance off the RVOT axis (cm)
 function buildCoronaries(L, ao, T, tvN) {
   const segs = [];
@@ -1327,10 +1614,13 @@ function buildCoronaries(L, ao, T, tvN) {
     const a = angDeg * Math.PI / 180, r = lvEpiRadiusAt(y, L) + lift;
     return [Math.cos(a) * r, y, Math.sin(a) * r];
   };
-  const axis = mad(ao.valve, U_AO, 0.85);
+  const axis = mad(ao.valve, U_AO, ao.sinusH);
   const dirAt = (deg) => { const a = deg * Math.PI / 180; return add(mul(E_SCR, Math.cos(a)), mul(E_ANT, Math.sin(a))); };
-  // left main from the left-coronary sinus (330 deg in the PSAX-AV frame)
-  const lmO = mad(axis, dirAt(330), 0.62 + ao.sinusR - 0.12);
+  // left main from the left-coronary sinus (centred on 330 deg in the PSAX-AV
+  // frame). The ostium lies in the posterior half of the sinus, 300 deg, so the
+  // left main is cut at ~4 o'clock off the root in the PSAX-AV plane (review 12:
+  // at 330 deg it read 3.2 o'clock, and 0.15 cm clear of the sinus wall)
+  const lmO = mad(axis, dirAt(LM_OSTIUM_DEG), ao.sinusOff + ao.sinusR - 0.12);
   const bif = mad(lmO, unit(add(add(mul(E_SCR, 0.75), mul(E_ANT, 0.45)), mul(U_AO, -0.25))), 1.1);
   chain([lmO, bif], 0.23, 0.22);
   const yb = L.base;
@@ -1351,8 +1641,9 @@ function buildCoronaries(L, ao, T, tvN) {
   chain(cx, 0.18, 0.12);
   chain([cx[2], onLV(18, lf(0.22), 0.26), onLV(12, lf(0.42), 0.24), onLV(8, lf(0.6), 0.22)], 0.13, 0.09, 'OM1');
   chain([cx[4], onLV(-32, lf(0.22), 0.26), onLV(-38, lf(0.42), 0.24), onLV(-42, lf(0.56), 0.22)], 0.12, 0.08, 'OM2');
-  // RCA from the right-coronary sinus (anterior, 90 deg), round the right AV groove
-  const rcaO = mad(axis, dirAt(90), 0.62 + ao.sinusR - 0.12);
+  // RCA from the right-coronary sinus (anterior, 90 deg: ~12 o'clock in PSAX-AV
+  // with the root frame on the body axes), round the right AV groove
+  const rcaO = mad(axis, dirAt(90), ao.sinusOff + ao.sinusR - 0.12);
   const ea = unit(sub([0, 0, 1], mul(tvN, dot([0, 0, 1], tvN))));          // anterior, in the TV plane
   const el = unit(sub([-1, 0, 0], mul(tvN, dot([-1, 0, 0], tvN))));        // lateral (right)
   const rg = TV_R + 0.75;
@@ -1525,7 +1816,9 @@ function dLVlumenS(x, y, z, A, g) {
   // quick reject: the funnels live in the top 3 cm of the LV
   if (y > L.apexY + LVP.len * L.sL - 3.4) {
     const ym = y - mitralLift(x, y, z, A);                  // angle-dependent annular level
-    d = smin(d, sdFrustum(x, ym, z, M[0] * L.sS, M[1] - 1.3, (M[2] + 0.2) * L.sS, M[0], M[1] + 0.03, M[2], 1.8 * L.sS, L.mvR), 0.4);
+    // (the funnel reaches 0.1 cm past the annulus, so it abuts the LA's clip at the
+    // annular plane across the open orifice: no sliver of wall between the labels)
+    d = smin(d, sdFrustum(x, ym, z, M[0] * L.sS, M[1] - 1.3, (M[2] + 0.2) * L.sS, M[0], M[1] + 0.1, M[2], 1.8 * L.sS, L.mvR), 0.4);
     d = smin(d, sdFrustum(x, y, z, lo[0], lo[1], lo[2], Av[0] + U_AO[0] * 0.03, Av[1] + U_AO[1] * 0.03, Av[2] + U_AO[2] * 0.03, L.lvotR, AO.annR * 0.97), 0.35);
   }
   // apical trabeculation roughens the endocardium in the apical third
@@ -1608,7 +1901,14 @@ function dRVlumen(x, y, z, A) {
   const h = tx * n[0] + ty * n[1] + tz * n[2];
   if (h > -0.3) {
     const rr = Math.sqrt(Math.max(0, tx * tx + ty * ty + tz * tz - h * h));
-    if (rr < TV_R + 0.5) d = smax(d, h, 0.1);
+    // (the RV lumen reaches 0.1 cm past the plane, so it abuts the RA's clip at the
+    // plane across the open orifice: no sliver of wall between the two labels)
+    if (rr < TV_R + 0.5) {
+      // the orifice itself is RV inflow right up to the plane (the inflow funnel of
+      // the RV body is narrower than the annulus at its rim)
+      if (rr < TV_R) d = smin(d, Math.max(rr - TV_R * 0.88, Math.abs(h + 0.25) - 0.35), 0.15);
+      d = smax(d, h - 0.1, 0.1);
+    }
   }
   const epi = lvEpi(x, y, z, A);
   if (A.lv.septFlat && rvBodyD(x, y, z, A, 1.2) < 0) {
@@ -1679,7 +1979,7 @@ function iasAt(x, y, z, A) {
   const fn = fx * s.n[0] + fy * s.n[1] + fz * s.n[2];
   const rad = Math.sqrt(Math.max(0, fx * fx + fy * fy + fz * fz - fn * fn));
   const f = rad <= s.rFossa ? 0 : Math.min(1, (rad - s.rFossa) / 0.8);
-  _ias.s = sd;
+  _ias.s = sd; _ias.f = f;
   _ias.t = s.tFossa + (s.tLimbus - s.tFossa) * f * f * (3 - 2 * f);
   if (s.hc) {                                   // secundum ASD: the hole, with thin fossa rims round it
     const hx = x - s.hc[0], hy = y - s.hc[1], hz = z - s.hc[2];
@@ -1732,17 +2032,31 @@ function dAppendage(x, y, z, segs, k) {
 // ridges ~LAA_PECT.period apart, standing up to LAA_PECT.h into the lumen (the
 // trabeculated appendage, against the smooth-walled LA body), ramping in over the
 // first lobe
-const LAA_PECT = { period: 0.65, h: 0.22, from: 0.45 };
+const LAA_LIP = 0.8;
+const LAA_PECT = { period: 0.65, h: 0.22, from: 0.45, clear: 0.25, blend: 0.1 };
+// (The position along the appendage is a distance-weighted mean over the lobes'
+// axes, not the arc length at the single nearest axis point: on the inside of a
+// bend the nearest point jumps from one lobe to the next, the arc length with it,
+// and a ridge was sliced off along the bend's bisector — on one side of it a
+// full-height ridge, on the other none — leaving a slab of muscle that touches no
+// wall and is cut as free dots in the appendage ostium by the ME two-chamber
+// plane. LAA_PECT.blend, cm, is the distance over which one lobe's count hands
+// over to the next.)
 function laaPectinate(x, y, z, segs) {
-  let best = 1e9, sArc = 0, acc = 0;
+  let best = 1e9, acc = 0;
+  const rs = [], ss = [];
   for (const g of segs) {
     const ax = sub(g.b, g.a), L = Math.hypot(ax[0], ax[1], ax[2]);
     const t = Math.max(0, Math.min(1, ((x - g.a[0]) * ax[0] + (y - g.a[1]) * ax[1] + (z - g.a[2]) * ax[2]) / (L * L)));
     const q = [g.a[0] + ax[0] * t - x, g.a[1] + ax[1] * t - y, g.a[2] + ax[2] * t - z];
-    const r = q[0] * q[0] + q[1] * q[1] + q[2] * q[2];
-    if (r < best) { best = r; sArc = acc + t * L; }
+    const r = Math.sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
+    if (r < best) best = r;
+    rs.push(r); ss.push(acc + t * L);
     acc += L;
   }
+  let sw = 0, sArc = 0;
+  for (let i = 0; i < rs.length; i++) { const w = Math.exp(-(rs[i] - best) / LAA_PECT.blend); sw += w; sArc += w * ss[i]; }
+  sArc /= sw;
   const s0 = LAA_PECT.from * Math.hypot(...sub(segs[0].b, segs[0].a));
   if (sArc <= s0) return 0;
   const ramp = Math.min(1, (sArc - s0) / 0.6);
@@ -1771,25 +2085,45 @@ function laInflow(x, y, z, A) {
 // body = true: the chamber body alone, without the appendage and the vein
 // tubes — what the ASE LA volume measures (biplane / 3D LAV excludes the LAA and
 // the pulmonary veins)
-function dLAlumen(x, y, z, A, body = false) {
+function dLAlumen(x, y, z, A, body = false, folds = true) {
   const e0 = sdAtrium(x, y, z, A.la, 0);
   const e = A.ias.lf && e0 > 0.5 ? Math.min(e0, laSeptFace(x, y, z, A.ias) + 0.3) : e0;   // (far test only)
   if (body) {
     if (e > 3.2) return e;
   } else if (e > 3.2) {                                                     // far away: only the vein tubes matter
-    const v = Math.min(e, dPV(x, y, z, A));
-    return v > 1.5 ? v : clearRPA(ssub(v, dAOarchDTA(x, y, z, A) - A.ao.wall - 0.15, 0.2), x, y, z, A);
+    // (and the appendage, whose tip lies beyond this bound: near it the full
+    // lumen below is evaluated, so the tip is not cut off where e reaches 3.2)
+    const dAp = dAppendage(x, y, z, A.la.aa, 0.22);
+    if (dAp > 1.2) {
+      const v = Math.min(e, dPV(x, y, z, A), dAp);
+      return v > 1.5 ? v : clearRPA(ssub(v, dAOarchDTA(x, y, z, A) - A.ao.wall - 0.15, 0.2), x, y, z, A);
+    }
   }
+  const M = A.lv.M;                                                  // mitral orifice
+  const ym = y - mitralLift(x, y, z, A);                             // (saddle deepens in systole)
+  const fn = laInflow(x, ym, z, A);
   let d = e0;
   if (A.ias.lf) d = Math.min(d, laSeptFace(x, y, z, A.ias));         // (septal face along the caval axis)
   if (A.ias.hc) d = smin(d, asdFace(x, y, z, A.ias), 0.3);           // (secundum ASD: LA side of its rims)
   if (!body) {
-    d = smin(d, dAppendage(x, y, z, A.la.aa, 0.22) + laaPectinate(x, y, z, A.la.aa), 0.14);   // NARROW neck
+    const dB = d;                                                    // (the body alone: the ridge's height datum)
+    // (a pectinate ridge stands on appendage wall: where a lobe lies against the
+    // body lumen or its inflow funnel the tissue between the two pools is thinner
+    // than the ridge is high, and a ridge there would be cut as a free muscle dot
+    // in the blood)
+    const pw = Math.max(0, Math.min(1, (smin(dB, fn, 0.6) - LAA_PECT.clear) / LAA_PECT.clear));
+    const dAp = dAppendage(x, y, z, A.la.aa, 0.22) + (pw > 0 ? pw * laaPectinate(x, y, z, A.la.aa) : 0);
+    d = smin(d, dAp, 0.14);                                          // NARROW neck
+    // the wall between the appendage ostium and the inflow funnel (the mitral
+    // isthmus side of the ostium) ends in a rounded lip, not in a web thinner than
+    // any atrial wall: a hair-thin edge is cut by a long-axis plane as a free dot
+    // (before the ridge is carved, so the lip never opens the ridge)
+    if (dAp < LAA_LIP) d = Math.min(d, smin(dAp, fn, LAA_LIP));
     d = smin(d, dPV(x, y, z, A), 0.4);                               // veins flare in
+    // the coumadin ridge folds in from the wall (once seated; filleted into it)
+    if (folds && A.pv.ridge.top0 !== undefined) d = smax(d, -dRidge(x, y, z, A, dB), RIDGE.k);
   }
-  const M = A.lv.M;                                                  // mitral orifice
-  const ym = y - mitralLift(x, y, z, A);                             // (saddle deepens in systole)
-  d = smin(d, laInflow(x, ym, z, A), 0.6);
+  d = smin(d, fn, 0.6);
   d = clipAtAnnulus(d, x, ym, z, M, MV_N, MV_R + 0.6);               // LA ends at the mitral annulus
   const s = iasAt(x, y, z, A);
   d = smax(d, s.s + s.t, 0.12);                                      // cut by the septum
@@ -1811,17 +2145,30 @@ function clearRPA(d, x, y, z, A) {
     sdCapsule(x, y, z, q[0][0], q[0][1], q[0][2], q[1][0], q[1][1], q[1][2], q[2]));
   return ssub(d, c - A.pa.wall - 0.1, 0.1);
 }
-function dRAlumen(x, y, z, A) {
+// the SVC lumen: its lower (caval-line) and upper (rightward) segments
+function dSVC(x, y, z, v, grow) {
+  const lo = sdCapsule(x, y, z, v.a[0], v.a[1], v.a[2], v.b[0], v.b[1], v.b[2], v.r + grow);
+  return v.c ? Math.min(lo, sdCapsule(x, y, z, v.b[0], v.b[1], v.b[2], v.c[0], v.c[1], v.c[2], v.r + grow)) : lo;
+}
+// RA wall over the aortic mound (torus aorticus), cm: the thin medial atrial wall
+// lying on the non-coronary sinus. With the root on the body axes and the RA at
+// its normal size the apical four-chamber plane passes ~0.4 cm behind the sinus
+// at end-systole and grazes this wall: at 0.22 cm it joined the interatrial
+// septum into a 1.4 cm block at the crux (mean septal thickness 0.62 cm); at
+// 0.15 cm the RA gains 0.6 cm2 in that plane (RA / LA area 0.92). 0.18 cm: mean
+// septal thickness 0.47 cm, RA 17.6 cm2, RA / LA 0.91.
+const RA_AO_WALL = 0.18;
+function dRAlumen(x, y, z, A, folds = true) {
   const e = sdAtrium(x, y, z, A.ra, 0);
   if (e > 4.0) {                                                     // far away: only the caval tubes matter
     const v = A.svc, w = A.ivc;
-    const t = Math.min(e, sdCapsule(x, y, z, v.a[0], v.a[1], v.a[2], v.b[0], v.b[1], v.b[2], v.r),
+    const t = Math.min(e, dSVC(x, y, z, v, 0),
       sdCapsule(x, y, z, w.a[0], w.a[1], w.a[2], w.b[0], w.b[1], w.b[2], w.r));
-    return t > 1.5 ? t : ssub(t, dAOroot(x, y, z, A) - A.ao.wall - 0.22, 0.15);   // SVC abuts, never enters, the aorta
+    return t > 1.5 ? t : ssub(t, dAOroot(x, y, z, A) - A.ao.wall - RA_AO_WALL, 0.15);   // SVC abuts, never enters, the aorta
   }
   let d = smin(e, dAppendage(x, y, z, A.ra.aa, 0.3), 0.7);          // BROAD mouth
   const v = A.svc, w = A.ivc;
-  d = smin(d, sdCapsule(x, y, z, v.a[0], v.a[1], v.a[2], v.b[0], v.b[1], v.b[2], v.r), 0.9);
+  d = smin(d, dSVC(x, y, z, v, 0), 0.9);
   d = smin(d, sdCapsule(x, y, z, w.a[0], w.a[1], w.a[2], w.b[0], w.b[1], w.b[2], w.r), 0.6);
   // sinus venarum: the smooth-walled venous back of the RA between the two caval
   // orifices, so SVC -> RA -> IVC is one continuous channel (the ME bicaval view)
@@ -1844,7 +2191,14 @@ function dRAlumen(x, y, z, A) {
   d = smax(d, -s.s + s.t, 0.12);
   // the aortic root (non-coronary sinus) bulges against the RA: its wall and the
   // RA wall lie between the two blood pools, never a shared lumen
-  return ssub(d, dAOroot(x, y, z, A) - A.ao.wall - 0.22, 0.15);
+  d = ssub(d, dAOroot(x, y, z, A) - A.ao.wall - RA_AO_WALL, 0.15);
+  // the crista terminalis and the Eustachian valve are folds of the RA wall: carved
+  // from the lumen, so they stay continuous with the wall in every plane
+  if (folds && A.crista && d > -0.9) d = smax(d, -dCrista(x, y, z, A), 0.1);
+  // (the valve is filleted into the wall at its base: thin as it is, a plane that
+  // cuts it near its root then still shows it rising from the wall)
+  if (folds && A.eustachianRim && d > -0.9) d = smax(d, -dEustachian(x, y, z, A), 0.12);
+  return d;
 }
 // Vertical offset of the live mitral annulus (and everything hinged on it) from
 // the level of its centre, at the point's angle round the annulus: each sector
@@ -1908,10 +2262,60 @@ function dCrista(x, y, z, A) {
   }
   return d;
 }
+// Coumadin (warfarin) ridge, carved from the LA lumen. It is the wall between
+// the LAA and LSPV mouths: it rises from the crotch where their lumens part and
+// ends in a bulbous tip (the "Q-tip") at about the level of the atrial wall, so
+// that its length from the crotch is RIDGE.len (~0.8-1 cm) while it stands only
+// a little proud of the body wall (~1-5 mm, more as the LA fills and the crotch
+// shallows). (Standing 0.6-0.7 cm into the cavity it was cut as a free bar, or a
+// 2 cm shelf, by every plane that runs near the lateral LA wall: ME AV LAX, A5C.)
+// Coordinates: s, the height above the LA body wall (the body lumen's own
+// distance, so the blade follows the real wall, never a chord across the
+// cavity); a, across the blade (LSPV -> LAA); t, along the ridge, which spans the
+// posterior rim of the LAA ostium (RIDGE.run) and merges with the wall at its
+// ends. In any section across it the ridge is a stalk RIDGE.r0 thick, rising
+// from inside the wall (s = -RIDGE.back) to a bulb of radius RIDGE.rb; RIDGE.k
+// fillets it into the wall. reach: how far along the inward normal it may lie.
+export const RIDGE = { len: 0.83, r0: 0.13, rb: 0.28, run: [-1.0, 1.1], back: 0.8, reach: 0.9, k: 0.22 };
+function dRidge(x, y, z, A, dB) {
+  const g = A.pv.ridge, dx = x - g.root[0], dy = y - g.root[1], dz = z - g.root[2];
+  const t = dx * g.t[0] + dy * g.t[1] + dz * g.t[2];
+  const tm = 0.5 * (RIDGE.run[0] + RIDGE.run[1]), th = 0.5 * (RIDGE.run[1] - RIDGE.run[0]);
+  const over = Math.abs(t - tm) - th;                              // (beyond the ends of the run)
+  if (over > 0.6) return over;
+  const sn = dx * g.n[0] + dy * g.n[1] + dz * g.n[2];
+  if (sn > RIDGE.reach + 0.6) return sn - RIDGE.reach;             // (only at the lateral wall)
+  const a = dx * g.e[0] + dy * g.e[1] + dz * g.e[2];
+  if (Math.abs(a) > 1.2) return Math.abs(a) - RIDGE.rb;
+  const s = -(dB === undefined ? dLAlumen(x, y, z, A, true) : dB);
+  const u = Math.max(-1, Math.min(1, (t - tm) / th));
+  const top = g.top0 * Math.sqrt(1 - u * u);
+  const sb = top - RIDGE.rb;
+  const sc = s < -RIDGE.back ? -RIDGE.back : s > sb ? sb : s;
+  let d = Math.min(Math.hypot(s - sc, a) - RIDGE.r0, Math.hypot(s - sb, a) - RIDGE.rb);
+  // (a true distance off the ends of the run and beyond the reach, so the fillet
+  // blend only ever acts round the ridge itself)
+  if (over > 0) d = d > 0 ? Math.hypot(d, over) : over;
+  return Math.max(d, sn - RIDGE.reach);
+}
+// The ridge's height on the live atrium: the crotch is found from its root along
+// the inward normal (the first point without LA blood on both sides of the blade,
+// 0.4 cm out; as the audit measures it), and the tip set RIDGE.len above it.
+function seatRidge(A) {
+  const g = A.pv.ridge, inLA = (q) => dLAlumen(q[0], q[1], q[2], A) < 0;
+  const both = (h) => { const c = mad(g.root, g.n, h); return inLA(mad(c, g.e, 0.4)) && inLA(mad(c, g.e, -0.4)); };
+  let lo = 0, hi = 0;                                    // march down from the root, then bisect
+  for (; hi > -2.5; lo = hi, hi -= 0.1) if (!both(hi)) break;
+  for (let i = 0; i < 10; i++) { const m = 0.5 * (lo + hi); if (both(m)) lo = m; else hi = m; }
+  g.crotch = lo;
+  g.top0 = Math.max(0, RIDGE.len + lo);
+}
 function dEustachian(x, y, z, A) {
-  const e = A.eustachian;
-  let d = sdCapsule(x, y, z, e.a[0], e.a[1], e.a[2], e.b[0], e.b[1], e.b[2], e.r);
-  for (const s of A.eustachianRim) d = Math.min(d, sdCapsule(x, y, z, s.a[0], s.a[1], s.a[2], s.b[0], s.b[1], s.b[2], s.r));
+  const segs = A.eustachianRim, c = segs.c;
+  const ox = x - c[0], oy = y - c[1], oz = z - c[2];
+  if (ox * ox + oy * oy + oz * oz > segs.R2) return 1;           // (bound: far from the IVC orifice)
+  let d = 1e9;
+  for (const s of segs) d = smin(d, sdCapsule(x, y, z, s.a[0], s.a[1], s.a[2], s.b[0], s.b[1], s.b[2], s.ra, s.r), 0.08);
   return d;
 }
 function dCS(x, y, z, A, inflate) {
@@ -1932,6 +2336,10 @@ function dAOroot(x, y, z, A) {
   let da = 1e9;
   for (const s of ao.ascSegs) da = Math.min(da, sdRoundCone(x, y, z, s.a[0], s.a[1], s.a[2], s.b[0], s.b[1], s.b[2], s.r1, s.r2));
   d = smin(d, da, 0.4);
+  // the sino-tubular ridge (a torus round the root axis) carved out of the lumen
+  const g = ao.ridge, qx = x - g.c[0], qy = y - g.c[1], qz = z - g.c[2], h = qx * U_AO[0] + qy * U_AO[1] + qz * U_AO[2];
+  const rad = Math.hypot(qx - h * U_AO[0], qy - h * U_AO[1], qz - h * U_AO[2]);
+  d = ssub(d, Math.hypot(rad - g.R, h) - g.r, STJ_RIDGE.k);
   return d;
 }
 function dAOarchDTA(x, y, z, A) {
@@ -1963,11 +2371,28 @@ function dPAlumen(x, y, z, A) {
   if (d < 1.0) d = ssub(d, dAOlumen(x, y, z, A) - A.ao.wall - pa.wall, 0.1);
   return d;
 }
-function dPap(x, y, z, A) {
+function dPap(x, y, z, A, dlv = null) {
   let d = 1e9;
   for (const p of A.pap) {
-    d = smin(d, sdRoundCone(x, y, z, p.a[0], p.a[1], p.a[2], p.b[0], p.b[1], p.b[2], p.rb, p.rt), 0.35);
-    const r = p.root; if (r) d = smin(d, sdRoundCone(x, y, z, r.a[0], r.a[1], r.a[2], r.b[0], r.b[1], r.b[2], r.rb, r.rt), 0.35);
+    let dm = sdRoundCone(x, y, z, p.a[0], p.a[1], p.a[2], p.b[0], p.b[1], p.b[2], p.rb, p.rt);
+    // broad base: below PAP.filTop of its height the muscle is filleted into the
+    // endocardium (a smooth union with the wall), so it rises from the wall with
+    // no blood crevice beside or behind it; the upper body and head stay free
+    if (dm < PAP.fillet && PAP.fillet > 0) {
+      const ab = [p.b[0] - p.a[0], p.b[1] - p.a[1], p.b[2] - p.a[2]];
+      const t = ((x - p.a[0]) * ab[0] + (y - p.a[1]) * ab[1] + (z - p.a[2]) * ab[2]) / (ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]);
+      const ft = p.filTop ?? PAP.filTop;
+      const kf = PAP.fillet * (1 - smoothstep(ft, ft + PAP.filFade, t));
+      if (kf > 0.02) {
+        if (dlv == null) dlv = dLVlumen(x, y, z, A);
+        if (dlv < 0) {                                          // (fills blood only: the wall stays wall)
+          const h = Math.max(kf - Math.abs(dm + dlv), 0) / kf;  // quadratic blend: fills a cleft up to ~kf / 2 wide
+          dm = Math.min(dm, -dlv) - h * h * kf * 0.25;
+        }
+      }
+    }
+    const r = p.root; if (r) dm = smin(dm, sdRoundCone(x, y, z, r.a[0], r.a[1], r.a[2], r.b[0], r.b[1], r.b[2], r.rb, r.rt), 0.35);
+    d = Math.min(d, dm);
   }
   return d;
 }
@@ -2000,15 +2425,26 @@ function myoParts(x, y, z, A) {
   // (the LA wall also covers the mitral inflow funnel, which bulges beyond the
   // chamber ellipsoid at the annulus: no blood touches the pericardium there)
   if (la < 1.5) la = smin(la, laInflow(x, y - mitralLift(x, y, z, A), z, A) - 0.22, 0.6);
-  const sep = (la < 3.2 || ra < 4.0) ? iasAt(x, y, z, A).s : 0;
-  if (la < 3.2) {
-    d = smin(d, smin(smax(la, sep - 0.02, 0.1), dAppendage(x, y, z, A.la.aa, 0.22) - 0.15, 0.35), 0.4);
+  // (the tip of the tubular appendage lies up to ~4 cm from the body's surface:
+  // beyond the 3.2 cm bound its wall, and the pericardium over it, were cut off)
+  // (a sphere round the appendage first: this runs for every sample)
+  let dAp = 1e9;
+  if (la >= 3.2) {
+    const aa = A.la.aa, p0 = aa[0].a, p1 = aa[aa.length - 1].b;
+    const cx = 0.5 * (p0[0] + p1[0]) - x, cy = 0.5 * (p0[1] + p1[1]) - y, cz = 0.5 * (p0[2] + p1[2]) - z;
+    const R = 0.5 * Math.hypot(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]) + 2.6;
+    if (cx * cx + cy * cy + cz * cz < R * R) dAp = dAppendage(x, y, z, aa, 0.22) - 0.15;
+  }
+  const nearLA = la < 3.2 || dAp < 1.0;
+  const sep = (nearLA || ra < 4.0) ? iasAt(x, y, z, A).s : 0;
+  if (nearLA) {
+    d = smin(d, smin(smax(la, sep - 0.02, 0.1), la < 3.2 ? dAppendage(x, y, z, A.la.aa, 0.22) - 0.15 : dAp, 0.35), 0.4);
     tubes = dPV(x, y, z, A) - 0.1;
-  } else d = Math.min(d, la);
+  } else d = Math.min(d, la, dAp);
   if (ra < 4.0) {
     d = smin(d, smin(smax(ra, -sep - 0.02, 0.1), dAppendage(x, y, z, A.ra.aa, 0.3) - 0.15, 0.4), 0.4);
     const v = A.svc, iv = A.ivc;
-    tubes = Math.min(tubes, sdCapsule(x, y, z, v.a[0], v.a[1], v.a[2], v.b[0], v.b[1], v.b[2], v.r + 0.1));
+    tubes = Math.min(tubes, dSVC(x, y, z, v, 0.1));
     tubes = Math.min(tubes, sdCapsule(x, y, z, iv.a[0], iv.a[1], iv.a[2], iv.b[0], iv.b[1], iv.b[2], iv.r + 0.1));
     // (the sinus venarum and the caval funnels carry the RA wall with them)
     const sv = A.ra.sv, c = A.ra.c;
@@ -2036,6 +2472,57 @@ export function epiDist(x, y, z, A) {
   return d;
 }
 
+// ---- pericardial reflections and sinuses (review 12) --------------------------
+// The fibrous (parietal) sac does not follow the great vessels out of the chest:
+// it reflects onto the ascending aorta ~1 cm below the innominate artery, onto
+// the pulmonary trunk at its bifurcation (the right and left pulmonary arteries
+// are extrapericardial beyond their first centimetre), onto ~2 cm of the SVC,
+// and onto the pulmonary-vein ostia and the IVC at the atrial walls (the venous
+// tubes pierce it, they are not wrapped).
+export const PERI_REFLECT = { paBranch: 1.0, svc: 2.0, sac: 0.3 };   // (sac: the drawn 3D sac lies 3 mm outside this field's zero)
+// Distance to the heart as the PARIETAL SAC wraps it: the epicardium of the four
+// chambers, the aortic root and ascending aorta, the pulmonary trunk with the
+// first centimetre of each branch, and the intrapericardial SVC. Kept apart from
+// epiDist (the visceral surface every wall is drawn from) and from the effusion's
+// visceralDist: this one only says where the sac is.
+export function parietalSacDist(x, y, z, A) {
+  let d = myoParts(x, y, z, A).core;
+  d = smin(d, dAOroot(x, y, z, A) - A.ao.wall, 0.4);
+  const pa = A.pa, bif = pa.main.b;
+  let dp = sdRoundCone(x, y, z, pa.main.a[0], pa.main.a[1], pa.main.a[2], bif[0], bif[1], bif[2], pa.main.r1, pa.main.r2);
+  // the branches as far as the reflection: each one clipped by a sphere about the bifurcation
+  let db = 1e9;
+  for (const seg of pa.branch) db = Math.min(db, sdCapsule(x, y, z, seg[0][0], seg[0][1], seg[0][2], seg[1][0], seg[1][1], seg[1][2], seg[2]));
+  // (the drawn sac, PERI_REFLECT.sac outside, then closes 1 cm beyond the trunk)
+  const reach = Math.hypot(x - bif[0], y - bif[1], z - bif[2]) - (pa.main.r2 + PERI_REFLECT.paBranch - PERI_REFLECT.sac - pa.wall);
+  dp = smin(dp, Math.max(db, reach), 0.3);
+  d = smin(d, dp - pa.wall, 0.4);
+  // the SVC for its last ~2 cm above the cavo-atrial junction
+  const sv = A.svc, ax = [sv.b[0] - sv.a[0], sv.b[1] - sv.a[1], sv.b[2] - sv.a[2]], al = Math.hypot(ax[0], ax[1], ax[2]) || 1;
+  const k = Math.min(1, PERI_REFLECT.svc / al), e = [sv.a[0] + ax[0] * k, sv.a[1] + ax[1] * k, sv.a[2] + ax[2] * k];
+  d = smin(d, sdCapsule(x, y, z, sv.a[0], sv.a[1], sv.a[2], e[0], e[1], e[2], sv.r + 0.15), 0.3);
+  return d;
+}
+// The transverse sinus: the passage of the pericardial space behind the two
+// great arteries and in front of the atria (the classic TEE site of fluid, and
+// of a pseudo-abscess, beside the aortic root). Returns the two wall distances
+// of a point: `art` to the outer wall of the aortic root / ascending aorta or
+// pulmonary trunk, `atr` to the atrial epicardium; a point is IN the sinus when
+// both are positive, the nearest chamber is an atrium and art + atr is less
+// than the width the sinus is distended to.
+const _ts = { art: 0, atr: 0, atrial: false };
+export function transverseSinus(x, y, z, A) {
+  const pa = A.pa;
+  const dtr = sdRoundCone(x, y, z, pa.main.a[0], pa.main.a[1], pa.main.a[2], pa.main.b[0], pa.main.b[1], pa.main.b[2], pa.main.r1, pa.main.r2) - pa.wall;
+  _ts.art = Math.min(dAOroot(x, y, z, A) - A.ao.wall, dtr);
+  _ts.atrial = false; _ts.atr = 1e9;
+  if (_ts.art > 2) return _ts;
+  const dat = Math.min(dLAlumen(x, y, z, A), dRAlumen(x, y, z, A));
+  _ts.atrial = dat < Math.min(dLVlumen(x, y, z, A), dRVlumen(x, y, z, A));
+  _ts.atr = myoParts(x, y, z, A).core;
+  return _ts;
+}
+
 // The visceral envelope an effusion is measured from: the epicardium plus the
 // coronary sinus with its wall and a sheath of AV-groove fat. The CS lies deep to
 // the visceral pericardium against the LV and LA, so fluid starts outside it and
@@ -2056,12 +2543,12 @@ function dArchHeads(x, y, z, A) {
   }
   return d;
 }
-// the posterior mediastinal bed behind the atria: the straight course from the
-// end of the arch to the aorta behind the LA, which the bowed descending aorta
-// (DTA_MID) leaves to the oesophagus
+// the posterior mediastinal bed behind the atria that the oesophagus occupies
+// (POST_BED_TOP down to the aorta behind the LA), right of and in front of the
+// descending aorta
 function dPostBed(x, y, z, A) {
-  const t = A.ao.dta;
-  return sdCapsule(x, y, z, t.top[0], t.top[1], t.top[2], t.a[0], t.a[1], t.a[2], t.r);
+  const t = A.ao.dta, q = POST_BED_TOP;
+  return sdCapsule(x, y, z, q[0], q[1], q[2], t.a[0], t.a[1], t.a[2], t.r);
 }
 function dDTA(x, y, z, A) {
   const t = A.ao.dta, m = t.mid || t.top;
@@ -2075,11 +2562,13 @@ export function lumenDist(x, y, z, A, which) {
     case 'RV': return dRVlumen(x, y, z, A);
     case 'LA': return dLAlumen(x, y, z, A);
     case 'LA_BODY': return dLAlumen(x, y, z, A, true);
+    case 'LA_NOFOLD': return dLAlumen(x, y, z, A, false, false);     // (without the coumadin ridge)
     case 'LAA': return dAppendage(x, y, z, A.la.aa, 0.22);            // the appendage tube alone
     case 'PV': return dPV(x, y, z, A);                                 // the four vein tubes alone
     case 'LV_EPI': return lvEpi(x, y, z, A);                           // LV epicardium (wall + cavity)
     case 'PAP': return dPap(x, y, z, A);                               // the LV papillary muscles
     case 'RA': return dRAlumen(x, y, z, A);
+    case 'RA_NOFOLD': return dRAlumen(x, y, z, A, false);         // (without the crista / Eustachian folds)
     case 'AO': return dAOlumen(x, y, z, A);
     case 'AOROOT': return dAOroot(x, y, z, A);
     case 'PA': return dPAlumen(x, y, z, A);
@@ -2088,7 +2577,7 @@ export function lumenDist(x, y, z, A, which) {
     // thoracic aorta, the cavae, the left brachiocephalic vein, the coronaries)
     case 'ARCH': return dArchHeads(x, y, z, A);
     case 'DESC': return dDTA(x, y, z, A);
-    case 'SVC': { const v = A.svc; return sdCapsule(x, y, z, v.a[0], v.a[1], v.a[2], v.b[0], v.b[1], v.b[2], v.r); }
+    case 'SVC': return dSVC(x, y, z, A.svc, 0);
     case 'IVC': { const v = A.ivc; return sdCapsule(x, y, z, v.a[0], v.a[1], v.a[2], v.b[0], v.b[1], v.b[2], v.r); }
     case 'BCV': return dBCV(x, y, z, A);
     case 'CORONARY': return dCoronary(x, y, z, A, 0, 0.5);       // (exact within 0.5 cm of a vessel)
@@ -2303,6 +2792,8 @@ export const BODY = {
 // epicardium by a virtual space (which an effusion opens up). Epicardial fat sits
 // in the AV and interventricular grooves.
 export const PERI = { gap: 0.1, thick: 0.15 };
+const COR_SHEATH = 0.45;                                 // fat round an epicardial coronary, from its lumen surface (cm)
+const PERI_SINUS = 1.4;                                  // widest gap between an atrium and a great artery with no parietal layer in it (cm)
 
 // Classify a point as blood / myocardium / vessel / surrounding tissue (valves &
 // effusion handled by the caller). Returns { code, echo }. `periOff` (>=0, cm)
@@ -2314,7 +2805,7 @@ export function bodyClassify(x, y, z, A, periOff = 0) {
   const drv = dRVlumen(x, y, z, A);
 
   // papillary muscles & moderator band read as muscle inside the blood pool
-  if (dlv < 0.2 && dPap(x, y, z, A) < 0) return bc(BODY.PAP, 0.7);
+  if (dlv < 0.2 && dPap(x, y, z, A, dlv) < 0) return bc(BODY.PAP, 0.7);
   if (drv < 0.2 && dMod(x, y, z, A) < 0) return bc(BODY.PAP, 0.66);
 
   const dla = dLAlumen(x, y, z, A);
@@ -2322,16 +2813,14 @@ export function bodyClassify(x, y, z, A, periOff = 0) {
   // right-atrial ridges standing proud of the wall: the crista terminalis reads
   // as muscle (a classic pseudo-mass), the Eustachian valve as brighter fibrous
   // tissue. Gated on being in/near the RA so the tests cost nothing elsewhere.
-  if (dra < 0.25) {
-    // (only within the wall shell: the ridge can never read as a free bar)
-    if (dra > -CRISTA.shell && dCrista(x, y, z, A) < 0) return bc(BODY.PAP, 0.68);
+  // (both are carved from the lumen by dRAlumen: painted only where they are wall)
+  if (dra > 0 && dra < 0.3 && drv > 0) {
+    if (dCrista(x, y, z, A) < 0) return bc(BODY.PAP, 0.68);
     if (dEustachian(x, y, z, A) < 0) return bc(BODY.PAP, 0.82);
   }
-  // the LSPV/LAA ("warfarin") ridge stands into the LA — reads as bright tissue
-  if (dla < 0.25) {
-    const g = A.pv.ridge;
-    if (sdCapsule(x, y, z, g.a[0], g.a[1], g.a[2], g.b[0], g.b[1], g.b[2], g.r) < 0) return bc(BODY.PAP, 0.86);
-  }
+  // the LSPV/LAA ("warfarin") ridge, carved from the LA lumen (dLAlumen), so it is
+  // wall continuous with the LA wall: its muscle reads bright (dense, folded wall)
+  if (dla > 0 && dla < 0.3 && dlv > 0 && dRidge(x, y, z, A) < 0) return bc(BODY.PAP, 0.86);
   const dao = dAOlumen(x, y, z, A);
   const dpa = dPAlumen(x, y, z, A);
   const dcs = dCS(x, y, z, A, 0);
@@ -2357,18 +2846,29 @@ export function bodyClassify(x, y, z, A, periOff = 0) {
   // myocardium / vessel walls: inside the epicardial body but outside every lumen
   const m = myoParts(x, y, z, A);
   // epicardial coronary arteries: arterial lumen, bright wall, a sheath of fat
-  if (m.all < 1.0 && m.all > -0.35) {
-    const dc = dCoronary(x, y, z, A, 0, 0.45);
-    if (dc < 0.45) {
+  let dsh = 1e9;                                           // to the surface of a coronary's fat sheath
+  if (m.all < 1.5 && m.all > -0.35) {
+    const dc = dCoronary(x, y, z, A, 0, COR_SHEATH + 0.3);
+    if (dc < COR_SHEATH) {
       if (dc < 0) return bc(BODY.AO, 0.03);
       if (dc < 0.06) return bc(BODY.VESSELWALL, 0.5);
       if (m.all > -0.05) return bc(BODY.FAT, 0.5);
     }
+    dsh = dc - COR_SHEATH;
   }
   // venous tubes (SVC, IVC, pulmonary veins, CS) have thin fibrous walls, not
   // muscle: a grazing cut through one must read as a faint line, not a solid mass
   if (m.all < 0) {
-    if (m.core < 0.02) return bc(BODY.MYO, 0.55);
+    if (m.core < 0.02) {
+      // the fossa ovalis is a thin fibrous membrane (the valve of the foramen
+      // ovale), not muscle like the limbus round it: fainter, so the thin fossa
+      // stands out between the thick superior and inferior limbus
+      if (dla < 0.4 && dra < 0.4) {
+        const s = iasAt(x, y, z, A);
+        if (s.f < 0.35 && Math.abs(s.s) < s.t + 0.15) return bc(BODY.VESSELWALL, 0.35);
+      }
+      return bc(BODY.MYO, 0.55);
+    }
     // the hepatic veins open through the IVC wall (their confluence), not behind it
     if (dHepaticVeins(x, y, z, A) < 0) return bc(BODY.VEIN, 0.03);
     return bc(BODY.VESSELWALL, 0.35);
@@ -2402,13 +2902,19 @@ export function bodyClassify(x, y, z, A, periOff = 0) {
   // fluid inside it) starts outside it and never runs between the CS and the heart
   if (periOff > 0 && dcs < 0.35) return bc(BODY.FAT, 0.62);
   const mCore = periOff > 0 ? Math.min(m.core, dcs - 0.35) : m.core;   // (m is shared scratch: keep it)
-  if (below < 0.1 + periOff && mCore < off + PERI.thick + 0.3) {   // (an effusion sac bulges the tendon down)
+  if (below < 0.1 + periOff && (mCore < off + PERI.thick + 0.3 || (periOff === 0 && dsh < PERI.gap + PERI.thick))) {   // (an effusion sac bulges the tendon down)
     const dr = dAOroot(x, y, z, A) - A.ao.wall;
     const epi = Math.min(mCore, dr, dpa - A.pa.wall);
     // (not in the transverse sinus — the potential space squeezed between the
     // great arteries and the atria, where no parietal layer is seen)
     // nor in the interatrial groove between the two atria (only fat enters it)
-    const squeezed = periOff === 0 && (Math.max(mCore, Math.min(dr, dpa - A.pa.wall)) < 0.7 ||
+    // (The sinus proper lies between the arteries and the ATRIA, and there the two
+    // walls part further than between a ventricle and its own artery: the left
+    // atrium and its appendage lie up to ~1.1 cm from the pulmonary trunk and its
+    // bifurcation, and more in systole than in diastole. With one 0.7 cm limit a
+    // 2 cm arc of 'pericardium' appeared in that pocket in systole and vanished
+    // in diastole; PERI_SINUS is the limit where the nearest chamber is an atrium.)
+    const squeezed = periOff === 0 && (Math.max(mCore, Math.min(dr, dpa - A.pa.wall)) < (Math.min(dla, dra) < Math.min(dlv, drv) ? PERI_SINUS : 0.7) ||
       (dla < 2.0 && dra < 2.0));
     // The layer is a fixed ~1.5 mm in SPACE. The blended epicardial field is not
     // a true distance where two parts of the heart meet (its gradient drops on
@@ -2417,7 +2923,16 @@ export function bodyClassify(x, y, z, A, periOff = 0) {
     // along the gradient (value / |grad|) before it is tested. (An effusion's
     // sac, pushed well off the heart, is left as it is: there the field is
     // smooth and the ridges would only break the parietal line.)
-    if (epi > 0 && epi < off + PERI.thick && !squeezed) {
+    // The coronaries and their fat lie under the visceral layer: the parietal
+    // layer passes OUTSIDE a coronary's fat sheath, at the same offset from it as
+    // from the bare epicardium. (Measured from the epicardium alone the line fell
+    // inside the 4.5 mm sheath and was not drawn at all: wherever a coronary ran
+    // in the imaging plane the pericardium had a gap, which opened and closed as
+    // the vessel moved through the plane with the beat.)
+    const sp = periOff === 0 ? dsh - PERI.gap : 1e9;       // (to the parietal surface over a sheath)
+    if (sp < PERI.thick && !squeezed) {
+      if (sp > -0.02 && (epi >= off + PERI.thick || epi / epiGrad(x, y, z, A, epi) > off - 0.02)) return bc(BODY.PERI, 0.3);
+    } else if (epi > 0 && epi < off + PERI.thick && !squeezed) {
       const en = periOff > 0 ? epi : epi / epiGrad(x, y, z, A, epi);
       if (en < off + PERI.thick && en > off - 0.02) return bc(BODY.PERI, 0.3);
     }
@@ -2468,6 +2983,9 @@ export function bodyClassify(x, y, z, A, periOff = 0) {
     // the RA wall (the ME bicaval far field is RA wall, pericardium and fat)
     const lbR = x * BL[0] + y * BL[1] + z * BL[2] - MIDLINE;
     if (lbR < RIGHT_LUNG_L + 1.0) gap = Math.max(gap, LUNG_GAP_RA * smoothstep(RIGHT_LUNG_L + 1.0, RIGHT_LUNG_L - 0.5, lbR));
+    // (the mediastinal pleura follows the sac at a distance that varies with the
+    // pericardial fat: the same lobulation as the rest of the lung margin)
+    gap = Math.max(0.15, gap + LUNG_LOBE.sac * lungLobulation(lbR, -(x * BP[0] + y * BP[1] + z * BP[2]), x * BS[0] + y * BS[1] + z * BS[2]));
     if (sac > gap && isLung(x, y, z)) return bc(BODY.LUNG, 0.9);
   }
   return bc(BODY.OUT, 0);
@@ -2496,23 +3014,88 @@ const LUNG_WINDOWS = (() => {
   const wp = mad([-0.35, 0.3, 0.35], BODY_AX.A, 7.0);                 // left parasternal window
   return [wa, wp].map((w) => ({ w, u: unit(sub(_HC, w)), tan: Math.tan(32 * Math.PI / 180) }));
 })();
+// Lobulation of the visceral pleura where it borders the acoustic windows and the
+// posterior mediastinum: a smooth field (cm; body left / anterior / superior
+// coordinates) added to the lung boundary, so that no plane cuts it in a straight
+// line. Six waves along the six icosahedral axes (so every plane sees several of
+// them at close to their true wavelength), about LUNG_LOBE.wl cm long and
+// LUNG_LOBE.amp cm each, with a finer octave (x LUNG_LOBE.fine); the mediastinal
+// pleura's distance from the sac varies by LUNG_LOBE.sac of the same field.
+// (sac 0.45: at 0.8 the mediastinal pleura undulated through +-70 deg of incidence
+// within 4 cm, which no pleural reflection shows, and its line was dim throughout.)
+export const LUNG_LOBE = { wl: 2.8, amp: 0.3, sac: 0.45, fine: 0.5 };
+const _LOBE_W = (() => {
+  const f = (1 + Math.sqrt(5)) / 2, n = Math.hypot(1, f);
+  return [[0, 1, f], [0, 1, -f], [1, f, 0], [1, -f, 0], [f, 0, 1], [-f, 0, 1]].map((d, i) =>
+    [d[0] / n, d[1] / n, d[2] / n, 1 + 0.07 * (i - 2.5), 1.3 + 2.4 * i]);   // direction, wavelength factor, phase
+})();
+// (the field never exceeds this, cm: beyond it the smooth boundary decides)
+const LOBE_REACH = 6 * LUNG_LOBE.amp * (1 + LUNG_LOBE.fine) * 1.01;
+function lungLobulation(l, a, s) {
+  const k = 2 * Math.PI / LUNG_LOBE.wl;
+  let v = 0;
+  for (const w of _LOBE_W) {
+    const ph = k / w[3] * (l * w[0] + a * w[1] + s * w[2]);
+    // (with a finer octave: an irregular margin has no long inflections)
+    v += Math.sin(ph + w[4]) + LUNG_LOBE.fine * Math.sin(2.13 * ph + 1.7 * w[4]);
+  }
+  return LUNG_LOBE.amp * v;
+}
 function isLung(x, y, z) {
   const lb = x * BL[0] + y * BL[1] + z * BL[2] - MIDLINE;
   const ab = -(x * BP[0] + y * BP[1] + z * BP[2]);                     // + anterior
   // the right lung covers the anterolateral wall of the RA (there is no acoustic
   // window there: the cardiac notch is on the left)
-  if (lb < RIGHT_LUNG_L && ab > RIGHT_LUNG_A) return true;
+  // (The lobulation is a displacement of the pleural surface along its own
+  // normal: the field is read at the foot of the perpendicular from this point
+  // to the smooth surface, not at the point itself. A field added point by point
+  // would also vary across the surface and, where it is steep, pinch detached
+  // islands of lung off the margin; a normal displacement cannot.)
+  const sb = x * BS[0] + y * BS[1] + z * BS[2];
+  {
+    const m1 = RIGHT_LUNG_L - lb, m2 = ab - RIGHT_LUNG_A;
+    const m = Math.min(m1, m2);
+    if (m > -LOBE_REACH && m + (m1 < m2 ? lungLobulation(lb + m, ab, sb) : lungLobulation(lb, ab - m, sb)) > 0) return true;
+    if (m >= LOBE_REACH) return true;
+  }
+  // the pleura keeps AORTA_PLEURA of mediastinal fat off the wall of the upper
+  // descending aorta along its real (bowed) course from the isthmus to the level
+  // behind the LA, not only round the straight axis used below: otherwise the left
+  // lung lies on the aortic wall where the aorta leaves that axis (suprasternal
+  // long axis: air directly on the lateral wall of the descending limb).
+  if (ab < 0) {
+    const rr = DTA_R + AORTA_PLEURA;
+    if (sdCapsule(x, y, z, DTA_TOP[0], DTA_TOP[1], DTA_TOP[2], DTA_MID[0], DTA_MID[1], DTA_MID[2], rr) < 0 ||
+        sdCapsule(x, y, z, DTA_MID[0], DTA_MID[1], DTA_MID[2], DTA_P[0], DTA_P[1], DTA_P[2], rr) < 0) return false;
+  }
   // general lung boundary (negative = aerated): everywhere outside the two
   // acoustic-window cones and, posteriorly, outside the posterior mediastinum
-  let g = ab < 0 ? 2.8 - Math.hypot(lb, Math.min(0, ab + 1.5)) : -1e9;   // posterior mediastinum (rounded)
+  let g = -1e9, fl = lb, fa = ab, fs = sb;                              // boundary value; foot of the perpendicular (body coordinates)
+  if (ab < 0) {                                                        // posterior mediastinum (rounded)
+    const m = Math.min(0, ab + 1.5), h = Math.hypot(lb, m);
+    g = 2.8 - h;
+    if (h > 1e-6) { fl = lb + g * lb / h; fa = ab + g * m / h; }
+  }
   for (const W of LUNG_WINDOWS) {
     const vx = x - W.w[0], vy = y - W.w[1], vz = z - W.w[2];
     const al = vx * W.u[0] + vy * W.u[1] + vz * W.u[2];
     if (al <= 0) continue;
     const px = vx - W.u[0] * al, py = vy - W.u[1] * al, pz = vz - W.u[2] * al;
-    const c = al * W.tan + 1.2 - Math.sqrt(px * px + py * py + pz * pz);
-    if (c > g) g = c;
+    const pr = Math.sqrt(px * px + py * py + pz * pz);
+    const c = al * W.tan + 1.2 - pr;
+    if (c > g) {
+      g = c;
+      // gradient of the cone's boundary value: tan along the axis, -1 radially
+      const ir = pr > 1e-6 ? 1 / pr : 0, k = c / (1 + W.tan * W.tan);
+      const gx = W.tan * W.u[0] - px * ir, gy = W.tan * W.u[1] - py * ir, gz = W.tan * W.u[2] - pz * ir;
+      fl = lb - k * (gx * BL[0] + gy * BL[1] + gz * BL[2]);
+      fa = ab + k * (gx * BP[0] + gy * BP[1] + gz * BP[2]);
+      fs = sb - k * (gx * BS[0] + gy * BS[1] + gz * BS[2]);
+    }
   }
+  // the lung's edge is a lobulated margin (the lingula, the cardiac notch, the
+  // fissures), not the ruled surface of a cone: the boundary undulates
+  if (g > -LOBE_REACH && g < LOBE_REACH) g += lungLobulation(fl, fa, fs);
   if (ab < 0) {
     // the left pleura/lung wraps the descending aorta posterolaterally: aerated lung
     // from AORTA_PLEURA behind the aortic wall (the bright pleural line behind it

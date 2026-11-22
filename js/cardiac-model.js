@@ -15,9 +15,12 @@
 // blood-flow field, and couples everything to the lumped-parameter circulation.
 
 import { clamp, smoothstep, pulse, unit } from './mathutils.js';
-import { anatomyParams, rightHeartLoad, hepaticVeinSegs, atrialFill, bodyClassify, visceralDist, lumenDist, mitralLift, tricuspidLift, buildRwma, rwmaWeight, BODY, CFG, LM, BODY_AX } from './anatomy.js';
+import { anatomyParams, rightHeartLoad, hepaticVeinSegs, ivcOfRap, atrialFill, bodyClassify, visceralDist, transverseSinus, PERI, lumenDist, mitralLift, tricuspidLift, buildRwma, rwmaWeight, BODY, CFG, LM, BODY_AX } from './anatomy.js';
 import { hemodynamics, hemoSummary, pvLoop, gradeOf, eaRatio, MS_AREA, laPhasic } from './hemodynamics.js';
 import { DCM_SEVERITIES, dcmSeverityOf } from './scenarios.js';
+// (heart rate and respiration: a case solved on its own cycle, the tamponade breath)
+import { phaseSeconds, phaseOfTime, timeOfPhase, heartRate, breathOf, respPath, TAMPONADE_HR } from './hemodynamics.js';
+export { phaseOfTime, timeOfPhase, heartRate, breathOf, respPath, TAMPONADE_HR };
 
 // Re-export the lumped-parameter circulation API so echo.js / the UI can read the
 // PV loop and instantaneous haemodynamics through cardiac-model (the single model
@@ -57,6 +60,7 @@ export const FLOW = {
   PV_FLOW: 10,    // pulmonary-vein flow into the LA (reverses in severe MR)
   HV_FLOW: 11,    // hepatic-vein flow toward the RA (reverses in systole in severe TR)
   AORTA: 12,      // ascending / arch / descending aortic flow beyond the root
+  LAA_FLOW: 13,   // left-atrial-appendage emptying (atrial systole) / filling (early systole)
 };
 
 // ---------------------------------------------------------------------------
@@ -154,7 +158,7 @@ const LEAFLETS = {
   // cusp centres at 90 (right-coronary, anterior), 210 (non-coronary) and 330 deg
   // (left-coronary), so each cusp sits in its own sinus of Valsalva and the
   // commissures (30 / 150 / 270 deg) fall between the sinuses
-  aortic:    { flow: _aoFlow, cd: 0.95, thick: 0.065, ap: null, asym: 1,
+  aortic:    { flow: _aoFlow, cd: 0.95, thick: 0.05, ap: null, asym: 1,
                cusps: 3, u: LM.E_SCR, w: LM.E_ANT, commOff: Math.PI / 6 },
   pulmonic:  { flow: _puFlow, cd: 0.9,  thick: 0.065, ap: null, asym: 1,
                cusps: 3, u: _puB.u, w: _puB.w, commOff: 0.0 },
@@ -196,30 +200,28 @@ function atrialKick(phase) {
   return pulse(0.86, 1.0, phase);
 }
 
-// Right-heart timing. The right ventricle is not separately lumped-modelled, so it
-// replays the left-ventricular trace on its own clock instead of sharing the
-// left-heart valve events: the tricuspid closes ~25 ms after the mitral (T1 after
-// M1), the pulmonic valve opens ~10 ms before the aortic (shorter RV isovolumic
-// contraction against the low pulmonary pressure) and closes ~30 ms after it (P2
-// after A2: the longer RV ejection into the compliant pulmonary bed), and the
-// tricuspid opens ~10 ms before the mitral (RV IVRT ~35 ms). Each row maps an LV
-// reference phase (where the right-heart event happens) onto the LV-trace phase
-// whose state the right heart shows then. At the reference 0.833 s cycle: 0.030
-// = 25 ms, 0.012 = 10 ms, 0.036 = 30 ms.
-export const RV_EVENTS = [
-  [0.026, -0.004],   // TVC  <- MVC
-  [0.060, 0.072],    // PVO  <- AVO
-  [0.457, 0.421],    // PVC (P2) <- AVC (A2)
-  [0.501, 0.513],    // TVO  <- MVO
-];
-export function rvPhase(phase) {
-  let p = ((phase % 1) + 1) % 1;
-  if (p < RV_EVENTS[0][0]) p += 1;
-  for (let i = 0; i < RV_EVENTS.length; i++) {
-    const a = RV_EVENTS[i], b = i + 1 < RV_EVENTS.length ? RV_EVENTS[i + 1] : [RV_EVENTS[0][0] + 1, RV_EVENTS[0][1] + 1];
-    if (p < b[0]) { const q = a[1] + (b[1] - a[1]) * (p - a[0]) / (b[0] - a[0]); return ((q % 1) + 1) % 1; }
-  }
-  return phase;
+// Right-heart timing. The right heart is solved in the same closed loop as the
+// left (hemodynamics.js: its own RV elastance, activated RV_TIMING.delay after
+// the LV and relaxing on its own time; RA, tricuspid, pulmonary valve and PA), so
+// its valve events (T1 after M1, P2 after A2, a shorter isovolumic relaxation),
+// its volume and its flows come straight from the solved Qtv, Qpa and Vrv at the
+// cycle phase. (Review 12: the earlier replay of the LEFT ventricle's trace on a
+// shifted clock is retired.) What remains is phaseRV, the phase at which the
+// atrial reservoir / conduit / booster curve, the TR-jet envelope and the hepatic
+// veins (all drawn on left-heart timing) are read for the right heart: a warp
+// that puts the left heart's AV-valve closure and opening onto the SOLVED
+// tricuspid closure and opening of this circulation (rvPhase(phase, path)).
+export function rvPhase(phase, path = null) {
+  const p = ((phase % 1) + 1) % 1;
+  if (!path) return p;
+  const w = openTrace(path).warp;
+  // anchors: [right-heart phase, left-heart phase] at AV-valve closure and opening
+  const a0 = w[0], a1 = w[1];
+  let x = p - a0[0]; x -= Math.floor(x);
+  const span1 = ((a1[0] - a0[0]) % 1 + 1) % 1, span2 = 1 - span1;
+  const l1 = ((a1[1] - a0[1]) % 1 + 1) % 1, l2 = 1 - l1;
+  const q = x < span1 ? a0[1] + x * l1 / span1 : a1[1] + (x - span1) * l2 / span2;
+  return ((q % 1) + 1) % 1;
 }
 
 // Valve opening 0..1, driven by the modelled transvalvular FLOW so the leaflets
@@ -234,18 +236,32 @@ export function rvPhase(phase) {
 // lag. Closure takes ~20-40 ms, and the leaflets cross 10 % open within a few
 // ms of the flow-defined events (AVO, AVC, MVO, MVC). Pre-computed once
 // per circulation as a periodic trace indexed by phase; the right-heart valves
-// read it on the right heart's own clock (rvPhase).
+// read their own solved flows (tricuspid Qtv, pulmonary Qpa). The lead and the
+// time constants are in seconds: a case on its own cycle (tamponade's
+// tachycardia) turns them into phase with its own systolic time scale
+// (hemodynamics phaseSeconds; OPEN_CYCLE at 72 bpm).
 const OPEN_N = 960, OPEN_CYCLE = 0.833;                   // samples per cycle; reference cycle (s)
 const OPEN_TAU_OPEN = 0.008, OPEN_TAU_CLOSE = 0.008, OPEN_LEAD_O = 0.007, OPEN_LEAD = 0.011;   // s
-const OPEN_Q_AV = 0.2, OPEN_Q_SL = 0.12;                  // flow (x peak) for a fully open valve
+// (OPEN_Q_AO, the aortic cusps on the aortic flow: 0.2 of peak. Review 12 rounded
+// the aortic ejection, whose deceleration now ends steeply: at 0.12 the cusps
+// shut in ~20 ms, at the bottom of the 20-40 ms range, and only after the flow
+// had stopped. Floating toward closure a little earlier in the deceleration,
+// as the sinus vortices push them, they shut over ~27 ms as the flow ends.)
+const OPEN_Q_AV = 0.2, OPEN_Q_SL = 0.12, OPEN_Q_AO = 0.2;   // flow (x peak) for a fully open valve
 const _openCache = new WeakMap();
 function openTrace(path) {
   const sum = hemoSummary(path);
   let tr = _openCache.get(sum);
   if (tr) return tr;
-  const qmv = new Float32Array(OPEN_N), qao = new Float32Array(OPEN_N);
-  for (let i = 0; i < OPEN_N; i++) { const h = hemodynamics(i / OPEN_N, path); qmv[i] = h.Qmv; qao[i] = h.Qao; }
-  const L = Math.round(OPEN_LEAD / OPEN_CYCLE * OPEN_N), Lo = Math.round(OPEN_LEAD_O / OPEN_CYCLE * OPEN_N), dt = OPEN_CYCLE / OPEN_N;
+  const qmv = new Float32Array(OPEN_N), qao = new Float32Array(OPEN_N), qtv = new Float32Array(OPEN_N), qpa = new Float32Array(OPEN_N);
+  let qtvMax = 0, qpaMax = 0;
+  for (let i = 0; i < OPEN_N; i++) {
+    const h = hemodynamics(i / OPEN_N, path);
+    qmv[i] = h.Qmv; qao[i] = h.Qao; qtv[i] = h.Qtv; qpa[i] = h.Qpa;
+    qtvMax = Math.max(qtvMax, h.Qtv); qpaMax = Math.max(qpaMax, h.Qpa);
+  }
+  const T = heartRate(path) === 72 ? OPEN_CYCLE : phaseSeconds(path);
+  const L = Math.round(OPEN_LEAD / T * OPEN_N), Lo = Math.round(OPEN_LEAD_O / T * OPEN_N), dt = T / OPEN_N;
   const build = (q, qFull) => {
     const tgt = new Float32Array(OPEN_N), out = new Float32Array(OPEN_N);
     for (let i = 0; i < OPEN_N; i++) tgt[i] = 0.02 + 0.98 * smoothstep(0, qFull, Math.min(q[(i + Lo) % OPEN_N], q[(i + L) % OPEN_N]));
@@ -256,12 +272,27 @@ function openTrace(path) {
     }
     return out;
   };
-  tr = { av: build(qmv, OPEN_Q_AV * sum.QmvMax), sl: build(qao, OPEN_Q_SL * sum.QaoMax) };
+  tr = { av: build(qmv, OPEN_Q_AV * sum.QmvMax), sl: build(qao, OPEN_Q_AO * sum.QaoMax),
+    tv: build(qtv, OPEN_Q_AV * qtvMax), pv: build(qpa, OPEN_Q_SL * qpaMax) };
+  // AV-valve events (10 % open): closure nearest the QRS, opening nearest
+  // mid-cycle, for the mitral (left) and tricuspid (right) — rvPhase's anchors
+  const cross = (arr, closing, near) => {
+    let best = near, bd = 1;
+    for (let i = 0; i < OPEN_N; i++) {
+      const a = arr[(i + OPEN_N - 1) % OPEN_N], b = arr[i];
+      if (closing ? a > 0.1 && b <= 0.1 : a <= 0.1 && b > 0.1) {
+        const ph = i / OPEN_N; let d = Math.abs(ph - near); d = Math.min(d, 1 - d);
+        if (d < bd) { bd = d; best = ph; }
+      }
+    }
+    return best;
+  };
+  tr.warp = [[cross(tr.tv, true, 0), cross(tr.av, true, 0)], [cross(tr.tv, false, 0.5), cross(tr.av, false, 0.5)]];
   _openCache.set(sum, tr);
   return tr;
 }
 function valveOpening(name, phase, tr, path) {
-  const arr = VALVES[name].opensInDiastole ? tr.av : tr.sl;
+  const arr = name === 'tricuspid' ? tr.tv : name === 'pulmonic' ? tr.pv : VALVES[name].opensInDiastole ? tr.av : tr.sl;
   const x = (((phase % 1) + 1) % 1) * OPEN_N, i0 = Math.floor(x) % OPEN_N, f = x - Math.floor(x);
   let o = arr[i0] + (arr[(i0 + 1) % OPEN_N] - arr[i0]) * f;
   // pathology tweaks
@@ -280,10 +311,18 @@ function valveOpening(name, phase, tr, path) {
 // track physiology: AS = same SV forced through a small AVA -> high velocity.
 // ---------------------------------------------------------------------------
 const AVA_NORM = 3.0, AVA_AS = 0.6;   // aortic (LVOT/valve) effective orifice area
+// LVOT cross-section (cm2) for the LVOT PW velocity: the drawn LVOT measures
+// 2.15 cm in mid-systolic PLAX (verify-anatomy 'LVOT diameter'), pi (D/2)^2
+export const LVOT_CSA = Math.PI * 1.075 * 1.075;
 // mitral effective orifice area for the INSTANTANEOUS inflow velocity v = Qmv / A
 // (MS: hemodynamics.js MS_AREA, Bernoulli): the E and A peaks, their ratio and the
 // E-wave deceleration all come straight from the modelled transmitral flow
 const MVA_NORM = 4.0;
+// right-heart effective orifice areas (cm^2) for the instantaneous velocity
+// v = Q / A, at a normal RV size (the tricuspid one grows with the dilated RV): the
+// tricuspid inflow at the leaflet tips (normal E ~0.5 m/s, A ~0.3) and the RVOT
+// just below the pulmonary valve (2.4 cm: peak ~0.95 m/s, VTI ~16 cm)
+const A_TV = 6.0, A_RVOT = 4.5;
 const ET_EJECT = 0.33, T_FILL = 0.37; // systolic ejection / diastolic filling time (s)
 const K_AO = 1.56;                    // peak/mean profile factor (peak ≈ k·mean)
 
@@ -314,7 +353,7 @@ export function trEnvelope(phaseRV, path = {}) {
 // Build the per-frame haemodynamic snapshot the flow field reads. Returns a
 // FRESH object (never the hemodynamics() singleton) so two geometryAt() results
 // — e.g. echo's end-diastolic and end-systolic geometries — never alias.
-function hemoFrame(hd, path, rvHd, phaseRV) {
+function hemoFrame(hd, path, rvd0, phaseRV) {
   const s = hd.sum;
   // effective orifice area follows the severity grade (continuity: same SV through
   // a smaller area → higher velocity), so the Doppler peak and BSE band both track it.
@@ -340,31 +379,53 @@ function hemoFrame(hd, path, rvHd, phaseRV) {
   // instantaneous 0..1 envelopes from the modelled flow waveform (carry E/A,
   // ejection and regurgitant timing) so velocityAt only multiplies scalars.
   const ejAo = s.QaoMax > 0 ? clamp(hd.Qao / s.QaoMax, 0, 1) : 0;
+  // AS jet speed in time, vAS(t) (m/s): Bernoulli on the instantaneous LV to
+  // ascending-aortic pressure drop while the valve is open, so the CW envelope
+  // traced by the learner gives the circulation's mean gradient (mean/peak
+  // gradient ~0.6) as well as its peak. The jet's spatial profile multiplies it.
+  const vAS = path.aorticStenosis && hd.Qao > 0.5 ? Math.min(vAoPeak, Math.sqrt(Math.max(0, hd.Plv - hd.Pao) / 4)) : 0;
+  const ejAS = vAoPeak > 0 ? vAS / vAoPeak : 0;
+  // LVOT PW velocity (m/s): the solved aortic flow over the LVOT area, so its
+  // VTI x LVOT area is the stroke volume
+  const vLvot = hd.Qao > 0 ? hd.Qao / (LVOT_CSA * 100) : 0;
   const ejMv = s.QmvMax > 0 ? clamp(hd.Qmv / s.QmvMax, 0, 1) : 0;
-  const ejMr = hd.Qmr > 0.5 && vMRPeak > 0 ? clamp(Math.sqrt(Math.max(0, hd.Plv - hd.Pla) / 4) / vMRPeak, 0, 1) : 0;
-  // right-heart envelopes (tricuspid inflow, RV outflow) on the right heart's clock
-  const r = rvHd || hd;
-  // (tamponade, one respiratory phase: the tricuspid inflow scales with that
-  // phase's solved tricuspid E against the apnoeic one — up in inspiration)
-  const tvResp = path.tamponade && path.resp ? clamp(s.QtvE / Math.max(1, hemoSummary({ ...path, resp: undefined }).QtvE), 0.3, 1.8) : 1;
-  const ejTv = s.QmvMax > 0 ? clamp(r.Qmv / s.QmvMax, 0, 1) * tvResp : 0;
-  const ejPv = s.QaoMax > 0 ? clamp(r.Qao / s.QaoMax, 0, 1) : 0;
+  const ejMr = hd.Qmr > 0.5 && !(hd.Qmv > 0) && vMRPeak > 0 ? clamp(Math.sqrt(Math.max(0, hd.Plv - hd.Pla) / 4) / vMRPeak, 0, 1) : 0;
+  // right-heart velocities from the SOLVED right heart (review 12, MOT-4/PAT-10):
+  // tricuspid inflow v = Qtv / A_TV and RV outflow v = Qpa / A_RVOT, so the
+  // tricuspid E/A, the RVOT acceleration and ejection times, the PH mid-systolic
+  // notch and the ASD's raised Qp all come from the circulation. (Each respiratory
+  // phase of the tamponade case is its own solved circulation, so its tricuspid
+  // E rises in inspiration by itself.) ejTv / ejPv are the same flows over the
+  // case's peak, for the colour-flow and 3D streams that scale an envelope.
+  const RVD = rvDrive(path);
+  // (the tricuspid annulus dilates with the RV — the case's RV, not one breath's:
+  // rvd0, the apnoeic drive of a tamponade breath, from geometryAt; the RVOT just
+  // below the valve is held at the pulmonary annulus, as drawn — so a raised Qp
+  // shows as velocity)
+  const aTv = A_TV * (rvd0 || RVD).rvSize, aRvot = A_RVOT;
+  const vTv = Math.max(0, hd.Qtv) / (aTv * 100), vPv = Math.max(0, hd.Qpa) / (aRvot * 100);
+  const vTvPeak = (s.QtvMax || 0) / (aTv * 100);
+  const ejTv = vTvPeak > 0 ? clamp(vTv / vTvPeak, 0, 1) : 0;
+  const ejPv = RVD.QpaMax > 0 ? clamp(hd.Qpa / RVD.QpaMax, 0, 1) : 0;
   // INSTANTANEOUS regurgitant jet speeds (m/s). MR: Bernoulli on the LV-LA
   // pressure drop while the circulation carries regurgitant flow, so the CW
   // envelope is holosystolic, its upstroke follows dP/dt and the compliant LA's
   // v-wave blunts it late in systole. TR: the case's peak velocity on the right
   // heart's clock, shaped by trEnvelope (rounded with pressure overload, early-
   // peaking and triangular when torrential TR equalises RV and RA pressures).
-  const vMR = hd.Qmr > 0 ? Math.sqrt(Math.max(0, hd.Plv - hd.Pla) / 4) : 0;
+  // (second guard, review 12 PHY-1: never while forward flow crosses the valve)
+  const vMR = hd.Qmr > 0 && !(hd.Qmv > 0) ? Math.sqrt(Math.max(0, hd.Plv - hd.Pla) / 4) : 0;
   const ejTr = vTRPeak > 0 ? trEnvelope(phaseRV != null ? phaseRV : hd.phase, path) : 0;
-  const vTR = vTRPeak * ejTr;
+  // (no TR jet while forward flow still crosses the open tricuspid valve)
+  const vTR = hd.Qtv > 0.5 ? 0 : vTRPeak * ejTr;
   return {
     Plv: hd.Plv, Pao: hd.Pao, Vlv: hd.Vlv, Pla: hd.Pla,
     Qao: hd.Qao, Qmv: hd.Qmv, Qmr: hd.Qmr, rho: hd.rho, kv: hd.kv,
     EDV: s.EDV, ESV: s.ESV, SV: s.SV, EF: s.EF, forwardSV: s.forwardSV,
     regurgFraction: s.regurgFraction, gradient: s.gradient,
     PlvSys: s.PlvSys, PaoSys: s.PaoSys, PaoDia: s.PaoDia,
-    vAoPeak, vMitPeak, vMRPeak, vTRPeak, ejAo, ejMv, ejMr, ejTv, ejPv, ejTr, vMR, vTR,
+    vAoPeak, vMitPeak, vMRPeak, vTRPeak, vAS, ejAS, vLvot, ejAo, ejMv, ejMr, ejTv, ejPv, ejTr, vMR, vTR,
+    vTv, vPv, Qtv: hd.Qtv, Qpa: hd.Qpa, aRvot, aTv,
     // shunt jets (m/s, + = left-to-right): Bernoulli on the modelled LA-RA / LV-RV
     // pressure difference, so the ASD signal is phasic and the VSD jet follows the
     // interventricular gradient
@@ -372,6 +433,16 @@ function hemoFrame(hd, path, rvHd, phaseRV) {
     // solved right heart: instantaneous RV / RA / PA and pericardial pressures,
     // and the case's RV systolic and mean RA pressure
     Prv: hd.Prv, Pra: hd.Pra, Ppa: hd.Ppa, Ppc: hd.Ppc || 0, RVSP: s.RVSP, RAP: s.RAP,
+    // solved venous inflow (mL/s, + toward the atrium): the caval return into the
+    // RA and the pulmonary-venous inflow into the LA. (The right heart is solved on
+    // its own activation clock, so the caval flow at the cycle phase IS on the
+    // right heart's clock.) The hepatic- and pulmonary-vein PW traces are these
+    // flows over a vessel area.
+    Qvr: hd.Qvr || 0, Qpv: hd.Qpv || 0,
+    // solved regurgitant flows (mL/s) over their cycle peaks, the TR volume per
+    // beat (mL) and the effective TR orifice (cm2): the colour jets are sized by
+    // the instantaneous regurgitant flow, not by a grade label (review 12, PAT-4/PAT-11)
+    AVA, QmrMax: s.QmrMax || 0, Qtr: hd.Qtr || 0, QtrMax: s.QtrMax || 0, trRegurgVol: s.trRegurgVol || 0, Atr: s.Atr || 0,
   };
 }
 
@@ -383,7 +454,94 @@ function hemoFrame(hd, path, rvHd, phaseRV) {
 let _edvRef = null;
 const edvRef = () => (_edvRef != null ? _edvRef : (_edvRef = hemoSummary({}).EDV));
 
+// The drawn right ventricle from the SOLVED right heart (review 12, MOT-4):
+//  - size: the RV is scaled so its drawn end-diastolic volume holds the solved
+//    RVEDV (cube root of the volume ratio to normal, the RV's dilatation);
+//  - contractility: its short-axis (FAC) share follows the solved RV ejection
+//    fraction relative to normal (rvC);
+//  - long-axis share (TAPSE, rvL): afterload hits the longitudinal fibres
+//    hardest, so above a normal RV systolic pressure it falls further (TAPSE
+//    ~1.5 cm in severe PAH with an FAC of ~30-35 %);
+//  - timing: kRV = (RVEDV - Vrv) / RV stroke volume, the solved RV volume.
+// RV_DRAW holds the calibration so the drawn RV voxel volume and EF track the
+// solved ones as the LV's track rho (verify-anatomy, 'Right-heart drive').
+const RV_DRAW = { longGain: 1, gamma: 1.55, lvExp: 0.8, lvhK: 0.36, septK: 0.55, wallK: 0.37,
+  afterloadRef: 35, afterloadK: 0.0115, lonMin: 0.3, cMin: 0.2, cMax: 1.3 };
+let _rvRef = null;
+const _rvDrive = new Map();
+function rvDrive(path) {
+  const s = hemoSummary(path);
+  let r = _rvDrive.get(s);
+  if (r) return r;
+  if (!_rvRef) _rvRef = hemoSummary({});
+  const ef = clamp(s.RVEF / _rvRef.RVEF, RV_DRAW.cMin, RV_DRAW.cMax);
+  const lon = clamp(1 - RV_DRAW.afterloadK * Math.max(0, s.RVSP - RV_DRAW.afterloadRef), RV_DRAW.lonMin, 1);
+  // (the volume-overload septum, flattened in diastole and recovering in systole,
+  // and a hypertrophied septum thickening into the RV both add to the drawn RV's
+  // ejection: the free wall's share is lowered by as much)
+  const sep = rightHeartLoad(path).septum, swing = sep ? Math.max(0, sep(0) - sep(1)) : 0;
+  const lvh = path.lvh || path.aorticStenosis ? 0.55 : 0;
+  r = {
+    rvSize: Math.cbrt(s.RVEDV / _rvRef.RVEDV),
+    rvC: Math.max(0.05, Math.pow(ef, RV_DRAW.gamma) - RV_DRAW.septK * swing - RV_DRAW.wallK * lvh),
+    rvL: RV_DRAW.longGain * Math.min(1, ef) * lon,
+    RVEDV: s.RVEDV, RVSV: Math.max(1e-6, s.RVEDV - s.RVESV), QpaMax: 0,
+  };
+  for (let i = 0; i < 240; i++) r.QpaMax = Math.max(r.QpaMax, hemodynamics(i / 240, path).Qpa);
+  _rvDrive.set(s, r);
+  return r;
+}
+
+// ---- RWMA: compensatory hyperkinesis of the remote walls -------------------
+// The circulation's LVEF is that of the whole ventricle; the anatomy then
+// freezes the infarcted territory at its diastolic position (rwmaBlend), so on
+// its own the drawn cavity would eject less than the PV loop says. The remote
+// (non-infarcted) myocardium is hyperkinetic after an infarct: here it shortens
+// by kappa times the global volume change, rho' = 1 - kappa (1 - rho), with
+// kappa solved once per case so that the DRAWN cavity (voxel integration of the
+// rendered LV lumen, clipped at the mitral and aortic annular planes as the
+// audit does) ejects exactly the circulation's EF. Only the anatomy sees rho';
+// the coarse proxies (lv.r: EF/LVID readouts, the Simpson truth) stay on rho,
+// so the panel, the report and the image all carry one EF. Note: most of that
+// agreement comes from the per-territory Emax cut in the circulation (the
+// solved EF fell to what the drawn LV already ejected), not from visible remote
+// hyperkinesis: the A4C end-systolic LV area moved by only ~2 % (review 12).
+const _kappaCache = new Map();
+function drawnLvVolume(A, h) {
+  const M = A.valves.mitral.c, Av = A.valves.aortic.c, U = LM.U_AO;
+  let n = 0;
+  for (let x = -4; x <= 4; x += h) for (let z = -4; z <= 4; z += h) for (let y = -9; y <= 1.5; y += h) {
+    if (lumenDist(x, y, z, A, 'LV') >= 0) continue;
+    const ua = (x - Av[0]) * U[0] + (y - Av[1]) * U[1] + (z - Av[2]) * U[2];
+    if (ua > 0 && (y > M[1] + 0.02 || y - M[1] > -0.3)) continue;
+    n++;
+  }
+  return n * h * h * h;
+}
+export function rwmaRemoteBoost(path = {}) {
+  if (!path.rwma) return 1;
+  const key = JSON.stringify(path);
+  let kappa = _kappaCache.get(key);
+  if (kappa != null) return kappa;
+  const s = hemoSummary(path), h = 0.14;
+  const target = drawnLvVolume(geometryCore(0, path, 1).A, h) * s.ESV / s.EDV;
+  const vAt = (kp) => drawnLvVolume(geometryCore(s.tMinVol, path, kp).A, h);
+  // the drawn ES volume falls almost linearly with kappa: a few secant steps
+  let k0 = 1, v0 = vAt(k0), k1 = 1.4, v1 = vAt(k1);
+  for (let i = 0; i < 6 && Math.abs(v1 - target) > 0.3 && v1 !== v0; i++) {
+    const k2 = clamp(k1 + (target - v1) * (k1 - k0) / (v1 - v0), 1, 2.5);
+    k0 = k1; v0 = v1; k1 = k2; v1 = vAt(k1);
+  }
+  kappa = k1;
+  _kappaCache.set(key, kappa);
+  return kappa;
+}
+
 export function geometryAt(phase, path = {}) {
+  return geometryCore(phase, path, path.rwma ? rwmaRemoteBoost(path) : 1);
+}
+
+function geometryCore(phase, path, kappa) {
   const kick = atrialKick(phase);
 
   // PHYSICS COUPLING: the lumped-parameter circulation solves the LV pressure–
@@ -393,14 +551,18 @@ export function geometryAt(phase, path = {}) {
   // product tracks rho EXACTLY (sShort²·sLong = rho), with the long axis
   // shortening less than the short axis; hence the measured EF/LVIDs fall out of
   // the modelled volume rather than a prescribed phase curve. hd.kv (normalised)
-  // still times the wall-thickening. The right heart reads the same trace on its
-  // own clock (rvPhase); copied out first, as hemodynamics() returns a singleton.
-  const phaseRV = rvPhase(phase);
+  // still times the wall-thickening. The right ventricle follows its own solved
+  // volume (rvDrive: kRV from Vrv, size from RVEDV, contractility from RVEF).
+  const phaseRV = rvPhase(phase, path);
   const otr = openTrace(path);        // (first: it samples the hemodynamics() singleton)
-  const hdR = hemodynamics(phaseRV, path);
-  const rvHd = { Qmv: hdR.Qmv, Qao: hdR.Qao, kv: hdR.kv, sum: hdR.sum, Plv: hdR.Plv, Pla: hdR.Pla };
-  const kvR = rvHd.kv, kR = clamp(kvR, 0, 1);
+  const RVD = rvDrive(path);
+  // (tamponade: each respiratory phase is its own solved circulation, so the RV
+  // fills more in inspiration; the tricuspid orifice the inflow velocity is read
+  // through is the apnoeic case's — a breath does not resize the annulus. Before
+  // hemodynamics(), as rvDrive samples its singleton.)
+  const RVD0 = path.resp ? rvDrive({ ...path, resp: undefined }) : RVD;
   const hd = hemodynamics(phase, path);
+  const kvR = (RVD.RVEDV - hd.Vrv) / RVD.RVSV, kR = clamp(kvR, 0, 1);
   const rho = hd.rho;                 // Vlv / EDV (absolute cavity-volume ratio)
   const kv = hd.kv;                   // normalised contraction fraction (timing)
   // wall-thickening timing follows the modelled LV volume, so the walls, valves
@@ -423,8 +585,13 @@ export function geometryAt(phase, path = {}) {
 
   // Long axis shortens less than the short axis. aLong = 0.24 gives, for the
   // normal EF, MAPSE ~1.55 cm, GLS ~-19 % and fractional shortening ~28 % on
-  // the 8.3 cm ventricle — all mid-normal.
-  const aLong = 0.24;
+  // the 8.3 cm ventricle — all mid-normal. Concentric LVH (severe AS, the
+  // hypertrophied heart) loses longitudinal (subendocardial) function first while
+  // EF is kept by radial thickening: aLong 0.17 gives MAPSE ~1.1 cm and GLS
+  // ~-15 % at a normal EF (reduced GLS with preserved EF in AS — a prognostic
+  // marker; e.g. Ng et al., Eur Heart J Cardiovasc Imaging 2011; Magne et al.,
+  // JACC Cardiovasc Imaging 2019).
+  const aLong = path.aorticStenosis || path.lvh ? 0.17 : 0.24;
   const sLong = Math.pow(rho, aLong);
   const sShort = Math.pow(rho, (1 - aLong) / 2); // sShort²·sLong = rho (volume-exact)
   const lvR = [
@@ -441,16 +608,28 @@ export function geometryAt(phase, path = {}) {
   // wall thickens as the short axis shrinks (approx. muscle-volume conservation)
   const lvWall = BASE.lv.wall * lvWallMul * clamp(1 / sShort, 1, 1.7);
 
-  const rvC = rightHeartLoad(path).rvC;   // RV contractility (anatomy.js)
+  // (the drawn RV shares its septum with the LV: a larger LV bows into it and a
+  // hypertrophied septum takes up its cavity, so the RV is scaled up to hold the
+  // solved RVEDV — the volume-exact coupling the LV has through rho)
+  const rvFit = Math.cbrt(Math.pow(lvScale, -RV_DRAW.lvExp) / (1 - RV_DRAW.lvhK * Math.max(0, lvWallMul - 1)));
+  const rvC = RVD.rvC;                    // RV contractility (solved RVEF, rvDrive)
+  // (the coarse RV proxy, for flow gating, at the drawn RV's size and contraction)
   const rvR = BASE.rv.r.map((r, i) => {
     const shorten = (i === 1 ? 0.12 : 0.26) * rvC;
-    return r * (1 - kvR * shorten);
+    return r * Math.min(1, RVD.rvSize * rvFit) * (1 - kR * shorten);
   });
   const rvWall = BASE.rv.wall * (1 + kR * 0.5);
 
   // anatomical SDF bundle (built once here so the chordae apparatus below can
   // hang off the same apex-anchored papillary tips + live valve planes).
-  const A = anatomyParams(k, kick, path, { sShort, sLong, lvWall, lvScale, lvLong, laScale, kRV: kR, phaseRV, laAmp: laPhasic(path) }, phase);
+  // (RWMA: the anatomy's remote walls shorten by kappa x the global change; see
+  // rwmaRemoteBoost — the proxies above stay on rho)
+  const rhoA = kappa === 1 ? rho : Math.max(0.05, 1 - kappa * (1 - rho));
+  const sLongA = kappa === 1 ? sLong : Math.pow(rhoA, aLong);
+  const sShortA = kappa === 1 ? sShort : Math.pow(rhoA, (1 - aLong) / 2);
+  const lvWallA = kappa === 1 ? lvWall : BASE.lv.wall * lvWallMul * clamp(1 / sShortA, 1, 1.7);
+  const A = anatomyParams(k, kick, path, { sShort: sShortA, sLong: sLongA, lvWall: lvWallA, lvScale, lvLong, laScale, kRV: kR, phaseRV, laAmp: laPhasic(path),
+    rvSize: RVD.rvSize * rvFit, rvC: RVD.rvC, rvL: RVD.rvL, laTiming: { mvo: hd.sum.mvoPhase, aAt: hd.sum.aAt } }, phase);
 
   // atria: coarse axis-aligned proxies of the live anatomical atria (which sit on
   // their moving annuli and follow the reservoir/conduit/booster curve), so flow
@@ -459,16 +638,16 @@ export function geometryAt(phase, path = {}) {
   const raR = [A.ra.r1, A.ra.rl, A.ra.r2];
   const valves = {
     mitral: valveOpening('mitral', phase, otr, path),
-    tricuspid: valveOpening('tricuspid', phaseRV, otr, path),
+    tricuspid: valveOpening('tricuspid', phase, otr, path),
     aortic: valveOpening('aortic', phase, otr, path),
-    pulmonic: valveOpening('pulmonic', phaseRV, otr, path),
+    pulmonic: valveOpening('pulmonic', phase, otr, path),
   };
 
   // rheumatic MS: the centre of the open funnel tip (the fish-mouth orifice), where
   // PSAX-MV planimetry is done — the view tracks it (views.js)
   if (path.mitralStenosis) {
     const Gt = { A, valves: { mitral: 0.35 }, path };
-    const ta = avTipWorld('mitral', Gt, 1, 0), tp = avTipWorld('mitral', Gt, -1, 0);
+    const ta = avTipWorld('mitral', Gt, 1, 0, MS_TUBE / 2), tp = avTipWorld('mitral', Gt, -1, 0, MS_TUBE / 2);
     A.msTip = [(ta[0] + tp[0]) / 2, (ta[1] + tp[1]) / 2, (ta[2] + tp[2]) / 2];
   }
 
@@ -478,7 +657,7 @@ export function geometryAt(phase, path = {}) {
     // stroke volume, EF, jet peak velocities) — read by the echo measurements,
     // the flow field and the UI PV-loop panel. A fresh snapshot (not the
     // hemodynamics() singleton) so distinct geometries never alias.
-    hemo: hemoFrame(hd, path, rvHd, phaseRV),
+    hemo: hemoFrame(hd, path, RVD0, phaseRV),
     // Coarse per-chamber ellipsoid proxies — used by the velocity field, the
     // on-image labels and the LVIDd/EF measurements. Tissue classification and
     // the 3D surface use the anatomical SDF (G.A) below, not these.
@@ -521,7 +700,7 @@ function buildChordae(G) {
     const lf = LEAFLETS[name], vc = A.valves[name].c;
     const s = Math.sign((pb[0] - vc[0]) * lf.com[0] + (pb[1] - vc[1]) * lf.com[1] + (pb[2] - vc[2]) * lf.com[2]) || 1;
     const out = [];
-    for (const sgn of sides) for (const q of [0.3, 0.72]) out.push(avTipWorld(name, G, sgn, s * q));
+    for (const sgn of sides) for (const q of [0.3, 0.72]) out.push(avTipWorld(name, G, sgn, s * q, name === 'mitral' && G.path && G.path.mitralStenosis ? MS_TUBE : 0));
     return out;
   };
   // mitral: both LV papillary tips -> anterior/posterior leaflet free edges
@@ -600,17 +779,17 @@ function segAffected(seg, rw) {
 let _rsPath = null, _rsVal = null;
 export function regionalStrain(path = {}) {
   if (path === _rsPath && _rsVal) return _rsVal;
-  let gf = 1;                                           // global contractility factor
-  // DCM affects every segment. Use the shortening of the same solved cavity
-  // rendered by geometryAt, so changing EF severity also changes the bullseye.
-  if (path.dilated) gf = longitudinalStrain(path) / NORMAL_SEG_STRAIN;
-  else if (path.aorticStenosis && path.lvh) gf = 0.85;
-  else if (path.lvh) gf = 0.9;
+  // One GLS per case: the territory pattern sets the segments' SHAPE, and a
+  // global factor scales them so their mean is the long-axis shortening of the
+  // same solved cavity (longitudinalStrain, the panel's GLS). DCM, LVH/AS and
+  // RWMA then show the same GLS in the panel, the bullseye and the report.
   const rw = buildRwma(path);
-  const segments = AHA_SEGMENTS.map((s) => {
-    const w = segAffected(s, rw);
-    return { name: s.name, angle: s.angle, level: s.level, strain: NORMAL_SEG_STRAIN * gf * (1 - w) };
-  });
+  const w = AHA_SEGMENTS.map((s) => segAffected(s, rw));
+  const shape = w.reduce((a, x) => a + NORMAL_SEG_STRAIN * (1 - x), 0) / w.length;
+  const ls = longitudinalStrain(path);
+  const gf = ls != null && shape < 0 ? ls / shape : 1;   // global contractility factor
+  const segments = AHA_SEGMENTS.map((s, i) => (
+    { name: s.name, angle: s.angle, level: s.level, strain: NORMAL_SEG_STRAIN * gf * (1 - w[i]) }));
   const gls = segments.reduce((a, s) => a + s.strain, 0) / segments.length;
   _rsVal = { segments, gls };
   _rsPath = path;
@@ -663,6 +842,7 @@ const BODY_TO_TISSUE = {
 // axis. The circumferential maximum (~1.8 cm posteriorly) is a moderate-large
 // effusion; anteriorly it tapers to ~0.3 cm.
 const _P = BODY_AX.P;
+const TS_WIDTH = 0.9;                       // cm: the transverse sinus distended by a moderate-to-large effusion
 function effusionGap(px, py, pz, A) {
   const c = A.lv.c;
   const dep = (px - c[0]) * _P[0] + (py - c[1]) * _P[1] + (pz - c[2]) * _P[2];
@@ -671,13 +851,14 @@ function effusionGap(px, py, pz, A) {
 
 // Tamponade: the pericardial pressure exceeds the transmural (distending) pressure
 // of the thin-walled right heart when its chambers are least full — the RA free
-// wall inverts from late diastole into systole (RA transmural < 0) and the RV free
-// wall is pushed in in early diastole (RV transmural < ~1 mmHg). Each free wall is
+// wall inverts from the end of atrial contraction into systole and the RV free
+// wall is pushed in in early diastole (transmural < ~1 mmHg, the buckling
+// pressure of either thin free wall: hemodynamics RA_BUCKLE / RV_BUCKLE). Each free wall is
 // indented by a depth that follows that phase's solved pressures, over a Gaussian
 // patch centred on the free wall (away from the septum and the AV groove).
-const RA_INV_K = 0.8, RA_INV_MAX = 1.0;      // cm per mmHg below zero transmural, cap
+const RA_INV_K = 0.8, RA_INV_MAX = 1.0;      // cm per mmHg below the buckling pressure, cap
 const RV_COL_K = 1.2, RV_COL_MAX = 0.55;     // cm per mmHg below the buckling pressure
-const RV_BUCKLE_P = 1.0;                     // mmHg (hemodynamics.js RV_BUCKLE)
+const RV_BUCKLE_P = 1.0, RA_BUCKLE_P = 1.0;  // mmHg (hemodynamics.js RV_BUCKLE, RA_BUCKLE)
 const WALL_IN = 0.3;                         // drawn atrial / RV free-wall thickness inside the lumen surface (cm)
 const _tampCache = new WeakMap();
 function tamponadeDent(G) {
@@ -685,7 +866,7 @@ function tamponadeDent(G) {
   if (t) return t;
   const A = G.A, H = G.hemo || {};
   const raT = (H.Pra || 0) - (H.Ppc || 0), rvT = (H.Prv || 0) - (H.Ppc || 0);
-  const dRa = clamp(-raT * RA_INV_K, 0, RA_INV_MAX), dRv = clamp((RV_BUCKLE_P - rvT) * RV_COL_K, 0, RV_COL_MAX);
+  const dRa = clamp((RA_BUCKLE_P - raT) * RA_INV_K, 0, RA_INV_MAX), dRv = clamp((RV_BUCKLE_P - rvT) * RV_COL_K, 0, RV_COL_MAX);
   // free-wall points: march out of the lumen from the chamber centre
   // (into the lumen first, then out through the free wall)
   const wallOf = (c, u, which) => {
@@ -700,7 +881,9 @@ function tamponadeDent(G) {
   const uRa = LM.IAS_N;
   let uRv = [A.rv.c[0] - A.lv.c[0], 0, A.rv.c[2] - A.lv.c[2]];
   const L = Math.hypot(uRv[0], uRv[2]) || 1; uRv = [uRv[0] / L, 0, uRv[2] / L];
-  t = { dRa, dRv, uRa, uRv, wRa: dRa > 0 ? wallOf(A.ra.c, uRa, 'RA') : null, wRv: dRv > 0 ? wallOf([A.lv.c[0], A.rv.c[1], A.lv.c[2]], uRv, 'RV') : null };
+  // (the RA free wall itself: the crista terminalis is a fold carved from the
+  // lumen, and the march must not stop on it)
+  t = { dRa, dRv, uRa, uRv, wRa: dRa > 0 ? wallOf(A.ra.c, uRa, 'RA_NOFOLD') : null, wRv: dRv > 0 ? wallOf([A.lv.c[0], A.rv.c[1], A.lv.c[2]], uRv, 'RV') : null };
   _tampCache.set(G, t);
   return t;
 }
@@ -731,8 +914,46 @@ function tamponadeWall(px, py, pz, G, code) {
   return null;
 }
 
+// Swinging heart (tamponade). In a large effusion the heart swings within the
+// fluid-filled sac with a period of two beats — the pendular motion behind
+// electrical alternans (electrophysiology.js alternansGain: the even beats'
+// QRS finds the heart nearest the chest wall). swingOffset(path, beat, phase):
+// the displacement (cm, heart space) at that beat and cardiac phase, along the
+// left-posterior axis where the fluid is deepest: SWING.amp either side of a
+// mean SWING.mean, so it never presses through the thin anterior layer of fluid
+// (0.8 cm between alternate beats). null for other cases. The caller sets it on
+// the frame's geometry (G.swing); classify() then draws the heart and its
+// visceral layer displaced by it, tapering from the ventricles to the great-
+// vessel reflections (swingWeight), inside the parietal sac, which stays where
+// it is, so the fluid thickens on one side as it thins on the other.
+const SWING = { amp: 0.4, mean: 0.2, dir: unit([BODY_AX.P[0] + 0.6 * BODY_AX.L[0], BODY_AX.P[1] + 0.6 * BODY_AX.L[1], BODY_AX.P[2] + 0.6 * BODY_AX.L[2]]) };
+export function swingOffset(path, beat, phase) {
+  if (!path || !path.tamponade || beat == null) return null;
+  const s = SWING.mean - SWING.amp * Math.cos(Math.PI * (beat + (((phase % 1) + 1) % 1)));
+  return [SWING.dir[0] * s, SWING.dir[1] * s, SWING.dir[2] * s];
+}
+function swingWeight(py, A) { return 1 - smoothstep(A.lv.M[1] - 0.5, A.la.c[1] + 1.4, py); }
+// The path a beat is drawn from (tamponade): the respiratory phase of beat
+// `beat` of the breath (hemodynamics breathOf: expiration, inspiration,
+// expiration — the spectral display's beats), its solved circulation blended
+// into the next beat's across diastole (respPath), so the inspiratory RV fills
+// and the septum moves before the QRS rather than jumping at it. Other cases (or
+// no beat count): the case's own path.
+export function breathPath(path, beat, phase) {
+  if (!path || !path.tamponade || beat == null) return path;
+  const w0 = breathOf(beat) === 'insp' ? 1 : 0, w1 = breathOf(beat + 1) === 'insp' ? 1 : 0;
+  const f = w0 === w1 ? 0 : smoothstep(0.55, 1.0, ((phase % 1) + 1) % 1);
+  return respPath(path, w0 + (w1 - w0) * f);
+}
+// (the displacement classify() applied to its last point: velocityAt reads the
+// flow of the same sample at the same displaced point)
+const _swLast = { x: NaN, y: 0, z: 0, dx: 0, dy: 0, dz: 0 };
+export const SWING_LAST = _swLast;   // (read-only: the renderer's scatterers move with the heart)
+const HEART_CODES = new Set([BODY.MYO, BODY.PAP, BODY.LV, BODY.RV, BODY.LA, BODY.RA]);
+
 export function classify(px, py, pz, G, path = {}) {
   const A = G.A;
+  if (G.swing) { _swLast.x = px; _swLast.y = py; _swLast.z = pz; _swLast.dx = _swLast.dy = _swLast.dz = 0; }
 
   // --- pericardial effusion: a DEPENDENT echo-free layer between the
   // epicardium and the parietal pericardium (which it pushes outward) — so it
@@ -744,10 +965,41 @@ export function classify(px, py, pz, G, path = {}) {
     // taper to nothing toward the reflections at the great-vessel roots (no flat cut-off)
     const g = gap * (1 - smoothstep(A.la.c[1] - 0.2, A.la.c[1] + 1.4, py));
     const de = visceralDist(px, py, pz, A); // signed distance to the visceral envelope (epicardium + CS in its fat)
-    if (de > 0.02 && de < g) {
+    const sw = G.swing, wq = sw && de < g ? swingWeight(py, A) : 0;
+    if (wq > 0) {
+      // swinging heart: inside the fixed sac, the heart (and its visceral layer)
+      // is displaced; where it has moved away the sac holds fluid
+      const qx = px - sw[0] * wq, qy = py - sw[1] * wq, qz = pz - sw[2] * wq;
+      if (visceralDist(qx, qy, qz, A) > 0.02) {
+        // (a chamber the heart has moved away from turns to fluid only where it
+        // lay inside the visceral envelope: the atrial lumen that the envelope
+        // does not wrap, toward the reflections, stays as drawn)
+        const b0 = bodyClassify(px, py, pz, A, g);
+        if (b0.code === BODY.OUT || b0.code === BODY.PERI || b0.code === BODY.FAT || (de <= 0.02 && HEART_CODES.has(b0.code))) return cls(TISSUE.PERICARDIUM, 0.02);
+      } else {
+        _swLast.dx = qx - px; _swLast.dy = qy - py; _swLast.dz = qz - pz;
+        px = qx; py = qy; pz = qz;
+      }
+    } else if (de > 0.02 && de < g) {
       // fluid only displaces the pericardial space itself — never a vessel, lung or liver
       const b0 = bodyClassify(px, py, pz, A, g);
-      if (b0.code === BODY.OUT || b0.code === BODY.PERI || b0.code === BODY.FAT) return cls(TISSUE.PERICARDIUM, 0.02);
+      if (b0.code === BODY.OUT || b0.code === BODY.PERI || b0.code === BODY.FAT) {
+        // (review 12) the descending aorta lies OUTSIDE the sac: where the fluid
+        // reaches it the parietal pericardium is the bright line between the two
+        const dd = lumenDist(px, py, pz, A, 'DESC') - A.ao.wall;
+        if (dd >= PERI.thick + 0.03) return cls(TISSUE.PERICARDIUM, 0.02);
+        if (dd > 0) return cls(TISSUE.PERI_LINE, 0.3);
+      }
+    }
+    // (review 12) the transverse sinus, behind the great arteries and in front of
+    // the atria, is part of the pericardial space above the taper of the dependent
+    // layer: an effusion distends it to a few millimetres (anatomy.js transverseSinus)
+    {
+      const ts = transverseSinus(px, py, pz, A);
+      if (ts.atrial && ts.art > 0.03 && ts.atr > 0.03 && ts.art + ts.atr < TS_WIDTH) {
+        const b0 = bodyClassify(px, py, pz, A, g);
+        if (b0.code === BODY.OUT || b0.code === BODY.PERI || b0.code === BODY.FAT) return cls(TISSUE.PERICARDIUM, 0.02);
+      }
     }
     periOff = g;
   }
@@ -892,7 +1144,7 @@ function avLeafletPoly(P, sgn, q, o, sc, mod) {
   _lp.ut = _lp.ub - sgn * ovl * Math.cos(beta); _lp.at = _lp.ab + ovl * Math.sin(beta);
   if (mod && mod.ms) {
     // planimetry-true orifice: the fused tips sit on an ellipse of AP width msGap
-    // (commissures fused beyond |q| ≈ 0.62), opening with the transmitral flow —
+    // (commissures fused beyond |q| = MS_Q), opening with the transmitral flow —
     // the central, medio-laterally elongated "fish-mouth" of the short axis
     const on = o / 0.35 > 1 ? 1 : o / 0.35;
     const e = 1 - q2 / mod.msQ2;
@@ -905,13 +1157,19 @@ function avLeafletPoly(P, sgn, q, o, sc, mod) {
     // (sheared along c so the slit runs closer to medial-lateral in the short axis)
     _lp.ut = uc + sgn * hg + MS_SHEAR * q * P.Ric * sc;
     _lp.at = MS_DEPTH * sc * (0.35 + 0.65 * on);
-    // Doming: the body runs down toward the LV bowing outward (the anterior
-    // leaflet toward the LVOT/septum) and the restricted tip hooks back in to the
-    // orifice — the "hockey stick" of the long-axis views
-    const bulge = (sgn > 0 ? 0.4 : 0.2) * on;                 // both leaflets dome (anterior most)
-    _lp.ub = uh + (_lp.ut - uh) * 0.4 + sgn * bulge * 0.1;
-    _lp.ab = ah + (_lp.at - ah) * 0.6 + bulge * 0.5;
-  }
+    // Doming: the thin, still mobile body bellies into the LV (the anterior leaflet
+    // toward the LVOT/septum) while the fused tip is held back at the orifice, so
+    // the leaflet bends at a knee ~0.6 of the way down: the diastolic "hockey
+    // stick" of the long-axis views. The knee stands MS_BOW off the hinge-tip
+    // chord (anterior; the stiffer posterior leaflet domes less).
+    const du = _lp.ut - uh, da = _lp.at - ah, Lc = Math.sqrt(du * du + da * da) || 1e-9;
+    const bow = (sgn > 0 ? MS_BOW_A : MS_BOW_P) * on;
+    _lp.ub = uh + du * 0.6 + sgn * bow * da / Lc;
+    _lp.ab = ah + da * 0.6 - sgn * bow * du / Lc;
+    // subvalvular fusion: below the tip ring the fused tips and matted chordae
+    // continue as a short tunnel of the same lumen (avLeafletHit)
+    _lp.tube = MS_TUBE * (0.4 + 0.6 * on);
+  } else _lp.tube = 0;
   if (mod && mod.gap && o < 0.5) {
     // malcoaptation: with a dilated annulus the leaflets no longer meet — the
     // tips stop short of each other, leaving the regurgitant orifice visible
@@ -942,17 +1200,18 @@ function avLeafletHit(P, u, a, c, o, sc, mod, thickMul) {
     const L = avLeafletPoly(P, sgn, q, o, sc, mod);
     // posterior mitral scallops (P1/P2/P3): the free edge is notched between them
     let edgeCut = 1;
-    if (sgn < 0 && P.scallops) edgeCut = 0.9 + 0.1 * Math.abs(Math.cos(P.scallops * Math.PI * 0.5 * (q + 1)));
+    if (sgn < 0 && P.scallops && !(mod && mod.ms)) edgeCut = 0.9 + 0.1 * Math.abs(Math.cos(P.scallops * Math.PI * 0.5 * (q + 1)));
     const d1 = seg2d(u, a, L.uh, L.ah, L.ub, L.ab);
     const t1 = _segT;
     const d2 = seg2d(u, a, L.ub, L.ab, L.ut, L.at);
     const t2 = _segT;
+    if (L.tube > 0 && seg2d(u, a, L.ut, L.at, L.ut, L.at + L.tube) <= (sgn > 0 ? P.thickA : P.thickP) * thickMul * (1.1 + MS_TIP_BULB)) return 1;
     const bodyFrac = 1 - (P.ovl + 0.08) / L.len;
     const f = d1 <= d2 ? t1 * bodyFrac : bodyFrac + t2 * (1 - bodyFrac);
     if (f > edgeCut) continue;
     const th0 = (sgn > 0 ? P.thickA : P.thickP) * thickMul;
     // thin membrane tapering to the free edge; rheumatic tips are bulbous
-    const th = mod && mod.ms ? th0 * (1.05 + MS_TIP_BULB * f) : th0 * (1.05 - 0.4 * f);
+    const th = mod && mod.ms ? th0 * (1.1 + MS_TIP_BULB * f * f * f) : th0 * (1.05 - 0.4 * f);
     if ((d1 < d2 ? d1 : d2) <= th) return f;
   }
   return -1;
@@ -962,25 +1221,59 @@ function avLeafletHit(P, u, a, c, o, sc, mod, thickMul) {
 const PROLAPSE = { mild: 0, moderate: 0.55, severe: 1 };
 // tricuspid malcoaptation gap (cm) in TR, by grade
 const TV_MOD = { mild: { gap: 0.1 }, moderate: { gap: 0.25 }, severe: { gap: 0.45 } };
-// rheumatic MS: open commissural span (|q| < MS_Q), tip bulb growth along the
-// leaflet and the resulting mean tip half-thickness (cm, thickMul 1.9 applied)
-const MS_Q = 0.62, MS_TIP_BULB = 0.9, MS_DEPTH = 1.4;   // MS_DEPTH: open tip ring below the annulus centre
-const MS_SHEAR = 0.4;                                    // tip-ring shear along the commissural axis
-const MS_TIP_T = 0.5 * (AVL.mitral.thickA + AVL.mitral.thickP) * 1.9 * (1.05 + MS_TIP_BULB);
-// AP tip gap (cm) at annular scale sc for an orifice of area msA. The cut at the
-// funnel tip grazes the bulbous tips, so the AP lumen is the tip-centreline gap,
-// while the bulbs, seen end-on at the commissural corners, shorten the slit by
-// ~one tip half-thickness at each end (calibrated against the planimetered
-// area in the tracked PSAX-MV plane, tools/verify-anatomy.mjs).
+// Rheumatic MS leaflet shape (review 12, PAT-1 / PAT-5).
+// - MS_Q: open commissural span (|q| < MS_Q; fused beyond).
+// - Thickness: the body is ~1.2x a normal leaflet and still pliable, the
+//   thickening is at the free edge: half-thickness th0 * (1.1 + MS_TIP_BULB f^3)
+//   along the leaflet (f = 0 hinge .. 1 tip), i.e. ~2 mm bodies and ~4 mm tips
+//   (they were 1.9x thick, ~6 mm bulbs, which bloomed over the orifice).
+// - MS_DEPTH: the tip ring below the annulus centre. Below it the fused tips and
+//   matted chordae continue for MS_TUBE as a short tunnel of the same lumen
+//   (subvalvular fusion), so a short-axis cut a few degrees off the ring plane
+//   still shows the limiting orifice as one closed fish-mouth.
+// - MS_BOW_A / MS_BOW_P: diastolic doming, the knee's offset from the hinge-tip
+//   chord (anterior leaflet: the "hockey stick"; the posterior leaflet is stiffer).
+const MS_Q = 0.66, MS_TIP_BULB = 1.0, MS_DEPTH = 1.4, MS_THICK = 1.2, MS_TUBE = 0.45;
+const MS_BOW_A = 0.45, MS_BOW_P = 0.2;
+const MS_CALC_F = 0.85;   // leaflet fraction (0 hinge .. 1 tip) beyond which the leaflet is calcified
+const MS_SHEAR = 0.25;                                    // tip-ring shear along the commissural axis
+const MS_TIP_T = 0.5 * (AVL.mitral.thickA + AVL.mitral.thickP) * MS_THICK * (1.1 + MS_TIP_BULB);   // tip half-thickness
+// Planimetry is done on the IMAGE: the sonographer traces the inner border of the
+// bright leaflet ring, and that border lies inside the anatomical lumen by about
+// the half-width of the point-spread function (the leaflets bloom into the
+// orifice; high gain makes it worse: Martin RP et al., Am J Cardiol 1979;43:560).
+// MS_AREA is the planimetered area (the Hakki and PHT areas are tied to it), so
+// the lumen is built MS_RIM wider all round than the MS_AREA ellipse. MS_RIM is
+// calibrated on the rendered PSAX-MV image (tools/verify-anatomy.mjs, 'B-mode
+// planimetry'): the near-black orifice (grey <= 45) is ~0.85 cm2 and the orifice
+// traced at the mid-grey edge ~1.1 cm2 for the severe valve's 0.95 cm2, in an
+// opening of ~1.6 x 0.75 cm. The tissue-label lumen is then ~1.4 cm2.
+const MS_RIM = 0.095;
+// AP gap (cm) between the tip centrelines at annular scale sc for a planimetered
+// orifice msA: an ellipse whose semi-axes are those of the lumen less MS_RIM. The
+// lumen's long semi-axis is the open commissural span less the fused end (~0.7 of
+// a tip half-thickness); its short semi-axis is half the gap less the tip
+// half-thickness.
 function msGapAt(msA, sc) {
   const halfL = MS_Q * AVL.mitral.Ric * sc - 0.7 * MS_TIP_T;
-  return 2 * msA / (Math.PI * halfL);
+  return 2 * (msA / (Math.PI * (halfL - MS_RIM)) + MS_RIM + MS_TIP_T);
+}
+// The severe-MS anterior/posterior leaflet in its own long-axis section (q = 0),
+// for the audit: hinge, knee and tip as [u (toward the aortic root), a (into the
+// LV)] in cm, and the body / tip half-thickness.
+export function msLeafletProfile(G, sgn = 1, q = 0) {
+  const path = G.path || { mitralStenosis: true }, P = AVL.mitral;
+  const L = avLeafletPoly(P, sgn, q, G.valves.mitral, G.A.lv.mvR / LM.MV_R, avMod(path));
+  const th0 = (sgn > 0 ? P.thickA : P.thickP) * MS_THICK;
+  const bodyFrac = 1 - (P.ovl + 0.08) / L.len, fm = 0.5 * bodyFrac;
+  return { hinge: [L.uh, L.ah], knee: [L.ub, L.ab], tip: [L.ut, L.at], tube: L.tube, flow: LEAFLETS.mitral.flow,
+    thBody: th0 * (1.1 + MS_TIP_BULB * fm * fm * fm), thTip: th0 * (1.1 + MS_TIP_BULB) };
 }
 const _modCache = new WeakMap();
 function avMod(path) {
   let m = _modCache.get(path);
   if (!m) {
-    // MS orifice: fused commissures leave a fish-mouth ~2 cm wide (|q| < 0.62).
+    // MS orifice: fused commissures leave a fish-mouth ~2 cm wide (|q| < MS_Q).
     // Its AP opening (msGapAt) is set so the orifice INSIDE the thickened tips (the
     // blood area a sonographer planimeters) matches the grade's MVA.
     const msA = MS_AREA[gradeOf(path)] || MS_AREA.severe;
@@ -992,16 +1285,16 @@ function avMod(path) {
   return m;
 }
 // World-space free-edge (tip) point of a leaflet at intercommissural fraction q.
-function avTipWorld(name, G, sgn, q) {
+function avTipWorld(name, G, sgn, q, da = 0) {
   const P = AVL[name], lf = LEAFLETS[name], vc = G.A.valves[name].c;
   const o = G.valves[name], sc = name === 'mitral' ? G.A.lv.mvR / LM.MV_R : 1;
   const mod = name === 'mitral' ? avMod(G.path || {}) : null;
   const L = avLeafletPoly(P, sgn, q, o, sc, mod);
   const c = q * P.Ric * sc;
   const t = [
-    vc[0] + lf.ap[0] * L.ut + lf.flow[0] * L.at + lf.com[0] * c,
-    vc[1] + lf.ap[1] * L.ut + lf.flow[1] * L.at + lf.com[1] * c,
-    vc[2] + lf.ap[2] * L.ut + lf.flow[2] * L.at + lf.com[2] * c,
+    vc[0] + lf.ap[0] * L.ut + lf.flow[0] * (L.at + da) + lf.com[0] * c,
+    vc[1] + lf.ap[1] * L.ut + lf.flow[1] * (L.at + da) + lf.com[1] * c,
+    vc[2] + lf.ap[2] * L.ut + lf.flow[2] * (L.at + da) + lf.com[2] * c,
   ];
   // the mitral apparatus rides the angle-dependent annular excursion
   if (name === 'mitral') t[1] += mitralLift(t[0], t[1], t[2], G.A);
@@ -1015,7 +1308,18 @@ function avTipWorld(name, G, sgn, q) {
 // blended (opening / closing) profile.
 const SL_COAPT = 0.28, SL_SAG = 0.13, SL_COAPT_H = 0.55, SL_N = 16;
 const AS_OPEN = 0.28;                                     // AS: restricted opening (valveOpening)
+// aortic cusps: nodulus of Arantius (cm) and the half-width of the shut cusps'
+// coaptation seams (cm: two apposed lunulae, ~0.5 mm — finer than the renderer's
+// coarsest sampling block, so its coarse sampler looks for valve tissue inside
+// each block, see valveAt); calcific AS: the nodule threshold of the calcium
+// lattice, and the half-width of the open cusps' commissural slits (cm)
+const AO_NODULE = 0.05, AO_COAPT_W = 0.025, AS_NODULE = 0.06, AS_SLIT = 0.06, AS_SLIT_T = 0.3;
 const _slA = new Float64Array(SL_N + 1), _slR = new Float64Array(SL_N + 1);
+// Valve tissue alone at a point (classify() tests the valves before any other
+// tissue, so a hit here is what classify returns there): the renderer's coarse
+// sampler uses it to look for sub-block cusps cheaply. Returns the shared result
+// object (tissue / echo / calc) or null.
+export function valveAt(px, py, pz, G, path = {}) { return valveTissue(px, py, pz, G, path); }
 function valveTissue(px, py, pz, G, path) {
   // apex-anchored contraction descends the AV valve planes with the annulus: a
   // valve at end-diastolic height y maps to apexY + (y−apexY)·lsy (same material
@@ -1046,11 +1350,17 @@ function valveTissue(px, py, pz, G, path) {
       const mod = name === 'mitral' ? avMod(path) : (path.tr ? TV_MOD[gradeOf(path)] : null);
       // tricuspid annular dilatation in TR / pulmonary hypertension (~20 %)
       const sc = name === 'mitral' ? G.A.lv.mvR / LM.MV_R : (path.tr || path.rvpo ? 1.2 : 1);
-      const f = avLeafletHit(AVL[name], u, a, c, open, sc, mod, ms ? 1.9 : 1);
+      const f = avLeafletHit(AVL[name], u, a, c, open, sc, mod, ms ? MS_THICK : 1);
       if (f < 0) continue;
       _valveResult.tissue = TISSUE.VALVE;
+      // rheumatic MS: the calcium sits in the fused free edges and the sub-valvular
+      // tunnel (f >= MS_CALC_F); the leaflet bodies are fibrotic and pliable, bright
+      // but not shadowing (Wilkins GT et al., Br Heart J 1988;60:299: thickening and
+      // calcification graded from the leaflet margins toward the base). With the
+      // whole leaflet flagged calcific, the apical views had the entire LA in an
+      // acoustic shadow.
       _valveResult.echo = ms ? 0.98 : 0.8 + 0.06 * (1 - f);
-      _valveResult.calc = ms ? 1 : 0;
+      _valveResult.calc = ms && f >= MS_CALC_F ? 1 : 0;
       return _valveResult;
     }
     // Semilunar cusps: three curtains hinging at the annulus.
@@ -1092,14 +1402,14 @@ function valveTissue(px, py, pz, G, path) {
     //    then meet along the commissural lines (seams below).
     // In between, the two curves blend (sampled, nearest point).
     const asv = name === 'aortic' && !!path.aorticStenosis;
-    let dist;
+    let dist, bl = 0;
     if (!isCusp) {
       if (a < -0.05 || a > cd) continue;                  // only the leaflet span, hinge→edge
       const sc = t * t * (3 - 2 * t);
       dist = Math.abs(rad - (v.r + (edgeR - v.r) * sc));
     } else {
       const oN = asv ? open / AS_OPEN : open;              // opening relative to this valve's full excursion
-      const bl = smoothstep(0.02, 0.45, oN);               // 0 shut .. 1 open shape
+      bl = smoothstep(0.02, 0.45, oN);                     // 0 shut .. 1 open shape
       const rho = rad / v.r;
       if (bl === 0 && rho <= 1) {
         // shut: the cusp height is a function of radius (shallow: vertical distance)
@@ -1140,15 +1450,24 @@ function valveTissue(px, py, pz, G, path) {
     let th = thick * (0.45 + 0.55 * (1 - t) * (1 - t));
     // Nodulus of Arantius: a fibrous thickening at the CENTRE of each semilunar
     // cusp's free edge, where the three cusps meet — bulk up the free-edge tip at
-    // the cusp centre so the coaptation shows the three little nodules.
+    // the cusp centre so the coaptation shows the three little nodules. (Aortic:
+    // ~1 mm, so the shut cusps read on TEE as a fine line, not a bar with a bulb.)
+    const ao = name === 'aortic';
     let nod = 0;
-    if (isCusp && t > 0.7) nod = 0.11 * ((t - 0.7) / 0.3) * (1 - cptr);
+    if (isCusp && t > 0.7) nod = (ao ? AO_NODULE : 0.11) * ((t - 0.7) / 0.3) * (1 - cptr);
     th += nod;
-    // calcific AS: thick (3-5 mm), nodular cusps — calcium masses concentrated at the
-    // cusp bodies and bases rather than a thin bright membrane
+    // calcific AS: fibrous cusps 3-5 mm thick carrying discrete calcium nodules
+    // (~3-4 mm masses on a 3-D lattice fixed to the valve, on the cusp bodies and
+    // bases more than the free edges) — near-white with a distal acoustic shadow
+    // (calc 2), the rest of the cusp fibrous (calc 0). Open, the cusps part along
+    // their commissural lines from mid-cusp to the free edge (partial fusion at the
+    // bases only): three thick cusp masses round a small stellate orifice.
+    let nodule = false;
     if (asv) {
-      const lump = 0.5 + 0.5 * Math.sin(rx * 7.1 + ry * 5.3 + rz * 6.7);
-      th = th * 2.6 + 0.06 + 0.06 * lump * (1 - t * 0.5);
+      const lump = (0.5 + 0.5 * Math.sin(dx * 4.3 + 1.3)) * (0.5 + 0.5 * Math.sin(dy * 3.8 + 0.7)) * (0.5 + 0.5 * Math.sin(dz * 3.5 + 2.1));
+      nodule = lump > AS_NODULE && t < 0.85;
+      th = th * 2.2 + 0.045 + (nodule ? 0.12 * (1 - 0.5 * t) : 0);
+      if (bl > 0 && t > AS_SLIT_T && (Math.abs(kh) / 3) * rad < AS_SLIT) continue;
     }
     let hit = dist <= th;
     // Coaptation zone of the shut semilunar valve: neighbouring cusps' free
@@ -1159,7 +1478,7 @@ function valveTissue(px, py, pz, G, path) {
     if (!hit && isCusp && open < 0.25 * (asv ? AS_OPEN : 1)) {
       const angDist = Math.abs(kh) / 3;                   // angular distance to a commissure
       const rho = rad / v.r;
-      if (rho < 0.92 && angDist * rad < (asv ? 0.126 : 0.04)) {
+      if (rho < 0.92 && angDist * rad < (asv ? 0.126 : ao ? AO_COAPT_W : 0.04)) {
         const tb = 1 - rho;
         const base = SL_COAPT * tb - SL_SAG * Math.sin(Math.PI * tb);
         const top = SL_COAPT + SL_COAPT_H + rho * (cd - SL_COAPT - SL_COAPT_H);
@@ -1168,11 +1487,12 @@ function valveTissue(px, py, pz, G, path) {
     }
     if (!hit) continue;
     let echo = 0.8 + 0.05 * (1 - t) + (nod > 0.03 ? 0.04 : 0); // nodule reads a touch brighter
-    const calc = (name === 'aortic' && path.aorticStenosis) || (name === 'mitral' && path.mitralStenosis);
+    const calc = asv ? nodule : (name === 'mitral' && path.mitralStenosis);
     if (calc) echo = 0.98; // calcified / restricted → bright, thickened
+    else if (asv) echo = 1.0; // the sclerotic, thickened AS cusp between the nodules (renderer: a few dB above a normal cusp)
     _valveResult.tissue = TISSUE.VALVE;
     _valveResult.echo = echo;
-    _valveResult.calc = calc ? 1 : 0;
+    _valveResult.calc = asv ? (nodule ? 2 : 0) : calc ? 1 : 0;
     return _valveResult;
   }
   return null;
@@ -1185,33 +1505,65 @@ function valveTissue(px, py, pz, G, path) {
 // ---------------------------------------------------------------------------
 
 // Signed pulmonary-venous flow velocity (m/s): positive = forward, toward the
-// left atrium; negative = retrograde, back up the vein. Normal adults show S >= D;
-// the small late-diastolic 'a' reversal is the atrium contracting against open
-// vein mouths. Severe MR inverts the systolic component (systolic flow reversal).
-function pvFlowSpeed(phase, path) {
-  const s = pulse(0.05, 0.35, phase);        // systolic (S) wave
-  const d = pulse(0.50, 0.72, phase);        // early-diastolic (D) wave
-  const a = pulse(0.86, 1.0, phase);         // atrial reversal
-  const severeMR = !!path.mr && gradeOf(path) === 'severe';
-  const sComp = severeMR ? -0.55 * s : 0.48 * s;
-  return sComp + 0.42 * d - 0.20 * a;
+// left atrium; negative = retrograde, back up the vein. It is the solved
+// pulmonary-venous inflow of the circulation (H.Qpv, mL/s) over the vein-mouth
+// area, so the S wave (atrial relaxation and annular descent), the D wave (mitral
+// opening), any reversal (severe MR in systole; an atrial kick that lifts the LA
+// above the venous pressure) and their ratios follow the case's LA pressure.
+// PV_AREA (cm2, the effective total area the sampled vein carries) puts the
+// normal systolic peak at ~0.5 m/s. In the normal model the S and D peaks are
+// about equal (S/D ~0.95), as in young adults with an E-dominant mitral inflow
+// (E/A ~1.7); a raised LAP with restrictive filling (DCM) makes it D-dominant.
+const PV_AREA = 2.9;
+function pvFlowSpeed(H) {
+  return H && H.Qpv ? H.Qpv / (PV_AREA * 100) : 0;
 }
 
-// Hepatic-vein flow speed (m/s, + toward the RA) on the right heart's clock: a
-// systolic S and an early-diastolic D wave toward the heart, with a small atrial
-// reversal. Severe TR blunts and then REVERSES the S wave (the regurgitant
-// volume runs back into the liver) — the ASE-specific sign of severe TR; RV
-// pressure overload deepens the atrial reversal and blunts S.
-function hvFlowSpeed(phaseRV, path) {
-  const s = pulse(0.04, 0.42, phaseRV), d = pulse(0.52, 0.78, phaseRV), a = pulse(0.86, 1.0, phaseRV);
-  const w = path.tr && !path.rvpo ? rightHeartLoad(path).trVol : 0;
-  const sComp = (path.rvpo ? 0.25 : 0.42) * (1 - w) * s - 0.5 * w * s;
-  return sComp + (0.3 + 0.15 * w) * d - (path.rvpo ? 0.32 : 0.16) * a;
+// Left-atrial-appendage flow (m/s, + = out of the appendage into the LA body):
+// emptying with atrial contraction (normal peak ~0.5-0.6 m/s, > 0.4 in sinus
+// rhythm), filling back into it in early systole as the LA relaxes (~0.4-0.5 m/s),
+// and a small early-diastolic emptying wave as the mitral valve opens (Agmon Y et
+// al., JACC 1999;34:1867-77; ASE/EACVI cardiac sources of embolism).
+function laaFlowSpeed(phase) {
+  const a = pulse(0.86, 1.0, phase), f = pulse(0.02, 0.20, phase), e = pulse(0.50, 0.68, phase);
+  return 0.66 * a - 0.46 * f + 0.2 * e;
+}
+
+// Hepatic-vein flow speed (m/s, + toward the RA): the solved caval inflow of the
+// circulation (H.Qvr, mL/s, read at the cycle phase like every other solved
+// signal: hemoFrame keeps no separate right-heart clock) over an effective vessel
+// area. The S wave is the RA's fall in pressure as the tricuspid annulus descends
+// (x descent), the D wave its emptying once the tricuspid opens (y descent), and
+// a reversal wherever the RA pressure rises above the systemic venous pressure:
+// the atrial kick (AR, pushed back into the soft central veins of a normal RAP:
+// hemodynamics.js Csv), the regurgitant volume of severe TR (systolic reversal),
+// a stiff RA's tall a wave (pulmonary hypertension), and in tamponade the loss of
+// the y descent (blunted D) with expiratory diastolic reversal, each respiratory
+// beat read from its own solved circulation. HV_AREA (cm2) puts the normal S
+// peak at ~0.37 m/s. The veins are distensible: with a raised RA pressure the
+// IVC is plethoric and the hepatic veins dilated (ASE 2010 RA-pressure
+// estimation), so the area scales with the square of the IVC radius the anatomy
+// draws for the case's RAP (ivcOfRap: 0.9 cm at RAP <= 4.6, 1.25 cm at >= 9):
+// the same backward volume of a tall RA wave reads ~half as fast in the
+// plethoric veins of TR, PH, DCM or tamponade.
+const HV_AREA = 4.0;
+function hvFlowSpeed(H) {
+  if (!H || !H.Qvr) return 0;
+  const r = ivcOfRap(H.RAP || 0).r / 0.9;
+  return H.Qvr / (HV_AREA * r * r * 100);
 }
 const _hvCache = new WeakMap();
 
 // Off-axis Gaussian falloff: 1 on the centreline, ->0 as perpendicular distance
 // d grows past the stream half-width w.
+// Inflow-stream profile (0..1) across (perp, half-width w) and along the
+// stream: flat over the central half and the first 2 cm below the annulus,
+// Gaussian shoulders, then decaying toward the apex.
+function inflowShape(perp, w, along) {
+  const e = perp - 0.5 * w, h = 0.5 * w;
+  const across = e <= 0 ? 1 : Math.exp(-(e / h) * (e / h));
+  return across * Math.exp(-clamp(along - 2, 0, 4) / 3.5);
+}
 function gauss(d, w) {
   const t = d / w;
   return Math.exp(-t * t);
@@ -1221,6 +1573,31 @@ function gauss(d, w) {
 // with UNIT direction `u`. The signed distance travelled along the axis is
 // stashed in _axis.along (module scope) to avoid allocating a return tuple.
 const _axis = { along: 0 };
+// The upper infundibulum's axis (A.rvot[1] -> A.rvot[2], just below the pulmonary
+// valve) of the anatomy frame last asked for: its unit direction in _infU, its
+// length returned. (velocityAt asks once per sample; the frame changes per phase.)
+const _infU = [0, 0, 0];
+let _infA = null, _infLen = 1;
+function infundibulumAxis(A) {
+  if (A !== _infA) {
+    const a = A.rvot[1], b = A.rvot[2];
+    const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+    _infLen = Math.hypot(ux, uy, uz) || 1;
+    _infU[0] = ux / _infLen; _infU[1] = uy / _infLen; _infU[2] = uz / _infLen;
+    _infA = A;
+  }
+  return _infLen;
+}
+// Is a point at the edge of the RVOT -> PA stream in that lumen? Below the
+// pulmonary valve (along < 0, cm along the trunk axis from the valve) the RV's
+// outflow tract, above it the PA trunk — but not where the left PA runs over the
+// left atrium (beyond ~2 cm, near the bifurcation). Exact lumen SDFs, tried in
+// the order the point is most likely to be in.
+function inRvotLumen(px, py, pz, A, along) {
+  if (along < 0) return lumenDist(px, py, pz, A, 'RV') < 0 || lumenDist(px, py, pz, A, 'PA') < 0;
+  if (lumenDist(px, py, pz, A, 'PA') < 0) return along < 2 || lumenDist(px, py, pz, A, 'LA') > 0;
+  return lumenDist(px, py, pz, A, 'RV') < 0;
+}
 function offAxisDist(px, py, pz, a, u) {
   const dx = px - a[0], dy = py - a[1], dz = pz - a[2];
   const along = dx * u[0] + dy * u[1] + dz * u[2];
@@ -1239,7 +1616,11 @@ const RA_MID = [LM.RA_FLOOR0[0] + LM.A_RA[0] * 2.1, LM.RA_FLOOR0[1] + LM.A_RA[1]
 const AX_MITRAL_IN = _mFlow;                    // mitral annulus -> LV apex
 const AX_TRICUSPID_IN = _tvFlow;                // tricuspid annulus -> RV apex
 const AX_LVOT = unit(_sub3(LM.A, LM.LVOT0));    // LVOT -> aorta
-const AX_RVOT = unit(_sub3(LM.PV, LM.RVOT[1])); // infundibulum -> pulmonary artery
+// RV outflow: just below the pulmonary valve the flow runs along the valve /
+// trunk axis U_PA (review 12, TTE-5/PHY-11: the infundibulum-to-valve chord,
+// PV - RVOT[1], lay ~32 deg off the trunk, so the PSAX-AV beam that is aligned with
+// the drawn main PA met it at ~24 deg and no default RVOT trace was recorded)
+const AX_RVOT = LM.U_PA;
 const AX_MR = unit(_sub3(LA_MID, LM.M));        // mitral -> into the LA
 // posterior-leaflet (P2) prolapse drives an ECCENTRIC jet away from the flail
 // leaflet: anteriorly, hugging the anterior LA wall behind the aortic root
@@ -1256,7 +1637,9 @@ const AX_TR = (() => {
   const toRA = unit(_sub3(RA_MID, LM.T));
   return unit([0.35 * toRA[0] - 0.65 * AX_TRICUSPID_IN[0], 0.35 * toRA[1] - 0.65 * AX_TRICUSPID_IN[1], 0.35 * toRA[2] - 0.65 * AX_TRICUSPID_IN[2]]);
 })();
-const AX_VSD = unit([-1, 0.1, 0.15]);           // LV -> RV across the septum
+// (perpendicular to the LV long axis, as the septum runs along it: the jet
+// then lies in the short-axis plane as well as in the four-chamber plane)
+const AX_VSD = unit([-1, -0.175, 0.15]);        // LV -> RV across the septum
 // LA -> RA across the septum, the stream bending toward the tricuspid valve as
 // it enters the RA (so the subcostal and ME views align with it)
 const AX_ASD = unit([LM.IAS_N[0] + (LM.T[0] - LM.IAS.asdC[0]) / Math.hypot(...LM.T.map((v, i) => v - LM.IAS.asdC[i])),
@@ -1332,6 +1715,7 @@ const VORTEX_STRENGTH = 0.45;  // swirl gain (m/s per cm, before the Gaussian ro
 // its thresholded form (variance >= 0.5) for older callers.
 const _velResult = { vx: 0, vy: 0, vz: 0, speed: 0, flow: FLOW.NONE, turbulent: false, variance: 0 };
 let _velHasBest = false;
+let _flowMask = 0;                 // flows velocityAt may return (bit per FLOW tag; 0 = any)
 
 // Lifted out of velocityAt so no closure is allocated per sample; state (the
 // current best) lives in the module-scoped singleton above. Keeps the fastest
@@ -1339,6 +1723,7 @@ let _velHasBest = false;
 // `turb` is a variance 0..1, or a boolean (true = a fully turbulent cell).
 function considerFlow(inside, dirx, diry, dirz, speed, flow, turb) {
   if (!inside || speed <= 0.01) return;
+  if (_flowMask && !((_flowMask >>> flow) & 1)) return;
   if (_velHasBest && speed <= _velResult.speed) return;
   const vr = typeof turb === 'number' ? (turb < 0 ? 0 : turb > 1 ? 1 : turb) : (turb ? 0.85 : 0);
   _velResult.vx = dirx * speed;
@@ -1434,6 +1819,12 @@ function regurgJet(px, py, pz, O, axis, downstreamGate, upstreamInside, p, vInst
 const MR_JET_PARAMS = { vc: 0.24, spread: 0.27, L: 2.2, pisa: 0.3, pisaR: 1.6, wallAttach: 1.4, flow: FLOW.MR_JET };
 const TR_JET_PARAMS = { vc: 0.24, spread: 0.27, L: 2.0, pisa: 0.28, pisaR: 1.5, wallAttach: 1.4, flow: FLOW.TR_JET };
 const JET_LEN = { mild: 1.6, moderate: 3.0, severe: 4.6 };
+// restrictive VSD: a ~0.5 cm vena contracta, a flame of ~12 deg half-angle,
+// reaching ~3.5 cm from the defect (2-4 cm into the RV)
+const VSD_JET_PARAMS = { vc: 0.25, spread: 0.22, L: 1.8, pisa: 0.3, pisaR: 1.5, wallAttach: 1.4, flow: FLOW.VSD_JET };
+const VSD_JET_LEN = 2.8;
+const _negAxes = new WeakMap();
+function negAxis(a) { let n = _negAxes.get(a); if (!n) { n = [-a[0], -a[1], -a[2]]; _negAxes.set(a, n); } return n; }
 
 // Radius (cm) of the modelled VSD channel. A ~1 cm defect with a ~4.5-5 m/s jet is
 // a RESTRICTIVE defect: the circulation carries a modest L-R shunt (Qp:Qs ~1.4).
@@ -1458,7 +1849,7 @@ const _cw = { peak: 0, env: 0 };
 export function stenosisCw(flow, H, path = {}) {
   _cw.peak = 0; _cw.env = 0;
   if (!H) return _cw;
-  if (flow === FLOW.AS_JET && path.aorticStenosis) { _cw.peak = H.vAoPeak; _cw.env = H.ejAo; }
+  if (flow === FLOW.AS_JET && path.aorticStenosis) { _cw.peak = H.vAoPeak; _cw.env = H.ejAS; }
   else if (flow === FLOW.MITRAL_IN && path.mitralStenosis) { _cw.peak = H.vMitPeak; _cw.env = H.ejMv; }
   // a regurgitant jet is read the same way: CW through it gives the modelled
   // ventricle-atrium peak (MR; TR Vmax, behind the PASP estimate) along its
@@ -1468,37 +1859,80 @@ export function stenosisCw(flow, H, path = {}) {
   return _cw;
 }
 
-// Secundum ASD shunt: a broad, laminar left-to-right column. On the LA side the
-// flow converges on the defect only within ~1 cm of it; through the defect it
-// runs across the septum (IAS_N) with a blunt profile as wide as the hole; on
-// the RA side it streams on as a column that bends toward the tricuspid valve
-// over 3-4 cm and slows as it goes. Only the core of the column (about 1 m/s)
-// aliases at a standard colour scale. Variance stays low (laminar).
+// Secundum ASD shunt: a laminar left-to-right column. On the LA side the flow
+// converges on the defect only within ~1 cm of it; through the defect it runs
+// across the septum (IAS_N) with a blunt profile as wide as the hole; on the RA
+// side it streams on as a column that bends toward the tricuspid valve, slowing as
+// it goes and fading out by ASD_COL_END of the way to the valve. The column is a
+// tube round its own bending centreline that starts with the oval defect's shape
+// (half-widths ~0.47 x 0.8 cm) and widens as a free jet does (ASD_COL_SPREAD), to
+// at most ASD_COL_WU_MAX x ASD_COL_WB_MAX. (Before review 12 its section was taken
+// across the septum's fixed axes, so past the bend nothing bounded it along the
+// septal normal and it flooded the RA.) Only
+// the core of the column (about 1 m/s) aliases at a standard colour scale.
+// Variance stays low (laminar). Each part is held to its own lumen: the
+// convergence and the defect to the atrium on that side of the septum, the RA
+// column to the RA lumen, and none of it to the aortic root, which bulges against
+// the RA (in the ME AV short axis the ungated column ran on into the closed root,
+// where diastolic colour reads as aortic regurgitation or a ruptured sinus).
+const ASD_BEND = 2.6;                   // cm along IAS_N to the stream's bend (Bezier control) point
+const ASD_COL_WU = 0.65, ASD_COL_WB = 1.3;    // cm, caps on the column's starting half-widths (across the defect's short / long axis)
+const ASD_COL_SPREAD = 0.2;             // cm of half-width per cm of path: a free jet's ~11 deg half-angle
+const ASD_COL_WU_MAX = 1.1, ASD_COL_WB_MAX = 1.5;   // cm, half-widths the column never exceeds
+const ASD_COL_END = 0.85;               // fraction of the defect -> TV path where the column has faded out
+// the column's half-widths [short, long] `s` cm along the stream from the defect
+// and its centreline speed there (relative to the flow through the defect; it
+// slows as its cross-section grows, as a free jet does)
+const _asdG = [0, 0, 0];
+const asdSpread = (s) => {
+  const wu0 = Math.min(ASD_COL_WU, LM.IAS.asdR * 1.2), wb0 = Math.min(ASD_COL_WB, LM.IAS.asdRb * 0.8);
+  _asdG[0] = Math.min(ASD_COL_WU_MAX, wu0 + ASD_COL_SPREAD * s);
+  _asdG[1] = Math.min(ASD_COL_WB_MAX, wb0 + ASD_COL_SPREAD * s);
+  _asdG[2] = wu0 * wb0;
+  return _asdG;
+};
+const asdSpeedK = (s, L) => {
+  const f = s / L;
+  if (f >= ASD_COL_END) return 0;
+  const g = asdSpread(s);
+  return Math.pow(g[2] / (g[0] * g[1]), 0.6) * (f > ASD_COL_END - 0.15 ? (ASD_COL_END - f) / 0.15 : 1);
+};
 const _asdCache = new WeakMap();
 function asdPath(G) {
   let c = _asdCache.get(G.A);
   if (c) return c;
   const C = ASD_CORE, N = LM.IAS_N, T = G.A.valves.tricuspid.c;
-  const K = [C[0] + N[0] * 2.6, C[1] + N[1] * 2.6, C[2] + N[2] * 2.6];
-  const pts = [];
+  const K = [C[0] + N[0] * ASD_BEND, C[1] + N[1] * ASD_BEND, C[2] + N[2] * ASD_BEND];
+  const pts = [], tans = [];
   for (let i = 0; i <= 12; i++) {
     const t = i / 12, a = (1 - t) * (1 - t), b = 2 * (1 - t) * t, d = t * t;
     pts.push([a * C[0] + b * K[0] + d * T[0], a * C[1] + b * K[1] + d * T[1], a * C[2] + b * K[2] + d * T[2]]);
+    // the curve's own tangent at each knot, for a direction that turns smoothly
+    const w = [0, 1, 2].map((k) => (1 - t) * (K[k] - C[k]) + t * (T[k] - K[k])), wl = Math.hypot(w[0], w[1], w[2]) || 1;
+    tans.push([w[0] / wl, w[1] / wl, w[2] / wl]);
   }
   const segs = [];
   let L = 0;
   for (let i = 0; i < 12; i++) {
     const a = pts[i], e = pts[i + 1], u = [e[0] - a[0], e[1] - a[1], e[2] - a[2]], l = Math.hypot(u[0], u[1], u[2]);
-    segs.push({ a, u: [u[0] / l, u[1] / l, u[2] / l], l, s0: L });
+    segs.push({ a, u: [u[0] / l, u[1] / l, u[2] / l], l, s0: L, ta: tans[i], tb: tans[i + 1] });
     L += l;
   }
   c = { segs, L };
   _asdCache.set(G.A, c);
   return c;
 }
+// the stream direction a fraction `t` (0..1) along segment `g`: its end tangents blended
+function asdDir(g, t, out) {
+  const x = g.ta[0] + (g.tb[0] - g.ta[0]) * t, y = g.ta[1] + (g.tb[1] - g.ta[1]) * t, z = g.ta[2] + (g.tb[2] - g.ta[2]) * t;
+  const l = Math.hypot(x, y, z) || 1;
+  out[0] = x / l; out[1] = y / l; out[2] = z / l;
+  return out;
+}
+const _asdU = [0, 0, 0];
 function asdFlow(px, py, pz, G, H) {
   const v = H.vAsd || 0;
-  if (Math.abs(v) < 0.02) return;
+  if (Math.abs(v) < 0.02 || (_flowMask && !((_flowMask >>> FLOW.ASD_JET) & 1))) return;
   const C = ASD_CORE, N = LM.IAS_N, U = LM.IAS.asdU, Bk = LM.IAS.asdB;
   const Ru = LM.IAS.asdR, Rb = LM.IAS.asdRb;
   const dx = px - C[0], dy = py - C[1], dz = pz - C[2];
@@ -1514,34 +1948,75 @@ function asdFlow(px, py, pz, G, H) {
     if (up > -0.5 && r2 < 1.6) {
       const conv = up > -0.1 ? 1 : Math.exp((up + 0.1) / 0.15);       // converging only within the last few mm
       const prof = r2 < 1 ? 1 - 0.75 * r2 : 0.25 * (1.6 - r2) / 0.6;
-      considerFlow(true, N[0] * sg, N[1] * sg, N[2] * sg, av * prof * conv, FLOW.ASD_JET, 0.05);
+      const sp = av * prof * conv;
+      // in the atrial lumen on this side of the septum (not the septal rim round
+      // the hole, not the aortic root)
+      if (sp > 0.01 && !(_velHasBest && sp <= _velResult.speed) &&
+          lumenDist(px, py, pz, G.A, s < 0 ? 'LA' : 'RA') < 0 && lumenDist(px, py, pz, G.A, 'AOROOT') > 0) {
+        considerFlow(true, N[0] * sg, N[1] * sg, N[2] * sg, sp, FLOW.ASD_JET, 0.05);
+      }
     }
-    if (up > -0.1) return;
     return;
   }
   if (sg < 0) return;                                   // the brief reversal stays at the defect
   // RA side: nearest point on the column's centreline
   const P = asdPath(G);
-  let best = 1e9, bs = 0, bu = null, bx = 0, by = 0, bz = 0;
+  let best = 1e9, bs = 0, bg = null, bt = 0, bx = 0, by = 0, bz = 0;
   for (const g of P.segs) {
     const qx = px - g.a[0], qy = py - g.a[1], qz = pz - g.a[2];
     const t = clamp(qx * g.u[0] + qy * g.u[1] + qz * g.u[2], 0, g.l);
     const rx = qx - g.u[0] * t, ry = qy - g.u[1] * t, rz = qz - g.u[2] * t;
     const d2 = rx * rx + ry * ry + rz * rz;
-    if (d2 < best) { best = d2; bs = g.s0 + t; bu = g.u; bx = rx; by = ry; bz = rz; }
+    if (d2 < best) { best = d2; bs = g.s0 + t; bg = g; bt = t / g.l; bx = rx; by = ry; bz = rz; }
   }
+  const bu = asdDir(bg, bt, _asdU);
   const f = bs / P.L;                                    // 0 at the defect -> 1 at the valve
-  if (f > 0.85) return;
-  // the column fans out as it goes (more across the long axis of the oval
-  // defect), slowing as a free jet does (~1/width): only its core near the
-  // defect is above a standard colour scale
-  const gu = 1 + f, gb = 1 + 1.5 * f;
-  const ru = (bx * U[0] + by * U[1] + bz * U[2]) / (Ru * 1.2 * gu), rb = (bx * Bk[0] + by * Bk[1] + bz * Bk[2]) / (Rb * 0.8 * gb);
+  if (f >= ASD_COL_END) return;
+  // the column spreads a little as it goes and slows as a free jet does (~1/width):
+  // only its core near the defect is above a standard colour scale
+  const g = asdSpread(bs);
+  // The cross-section is taken across the stream where it is: its long axis stays
+  // the defect's (lb: asdB made perpendicular to the stream; the stream bends in the
+  // plane across it), its short axis (lu = lb x tangent) turns with the stream. (Taken
+  // across the septum's own axes U and B, as before review 12, nothing bounded the
+  // column along the septal normal once the stream had turned toward the valve, and
+  // the "column" spread over half the RA in the A4C and ME AV short axis.)
+  const kb = Bk[0] * bu[0] + Bk[1] * bu[1] + Bk[2] * bu[2];
+  let lx = Bk[0] - kb * bu[0], ly = Bk[1] - kb * bu[1], lz = Bk[2] - kb * bu[2];
+  const ll = Math.hypot(lx, ly, lz) || 1;
+  lx /= ll; ly /= ll; lz /= ll;
+  const ux = ly * bu[2] - lz * bu[1], uy = lz * bu[0] - lx * bu[2], uz = lx * bu[1] - ly * bu[0];
+  const ru = (bx * ux + by * uy + bz * uz) / g[0];
+  const rb = (bx * lx + by * ly + bz * lz) / g[1];
   const r2 = ru * ru + rb * rb;
   if (r2 >= 1.3) return;
   const prof = r2 < 1 ? 1 - 0.75 * r2 : 0.25 * (1.3 - r2) / 0.3;
-  const sp = av * prof / Math.pow(gu * gb, 0.6) * (f > 0.7 ? (0.85 - f) / 0.15 : 1);
-  considerFlow(true, bu[0], bu[1], bu[2], sp, FLOW.ASD_JET, f < 0.2 && r2 < 0.4 ? 0.25 : 0.08);
+  const sp = av * prof * asdSpeedK(bs, P.L);
+  // the RA lumen only (never the aortic root against it)
+  if (sp > 0.01 && !(_velHasBest && sp <= _velResult.speed) &&
+      lumenDist(px, py, pz, G.A, 'RA') < -0.05 && lumenDist(px, py, pz, G.A, 'AOROOT') > 0) {
+    // (the column's slow skirt and far end are laminar: no velocity spread there. With
+    // a spread, the colour map's per-cell scatter is as large as the few cm/s the
+    // beam records where a plane cuts the skirt lengthwise, as the subcostal one
+    // does toward the tricuspid valve, and the colour broke up into a grid of dots.)
+    considerFlow(true, bu[0], bu[1], bu[2], sp, FLOW.ASD_JET, f < 0.2 && r2 < 0.4 ? 0.25 : sp > 0.3 ? 0.08 : 0);
+  }
+}
+// The shunt stream's centreline from the defect into the RA, sampled every `ds`
+// cm up to `sMax` cm: point, unit tangent (the flow direction: IAS_N at the
+// defect, turning toward the tricuspid valve) and the centreline speed relative to
+// the flow through the defect (and `w`, the column's short half-width there). The
+// spectral PW site for the shunt and its colour box are placed on it.
+export function asdStream(G, ds = 0.1, sMax = 1.6) {
+  const P = asdPath(G), out = [];
+  for (let i = 0; i * ds <= sMax + 1e-9; i++) {
+    const s = i * ds;
+    let g = P.segs[0];
+    for (const h of P.segs) if (h.s0 <= s) g = h;
+    const t = Math.min(s - g.s0, g.l);
+    out.push({ s, q: [g.a[0] + g.u[0] * t, g.a[1] + g.u[1] * t, g.a[2] + g.u[2] * t], ax: asdDir(g, t / g.l, [0, 0, 0]), k: asdSpeedK(s, P.L), w: asdSpread(s)[0] });
+  }
+  return out;
 }
 
 // Ascending aorta, arch and descending thoracic aorta: a blunt (plug) systolic
@@ -1578,6 +2053,7 @@ function aorticFlow(px, py, pz, G, H, phase) {
   if (H.ejAo > 0.001) v = clamp(1.05 * (H.forwardSV || 70) / 70, 0.6, 1.3) * H.ejAo;
   else v = -0.14 * pulse(0.39, 0.56, phase);            // early-diastolic reversal
   if (Math.abs(v) < 0.02) return;
+  const asV = G.path && G.path.aorticStenosis ? G.A.valves.aortic.c : null;
   const P = aortaPath(G.A);
   if (px < P.lo[0] || py < P.lo[1] || pz < P.lo[2] || px > P.hi[0] || py > P.hi[1] || pz > P.hi[2]) return;
   for (const g of P.segs) {
@@ -1589,6 +2065,30 @@ function aorticFlow(px, py, pz, G, H, phase) {
     const q = Math.hypot(rx, ry, rz) / r;
     if (q >= 1) continue;
     const sg = v >= 0 ? 1 : -1;
+    if (asV && v > 0) {
+      // severe AS: beyond the valve the lumen holds ONE jet and, around it, slow
+      // disturbed recirculating flow, not a laminar plug at 0.6-0.8 m/s. The jet
+      // leaves the root along the LVOT axis (velocityAt) and is then turned by
+      // the aortic wall to run up the ascending aorta: here it follows the
+      // vessel, widening ~0.25 cm per cm from the orifice radius and slowing.
+      // Around it, within 4 cm of the valve, the plug is replaced by eddies of
+      // <= 0.3 m/s (forward and back), blending into the reattached stream by 5.5 cm.
+      const dV = Math.hypot(px - asV[0], py - asV[1], pz - asV[2]);
+      if (dV < 5.5) {
+        const rr = q * r, w = Math.sqrt(H.AVA / Math.PI) + 0.25 * dV, qj = rr / w;
+        if (H.vAS > 0.05 && qj < 1.25 && dV < 5) {
+          const prof = (qj < 0.8 ? 1 : (1.25 - qj) / 0.45) * (dV > 4 ? 5 - dV : 1);
+          considerFlow(true, g.u[0], g.u[1], g.u[2], H.vAS * prof / (1 + Math.max(0, dV - 0.8) / 3.5), FLOW.AS_JET,
+            clamp((H.vAS - 1.0) / 1.0, 0, 1) * 0.9);
+        }
+        const k = smoothstep(4, 5.5, dV), fw = v * (1 - q * q * q) * k;
+        const e = Math.sin(2.3 * px + 1.7 * pz + 12.57 * phase) * Math.sin(1.9 * py - 2.6 * pz + 6.28 * phase);
+        const sw = Math.min(0.3, 0.3 * v) * Math.abs(e) * (1 - k);
+        if (fw >= sw) considerFlow(true, g.u[0], g.u[1], g.u[2], fw, FLOW.AORTA, 0.3 * (1 - k));
+        else { const se = e >= 0 ? 1 : -1; considerFlow(true, g.u[0] * se, g.u[1] * se, g.u[2] * se, sw, FLOW.AORTA, 0.3); }
+        continue;
+      }
+    }
     considerFlow(true, g.u[0] * sg, g.u[1] * sg, g.u[2] * sg, Math.abs(v) * (1 - q * q * q), FLOW.AORTA, 0);
   }
 }
@@ -1597,12 +2097,18 @@ function aorticFlow(px, py, pz, G, H, phase) {
 // Blood-flow velocity field (cm/s) at a point & phase, for colour Doppler.
 // Returns {vx,vy,vz, speed, flow, turbulent} (a reused singleton) or null.
 // speed in m/s magnitude. Every compartment is a tapering stream: away from a
-// jet/tract the returned velocity is null / near-zero.
+// jet/tract the returned velocity is null / near-zero. `flowMask` (a bit per FLOW
+// tag, 0 = all) limits the answer to those flows: the colour pass passes the
+// flows of the sample's own blood pool (echo.js FLOW_POOLS).
 // ---------------------------------------------------------------------------
-export function velocityAt(px, py, pz, G, path = {}) {
+export function velocityAt(px, py, pz, G, path = {}, flowMask = 0) {
+  // (swinging heart: the flow moves with the heart — the displacement classify()
+  // gave this sample)
+  if (G.swing && px === _swLast.x && py === _swLast.y && pz === _swLast.z) { px += _swLast.dx; py += _swLast.dy; pz += _swLast.dz; }
   const phase = G.phase;
   const H = G.hemo;   // per-frame haemodynamic scalars (jet peaks + flow envelopes)
   _velHasBest = false;
+  _flowMask = flowMask;
   _jetPhase = phase;
 
   const inLV = ellip(px, py, pz, G.lv.c, G.lv.r) <= 1;
@@ -1625,8 +2131,16 @@ export function velocityAt(px, py, pz, G, path = {}) {
     const cM = G.A.valves.mitral.c;
     const mPerp = offAxisDist(px, py, pz, cM, AX_MITRAL_IN);
     const mAlong = _axis.along;
-    const mW = 1.25 * (1 - 0.5 * clamp(mAlong / 4.5, 0, 1)); // narrows toward apex
-    const mShape = gauss(mPerp, mW) * Math.exp(-clamp(mAlong, 0, 6) / 4.5);
+    // (MS: the stream is as wide as the stenotic orifice, sqrt(MVA / normal area):
+    // a ~1 cm candle-flame jet for a 1 cm2 valve, not the normal 2.5 cm inflow)
+    const msW = path.mitralStenosis ? Math.sqrt((MS_AREA[gradeOf(path)] || MS_AREA.severe) / MVA_NORM) : 1;
+    const mW = 1.25 * msW * (1 - 0.5 * clamp(mAlong / 4.5, 0, 1)); // narrows toward apex
+    // FLAT core (review 12, PHY-7): over the first 2 cm and the central half of
+    // the stream the speed is the solved Q/A, so a PW gate at the leaflet tips
+    // reads vMitPeak x ejMv in every loading state (the small inspiratory LV of
+    // tamponade no longer slides a sloping profile past the gate), and the trace
+    // E equals the reported E
+    const mShape = inflowShape(mPerp, mW, mAlong);
     const mSpeed = H.vMitPeak * H.ejMv * mShape;
     // the LV proxy ellipsoid stops short of the annulus, so the basal inflow
     // tract just below the valve (within the inflow cone) counts as LV too
@@ -1651,8 +2165,9 @@ export function velocityAt(px, py, pz, G, path = {}) {
       const vy = AX_MITRAL_IN[1] * mSpeed + (ty / tlen) * vth;
       const vz = AX_MITRAL_IN[2] * mSpeed + (tz / tlen) * vth;
       const sp = Math.hypot(vx, vy, vz);
+      // (MS: a turbulent mosaic jet below the orifice)
       considerFlow(true, vx / sp, vy / sp, vz / sp, sp, FLOW.MITRAL_IN,
-        path.mitralStenosis && mSpeed > 1.5);
+        path.mitralStenosis && mSpeed > 1.2 && mAlong > 0.15);
     }
     // atrial-side flow convergence: blood in the LA accelerates toward the
     // orifice (speed ~ 1/(distance + 0.6 cm), equal to the annular speed at the
@@ -1665,8 +2180,19 @@ export function velocityAt(px, py, pz, G, path = {}) {
         const k = 0.6 / dO;
         const dx = (cM[0] - px) * k + 0.4 * AX_MITRAL_IN[0], dy = (cM[1] - py) * k + 0.4 * AX_MITRAL_IN[1], dz = (cM[2] - pz) * k + 0.4 * AX_MITRAL_IN[2];
         const dl = Math.hypot(dx, dy, dz) || 1;
+        if (path.mitralStenosis) {
+          // MS: hemispheric proximal isovelocity shells converging on the stenotic
+          // orifice, v = v_orifice (r0 / r)^2 with r0 the orifice radius (capped at
+          // the orifice speed): ONE laminar red-to-blue aliasing shell ~1 cm from
+          // the orifice, the innermost few mm at jet speed (mosaic)
+          const r0 = Math.sqrt((MS_AREA[gradeOf(path)] || MS_AREA.severe) / Math.PI);
+          const sp = vAnnM * Math.min(1, (r0 / dO) * (r0 / dO)) * (dO > 1.8 ? (2.2 - dO) / 0.4 : 1);
+          const inv = 1 / dO;
+          considerFlow(true, (cM[0] - px) * inv, (cM[1] - py) * inv, (cM[2] - pz) * inv, sp, FLOW.MITRAL_IN, sp > 1.5);
+        } else {
         const sp = vAnnM * 0.6 / (dO + 0.6) * (dO > 1.8 ? (2.2 - dO) / 0.4 : 1);
-        considerFlow(true, dx / dl, dy / dl, dz / dl, sp, FLOW.MITRAL_IN, path.mitralStenosis && sp > 1.5);
+        considerFlow(true, dx / dl, dy / dl, dz / dl, sp, FLOW.MITRAL_IN, false);
+        }
       }
     }
 
@@ -1676,11 +2202,11 @@ export function velocityAt(px, py, pz, G, path = {}) {
     const tPerp = offAxisDist(px, py, pz, cT, AX_TRICUSPID_IN);
     const tAlong = _axis.along;
     const tW = 1.35 * (1 - 0.5 * clamp(tAlong / 4.5, 0, 1));
-    const tShape = gauss(tPerp, tW) * Math.exp(-clamp(tAlong, 0, 6) / 4.5);
-    const tSpeed = 0.55 * H.ejTv * tShape;
+    const tShape = inflowShape(tPerp, tW, tAlong);   // flat core, as the mitral stream
+    const tSpeed = (H.vTv != null ? H.vTv : 0.55 * H.ejTv) * tShape;
     considerFlow((inRV || (tAlong < 1.6 && tPerp < 1.3 && !inAo)) && tAlong > -0.05, AX_TRICUSPID_IN[0], AX_TRICUSPID_IN[1], AX_TRICUSPID_IN[2],
       tSpeed, FLOW.TRICUSPID_IN, false);
-    const vAnnT = 0.55 * H.ejTv;                      // RA-side convergence, as for the mitral
+    const vAnnT = H.vTv != null ? H.vTv : 0.55 * H.ejTv;   // RA-side convergence, as for the mitral
     if (tAlong < 0 && vAnnT > 0.02 && !inLV && !inLA && !inAo && iasSide(px, py, pz) > 0) {
       const dO = Math.hypot(px - cT[0], py - cT[1], pz - cT[2]);
       if (dO < 2.2 && dO > 1e-3) {
@@ -1705,40 +2231,101 @@ export function velocityAt(px, py, pz, G, path = {}) {
     // LVOT/aortic-valve jet peak from continuity (v = SV / (AVA·ET)): with the
     // SAME stroke volume forced through a reduced AVA, AS auto-scales to ~4 m/s
     // and normal sits ~1 m/s — severity now follows physiology, not a constant.
+    // (AS: the jet's speed in time, vAS(t), times its spatial profile. On the
+    // ventricular side of the orifice the flow converges on it (proximal
+    // acceleration, v ~ v_orifice (r0 / (r0 + d))^2 with r0 the radius of the
+    // ~0.6 cm2 orifice), so the jet speed is reached only at the valve and an
+    // LVOT PW gate the annulus swings toward late in systole reads the LVOT flow,
+    // not the jet)
+    const AS_R0 = 0.45;
+    if (path.aorticStenosis) {
+      // ONE turbulent jet (review 12, PAT-8 / TEE-12): a flat vena-contracta core
+      // of the orifice radius sqrt(AVA / pi), widening ~0.25 cm per cm into the
+      // ascending aorta behind a short shear layer, its centreline speed kept
+      // over ~2 orifice diameters and then decaying. Turbulent (a mosaic) from
+      // the orifice on while it runs above ~2 m/s: a laminar 4 m/s core would
+      // wrap from beam to beam into regular stripes, which no real jet shows.
+      const r0 = Math.sqrt(H.AVA / Math.PI);
+      const turb = clamp((H.vAS - 1.0) / 1.0, 0, 1);
+      if (lAlong >= 0) {
+        const w = r0 + 0.25 * lAlong, q = lPerp / w;
+        if (q < 1.25 && inAo) {
+          const prof = q < 0.8 ? 1 : (1.25 - q) / 0.45;
+          considerFlow(true, AX_LVOT[0], AX_LVOT[1], AX_LVOT[2],
+            H.vAS * prof / (1 + Math.max(0, lAlong - 0.8) / 3.5), FLOW.AS_JET,
+            turb * (0.6 + 0.3 * smoothstep(0, 0.6, lAlong)));
+        }
+      } else if (lAlong > -1.5 && ((inLV && py > G.lv.c[1]) || inAo || lPerp < 0.9)) {
+        // flow acceleration below the valve: hemispheric shells converging on the
+        // orifice (v = v_orifice (r0 / (r0 + d))^2), a small aliased dome in the
+        // LVOT. An LVOT PW gate 1 cm below the valve still reads the LVOT flow.
+        const ac = G.A.valves.aortic.c;
+        const ex = ac[0] - px, ey = ac[1] - py, ez = ac[2] - pz, dO = Math.hypot(ex, ey, ez);
+        if (dO < 0.6 && dO > 1e-3) {
+          // (confined to the last ~5 mm: the LVOT PW gate, which the annulus
+          // swings toward late in systole, stays outside it; the streamlines
+          // turn axial as they reach the orifice)
+          const sp = H.vAS * (AS_R0 / (AS_R0 + dO)) ** 2 * (1 - smoothstep(0.3, 0.6, dO));
+          const kr = Math.min(1, dO / 0.8) / dO;
+          const ux = ex * kr + AX_LVOT[0], uy = ey * kr + AX_LVOT[1], uz = ez * kr + AX_LVOT[2], ul = Math.hypot(ux, uy, uz) || 1;
+          considerFlow(true, ux / ul, uy / ul, uz / ul, sp, FLOW.AS_JET, sp > 1.3 ? turb * 0.6 : 0);
+        }
+      }
+    } else {
     const lSpeed = H.vAoPeak * H.ejAo * gauss(lPerp, 0.7);
     considerFlow(((inLV && py > G.lv.c[1]) || inAo) && lAlong > -0.25,
-      AX_LVOT[0], AX_LVOT[1], AX_LVOT[2],
-      lSpeed, path.aorticStenosis ? FLOW.AS_JET : FLOW.LVOT,
-      // AS: laminar through the orifice, a mosaic core building in the
-      // ascending aorta downstream, a laminar shell at the jet's edge
-      path.aorticStenosis ? clamp((H.ejAo - 0.15) / 0.35, 0, 1) * (0.15 + 0.85 * smoothstep(0.2, 1.2, lAlong)) * (1 - smoothstep(0.45, 0.95, lPerp)) : 0);
+      AX_LVOT[0], AX_LVOT[1], AX_LVOT[2], lSpeed, FLOW.LVOT, 0);
+    }
     // subvalvular LVOT: flow accelerating toward the valve over the last ~2 cm,
     // at the LVOT velocity by continuity (forward SV through a ~2 cm LVOT): ~1 m/s
     // whether or not the valve beyond is stenotic (the PW-in-LVOT / CW-across-AV
     // pair of the continuity equation)
     if (lAlong <= -0.25 && lAlong > -2.2 && (inLV || (lPerp < 0.9 && !inRA)) && py > G.lv.c[1]) {
-      const vLvot = Math.min(H.vAoPeak, 1.56 * (H.forwardSV || 0) / (3.14 * 0.33) / 100);
       considerFlow(true, AX_LVOT[0], AX_LVOT[1], AX_LVOT[2],
-        vLvot * H.ejAo * gauss(lPerp, 0.8) * clamp((lAlong + 2.2) / 0.9, 0, 1), FLOW.LVOT, false);
+        H.vLvot * gauss(lPerp, 0.8) * clamp((lAlong + 2.2) / 0.9, 0, 1), FLOW.LVOT, false);
     }
   }
   // RV ejection: on the right heart's clock it starts ~10 ms before and ends
   // ~30 ms after the aortic, so it has its own gate
-  if (H.ejPv > 0.001) {
-    // RVOT -> pulmonary artery (centreline anchored at the pulmonic valve).
-    // Tightened to the true outflow centreline: a narrow Gaussian, clipped to
-    // the downstream (+along) side and to the high subpulmonary tract (py > 0.8)
-    // so no stray systolic colour blob appears mid-RV near the tricuspid valve.
+  if (H.ejPv > 0.001 || H.vPv > 0.005) {
+    // RVOT -> pulmonary artery (centreline anchored at the pulmonic valve, on the
+    // valve / trunk axis), reaching 2.4 cm down the subpulmonary tract and 3.5 cm
+    // up the trunk, so no stray systolic colour appears mid-RV near the tricuspid valve.
     const rPerp = offAxisDist(px, py, pz, G.A.valves.pulmonic.c, AX_RVOT);
     const rAlong = _axis.along;
-    const rSpeed = H.ejPv * 0.9 * gauss(rPerp, 0.55); // systolic timing from the RV ejection envelope
-    considerFlow(rAlong > -2.4 && rAlong < 3.5 && rPerp < 1.3, AX_RVOT[0], AX_RVOT[1], AX_RVOT[2],
-      rSpeed, FLOW.RVOT, false);
+    // (the solved pulmonary flow over the RVOT area: timing, AT, notch and peak)
+    const vRvot = H.vPv != null ? H.vPv : H.ejPv * 0.9;
+    // The outflow profile is blunt (plug flow across the ~2.2 cm subpulmonary
+    // tract and trunk): flat over the central 0.45 cm, tapering toward the walls,
+    // so the stream fills the lumen and still crosses a plane that misses the
+    // valve centre by ~1 cm (the PSAX-AV; review 12 repair). Never into the
+    // aortic root beside it; at the stream's edge only inside the RV / PA lumen
+    // (and not where the left PA runs over the left atrium).
+    const rSpeed = vRvot * gauss(Math.max(0, rPerp - 0.45), 0.55);
+    if (rAlong > -2.4 && rAlong < 3.5 && rPerp < 1.3 && !inAo && rSpeed > 0.01 &&
+        (!_velHasBest || rSpeed > _velResult.speed) && (rPerp < 0.7 || inRvotLumen(px, py, pz, G.A, rAlong))) {
+      considerFlow(true, AX_RVOT[0], AX_RVOT[1], AX_RVOT[2], rSpeed, FLOW.RVOT, false);
+    }
+    // The infundibulum: blood converges up the subpulmonary tract onto the valve
+    // along the tract's own axis (upper infundibulum -> just below the valve),
+    // a little slower than at the valve and broader. considerFlow keeps the
+    // faster stream, so the PW gate below the valve still reads the trunk-axis
+    // stream above.
+    const iLen = infundibulumAxis(G.A);
+    const iPerp = offAxisDist(px, py, pz, G.A.rvot[2], _infU);
+    const iAlong = _axis.along;
+    if (iAlong > -iLen - 0.5 && iAlong < 0.3 && iPerp < 1.4) {
+      const iSpeed = 0.85 * vRvot * gauss(iPerp, 0.9);
+      if (iSpeed > 0.01 && (!_velHasBest || iSpeed > _velResult.speed) && lumenDist(px, py, pz, G.A, 'RV') < 0) {
+        considerFlow(true, _infU[0], _infU[1], _infU[2], iSpeed, FLOW.RVOT, false);
+      }
+    }
   }
 
   // --- pathological jets: a fast vena-contracta core tapering laterally and
   //     distally (Gaussian off-axis + travel decay). ---
-  if (path.mr || path.dilated) {
+  // (regurgitant jets only through a SHUT valve: review 12, PHY-1 / PAT-4)
+  if ((path.mr || path.dilated) && !(G.valves && G.valves.mitral >= 0.1)) {
     // mitral regurgitation (primary, or functional in DCM): systolic jet LV -> LA. The region reaches from the
     // mitral annulus DEEP into the LA body, with a long travel-decay so the
     // brightest turbulent mosaic sits well within the atrium (mid-LA). The
@@ -1752,12 +2339,14 @@ export function velocityAt(px, py, pz, G, path = {}) {
     // speed from the instantaneous LV-LA pressure drop (holosystolic, rounded);
     // jet length from the modelled regurgitant fraction. A posterior-leaflet
     // prolapse jet is eccentric and wall-hugging; functional MR (DCM) is central.
-    const lenMR = clamp(1.4 + 7 * (H.regurgFraction || 0), 1.4, 5.2);
+    // (the plume grows and shrinks with the instantaneous regurgitant flow)
+    const qMR = H.QmrMax > 0 ? Math.sqrt(clamp(H.Qmr / H.QmrMax, 0, 1)) : 1;
+    const lenMR = clamp(1.4 + 7 * (H.regurgFraction || 0) * qMR, 1.4, 5.2);
     regurgJet(px, py, pz, cMV, path.mr ? AX_MR_ECC : AX_MR, downstream, inLV, MR_JET_PARAMS,
       H.vMR != null ? H.vMR : H.ejMr * H.vMRPeak, lenMR, path.mr ? G.A : null,
       clamp(0.1 + 0.55 * (H.regurgFraction || 0), 0.15, 0.4));   // vena-contracta half-width: wider with severity
   }
-  if (H.vTRPeak > 0) {
+  if (H.vTRPeak > 0 && !(G.valves && G.valves.tricuspid >= 0.1)) {
     // tricuspid regurgitation: systolic jet RV -> RA, firing into the RA cavity.
     // The TR peak velocity encodes RV systolic pressure: with pressure overload
     // (pulmonary hypertension) the jet runs fast (~4.3 m/s → PASP ~80 mmHg via
@@ -1765,9 +2354,18 @@ export function velocityAt(px, py, pz, G, path = {}) {
     const cTV = G.A.valves.tricuspid.c;
     const aboveTV = (px - cTV[0]) * VALVES.tricuspid.n[0] + (py - cTV[1]) * VALVES.tricuspid.n[1] + (pz - cTV[2]) * VALVES.tricuspid.n[2] > 0.1;
     const downstream = !inLV && !inAo && iasSide(px, py, pz) > 0 && (inRA || aboveTV);
+    // Jet size from the SOLVED circulation, not from a grade label (review 12,
+    // PAT-11): the length follows the regurgitant volume per beat (~55 mL fills
+    // the atrium: severe) and the instantaneous regurgitant flow; the vena
+    // contracta is the radius of the effective regurgitant orifice, sqrt(Atr/pi).
+    // So the functional TR of pulmonary hypertension (~15 mL through 0.1 cm2) is
+    // a small fast jet and torrential TR (~60 mL) fills the atrium.
+    const qTR = H.QtrMax > 0 ? Math.sqrt(clamp(H.Qtr / H.QtrMax, 0, 1)) : 1;
+    const lenTR = H.QtrMax > 0 ? 1.4 + 3.2 * clamp(H.trRegurgVol / 55, 0, 1) * qTR : (JET_LEN[gradeOf(path)] || JET_LEN.severe);
+    const vcTR = H.Atr > 0 ? clamp(Math.sqrt(H.Atr / Math.PI), 0.12, 0.45) : 0.38;
     regurgJet(px, py, pz, cTV, AX_TR, downstream, inRV, TR_JET_PARAMS,
       H.vTR != null ? H.vTR : H.vTRPeak * pulse(0.02, 0.48, G.phaseRV != null ? G.phaseRV : phase),
-      JET_LEN[gradeOf(path)] || JET_LEN.severe, null, ({ mild: 0.15, moderate: 0.25, severe: 0.38 })[gradeOf(path)] || 0.38);
+      lenTR, null, vcTR);
   }
   if (path.vsd) {
     // ventricular septal defect: LV -> RV across the septum. Flow converges on the
@@ -1783,20 +2381,24 @@ export function velocityAt(px, py, pz, G, path = {}) {
     const peri = path.vsd === 'perimembranous';           // else the mid-muscular defect
     const ms = peri ? membSite(G) : null;
     const core = peri ? ms.c : VSD_CORE, ax = peri ? ms.rad : AX_VSD;
-    const region = ellip(px, py, pz, core, peri ? [1.6, 1.6, 1.6] : [1.0, 1.6, 1.2]) <= 1;
-    if (region) {
-      const perp = offAxisDist(px, py, pz, core, ax);
-      const along = _axis.along;
-      const sg = vJet >= 0 ? 1 : -1, av = Math.abs(vJet);
-      const dn = along * sg;                               // distance downstream of the defect
-      let speed, vr = 0;
-      if (dn <= 0) speed = av * gauss(perp, 0.4 + 0.35 * -dn) * Math.exp(Math.min(0, dn + 0.15) / 0.7);
-      else {
-        const w = 0.32 + 0.3 * dn, q = perp / w;
-        speed = q < 1.25 ? av * (q < 0.8 ? 1 : (1.25 - q) / 0.45) / (1 + Math.max(0, dn - JET_CORE) / 1.6) * Math.exp(-clamp(dn - JET_CORE, 0, 3) / 3) : 0;
-        vr = clamp((av - 1.0) / 1.5, 0, 1) * (0.15 + 0.85 * smoothstep(0.1, 0.8, dn)) * (1 - smoothstep(0.55, 1.05, q));
+    // (review 12, PHY-5) gated on the jet axis, not on a ~1 cm box round the
+    // defect: laminar convergence in the LV lumen (PISA), the narrow jet through
+    // the septal channel, then a turbulent plume that spreads and slows over
+    // ~3 cm in the RV lumen (regurgJet: vena contracta, flame, rounded head).
+    const av = Math.abs(vJet);
+    if (av > 0.05) {
+      const jax = vJet >= 0 ? ax : negAxis(ax);
+      const dx = px - core[0], dy = py - core[1], dz = pz - core[2];
+      const dn = dx * jax[0] + dy * jax[1] + dz * jax[2];
+      if (dn > -1.6 && dn < 4.6 && dx * dx + dy * dy + dz * dz < 25) {
+        const perp2 = dx * dx + dy * dy + dz * dz - dn * dn;
+        // the channel through the septum (classified as LV blood) on either side of the core
+        const channel = Math.abs(dn) < 0.9 && perp2 < VSD_RADIUS * VSD_RADIUS;
+        const up = vJet >= 0 ? 'LV' : 'RV', down = vJet >= 0 ? 'RV' : 'LV';
+        const downstream = dn >= 0 && (channel || lumenDist(px, py, pz, G.A, down) < 0);
+        const upstream = dn < 0 && (channel || lumenDist(px, py, pz, G.A, up) < 0);
+        regurgJet(px, py, pz, core, jax, downstream, upstream, VSD_JET_PARAMS, av, VSD_JET_LEN, null);
       }
-      considerFlow(true, ax[0] * sg, ax[1] * sg, ax[2] * sg, speed, FLOW.VSD_JET, vr);
     }
   }
   // --- pulmonary-vein flow -------------------------------------------------
@@ -1811,8 +2413,11 @@ export function velocityAt(px, py, pz, G, path = {}) {
   const A = G.A;
   if (A && A.pv && pz < A.la.c[2] + 1.2) {
     const dcx = px - A.la.c[0], dcy = py - A.la.c[1], dcz = pz - A.la.c[2];
-    if (dcx * dcx + dcy * dcy + dcz * dcz < 16) {          // within 4 cm of the LA centre
-      const sp = pvFlowSpeed(phase, path);
+    // (within ~4 cm of the LA centre, further in a dilated atrium, whose vein
+    // mouths sit further out: the solved D wave of DCM was cut off otherwise)
+    const reach = Math.max(4, Math.max(G.la.r[0], G.la.r[1], G.la.r[2]) + 2);
+    if (dcx * dcx + dcy * dcy + dcz * dcz < reach * reach) {
+      const sp = pvFlowSpeed(H);
       if (sp !== 0) {
         const veins = A.pv.veins;
         for (let i = 0; i < veins.length; i++) {
@@ -1827,13 +2432,35 @@ export function velocityAt(px, py, pz, G, path = {}) {
       }
     }
   }
+  // --- left-atrial-appendage flow -----------------------------------------
+  // Along the appendage axis (tip -> ostium for emptying) inside its segments,
+  // strongest on the axis; gated to within ~5 cm of the ostium.
+  if (A && A.la && A.la.aa && A.la.aa.length) {
+    const aa = A.la.aa, o = aa[0].a, dx = px - o[0], dy = py - o[1], dz = pz - o[2];
+    if (dx * dx + dy * dy + dz * dz < 25) {
+      const sp = laaFlowSpeed(phase);
+      if (sp !== 0) {
+        for (let i = 0; i < aa.length; i++) {
+          const g = aa[i], ux = g.a[0] - g.b[0], uy = g.a[1] - g.b[1], uz = g.a[2] - g.b[2], L = Math.hypot(ux, uy, uz) || 1;
+          const u = [ux / L, uy / L, uz / L];
+          const perp = offAxisDist(px, py, pz, g.b, u), al = _axis.along;
+          if (al < -0.2 || al > L + 0.4) continue;
+          const t = al < 0 ? 0 : al > L ? 1 : al / L, r = g.r2 + (g.r1 - g.r2) * t;  // (b end: r2; a end: r1)
+          if (perp > r) continue;
+          const v = sp * (1 - 0.6 * (perp / r) * (perp / r));
+          const dir = v >= 0 ? 1 : -1;
+          considerFlow(true, u[0] * dir, u[1] * dir, u[2] * dir, v < 0 ? -v : v, FLOW.LAA_FLOW, false);
+        }
+      }
+    }
+  }
   // --- hepatic-vein flow (subcostal) ---------------------------------------
   if (A && A.ivc) {
     let hv = _hvCache.get(A);
     if (!hv) { hv = hepaticVeinSegs(A); _hvCache.set(A, hv); }
     const j = hv[0].a, dx = px - j[0], dy = py - j[1], dz = pz - j[2];
     if (dx * dx + dy * dy + dz * dz < 42) {               // within ~6.5 cm of the confluence
-      const sp = hvFlowSpeed(G.phaseRV != null ? G.phaseRV : phase, path);
+      const sp = hvFlowSpeed(H);
       if (sp !== 0) {
         for (let i = 0; i < hv.length; i++) {
           const v = hv[i];

@@ -3,7 +3,7 @@
 // canvases, and returns the grey image together with the per-pixel tissue kind,
 // depth and beam index, so image-physics properties (which reflector is the
 // brightest, how a pleural line fades) can be checked numerically.
-import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS } from '../js/views.js';
+import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, sectorHalfOf } from '../js/views.js';
 
 const noop = () => {};
 const stubCtx = () => new Proxy({
@@ -16,16 +16,21 @@ const stubCanvas = () => ({ width: 800, height: 800, getContext: () => stubCtx()
 if (typeof globalThis.document === 'undefined') {
   globalThis.document = { createElement: () => stubCanvas() };
 }
-const { EchoView } = await import('../js/echo.js');
+const { EchoView, sectorPxPerCm } = await import('../js/echo.js');
 const { geometryAt } = await import('../js/cardiac-model.js');
 
 const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
-let EV = null;
+const EVS = {};   // one renderer per sampling stride, so a coarse render leaves the stride-1 renderer's frame sequence (speckle) untouched
 // Render one standard view (name as in views.js) at `phase` for pathology `path`
-// with the same per-view settings main.js applies; colour Doppler off.
-export function renderBmode(name, phase = 0, path = {}) {
-  if (!EV) { EV = new EchoView(stubCanvas(), null); EV._pinStride = 1; EV._stride = 1; }
-  const e = EV;
+// with the same per-view settings main.js applies; colour Doppler off. `stride`
+// pins the sampling stride (1 = every pixel; the app's FPS-adaptive sampler goes
+// up to 3 on slow hardware, one sample per 3 x 3 pixel block).
+// `frame` (optional) pins the renderer's frame counter (the blood-speckle seed) for
+// this one render and restores it afterwards: the image then does not depend on
+// how many renders came before it, and later renders are not shifted by it.
+export function renderBmode(name, phase = 0, path = {}, stride = 1, frame = null) {
+  if (!EVS[stride]) { EVS[stride] = new EchoView(stubCanvas(), null); EVS[stride]._pinStride = stride; EVS[stride]._stride = stride; }
+  const e = EVS[stride];
   const tee = TEE_VIEWS[name], vw = tee || TTE_VIEWS[name] || EXTRA_VIEWS[name];
   const base = tee ? tee.probe() : (TTE_VIEWS[name] ? TTE_VIEWS[name].probe() : EXTRA_VIEWS[name].probe());
   e.viewName = name; e.colorOn = false; e.showLabels = false; e.showColorBox = false;
@@ -35,14 +40,18 @@ export function renderBmode(name, phase = 0, path = {}) {
     e.nearFieldCm = name === 'SUBCOSTAL' ? 1.6 : /^A\dC$/.test(name) ? 1.4 : 2.0;
     e.depthCm = vw.depth || 16;
   }
+  e.sectorHalf = sectorHalfOf(vw);           // (90 deg TEE sector, as main.js setView)
   const G = geometryAt(phase, path);
   let probe = { ...base };
   if (vw.track) { const o = vw.track(G.A); probe = { ...base, pos: add(base.pos, o), target: base.target && add(base.target, o) }; }
+  const f0 = e._frame;
+  if (frame != null) e._frame = frame;
   e.render(G, path, probe, 0);
+  if (frame != null) e._frame = f0;
   const SW = e.img.width, SH = e.img.height, d = e.img.data;
   const grey = new Float32Array(SW * SH);
   for (let i = 0; i < SW * SH; i++) grey[i] = d[i * 4];
-  const apexY = SH * 0.04, pxPerCm = (SH * 0.92) / e.depthCm;
+  const apexY = SH * 0.04, pxPerCm = sectorPxPerCm(e.depthCm, e.sectorHalf);
   return { SW, SH, grey, spk: e._spk, kind: e._kind, depth: e._depth, mask: e._mask, abin: e._abin, NA: e._NA,
     lungD: e._lungDepth, mirP: e._mirP, cx: SW * 0.5, apexY, pxPerCm, half: e.sectorHalf, G, probe };
 }
@@ -92,6 +101,7 @@ export function renderDoppler(name, phase = 0, path = {}, opts = {}) {
   const base = vw.probe();
   e.viewName = name; e.colorOn = opts.color !== false; e.showLabels = false;
   e.dopplerSite = opts.site || null; e.dopplerMode = opts.mode || 'auto'; e.pwNyquist = opts.pwNyquist || null;
+  e.dopplerAlign = !!opts.align;
   if (opts.nyquist) e.nyquist = opts.nyquist; else e.nyquist = 0.62;
   if (opts.cboxSize) e.cboxSize = opts.cboxSize; else e.cboxSize = 0.45;
   if (tee) { e.depthCm = tee.depth; e.freqMHz = 5.5; e.nearFieldCm = 0.3; e.elevFocus = 4.0; e.elevMin = 0.05; e.elevDiv = 0.015; }
@@ -100,11 +110,12 @@ export function renderDoppler(name, phase = 0, path = {}, opts = {}) {
     e.nearFieldCm = name === 'SUBCOSTAL' ? 1.6 : /^A\dC$/.test(name) ? 1.4 : 2.0;
     e.depthCm = vw.depth || 16;
   }
+  e.sectorHalf = sectorHalfOf(vw);           // (90 deg TEE sector, as main.js setView)
   const G = geometryAt(phase, path);
   let probe = { ...base };
   if (vw.track) { const o = vw.track(G.A); probe = { ...base, pos: add(base.pos, o), target: base.target && add(base.target, o) }; }
   e.render(G, path, probe, 0);
   const SW = e.img.width, SH = e.img.height;
   return { SW, SH, alpha: e._dalpha, rgb: e._dcol, kind: e._kind, depth: e._depth, cx: SW * 0.5, apexY: SH * 0.04,
-    pxPerCm: (SH * 0.92) / e.depthCm, spec: e.spectralData, gate: e._dGate, box: e._cbox, G, probe, echo: e };
+    pxPerCm: sectorPxPerCm(e.depthCm, e.sectorHalf), spec: e.spectralData, gate: e._dGate, box: e._cbox, G, probe, echo: e };
 }

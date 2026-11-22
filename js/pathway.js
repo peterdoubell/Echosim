@@ -87,6 +87,7 @@ export const MODULES = [
       { id: 'tour', text: 'Step through PLAX, PSAX, PSAX AV, PSAX MV, A4C, A5C, A2C, A3C, Subcostal, SC IVC and SSN on the normal heart. Name the structures before reading the labels.', sim: { path: 'normal', view: 'PLAX' } },
       { id: 'labels', text: 'Turn off anatomy labels (L) and identify the chambers and valves in A4C yourself.', sim: { path: 'normal', view: 'A4C' } },
       { id: 'probe', text: 'Use the azimuth/tilt sliders to foreshorten A4C, then restore it. Note how the apex looks when the plane misses it.', sim: { path: 'normal', view: 'A4C' } },
+      { id: 'mmode', text: 'In A4C, set the Trace panel to M-mode on the lateral tricuspid annulus. Click the lowest and the highest point of the annular echo to measure TAPSE, then repeat on the lateral mitral annulus (MAPSE).', sim: { path: 'normal', view: 'A4C', trace: 'mmode', line: 'tapse' } },
     ],
     questions: [
       { q: 'Which view is used to measure the LVOT diameter for the continuity equation?', options: ['Zoomed parasternal long axis', 'Apical four-chamber', 'Parasternal short axis at papillary level', 'Subcostal'], answer: 0, explain: 'The LVOT is measured in zoomed PLAX in mid-systole, inner edge to inner edge, close to the aortic annulus.' },
@@ -161,7 +162,7 @@ export const MODULES = [
       { q: 'Inferior wall akinesis is most often caused by occlusion of the:', options: ['Right coronary artery', 'Left anterior descending artery', 'First diagonal branch', 'Left main stem'], answer: 0, explain: 'The inferior wall is usually supplied by the RCA (or LCx if left-dominant).' },
       { q: 'Dyskinesis describes a segment that:', options: ['Moves outward in systole', 'Thickens normally', 'Does not move or thicken', 'Thickens less than normal'], answer: 0, explain: 'Hypokinesis = reduced, akinesis = absent, dyskinesis = paradoxical outward systolic motion.' },
       { q: 'This patient presents with breathlessness. What is the main finding?', case: { path: 'dcm', view: 'A4C' }, options: ['Dilated LV with globally reduced systolic function', 'Regional septal akinesis with normal LV size', 'Large pericardial effusion', 'Normal LV size and function'], answer: 0, explain: 'The LV is dilated and contracts poorly in every wall. The model measures LVEF ≈ 27% — severely impaired in BSE terms.' },
-      { q: 'Describe the wall motion in this case.', case: { path: 'rwma', view: 'A4C' }, options: ['Septal and apical hypokinesis — LAD territory', 'Global hypokinesis of a dilated LV', 'Lateral wall akinesis — LCx territory', 'Normal wall motion'], answer: 0, explain: 'The septum and apex fail to thicken while the lateral wall contracts: a regional (LAD) abnormality. LVEF is borderline low (~51%).' },
+      { q: 'Describe the wall motion in this case.', case: { path: 'rwma', view: 'A4C' }, options: ['Septal and apical hypokinesis — LAD territory', 'Global hypokinesis of a dilated LV', 'Lateral wall akinesis — LCx territory', 'Normal wall motion'], answer: 0, explain: 'The septum and apex fail to thicken while the lateral wall contracts: a regional (LAD) abnormality. LVEF is impaired (~41%): the remote walls are hyperkinetic but cannot make up the akinetic territory.' },
     ],
   },
   {
@@ -180,6 +181,7 @@ export const MODULES = [
     ],
     tasks: [
       { id: 'inflow', text: 'In A4C, read E and A on the mitral inflow trace in the normal heart, then in mitral stenosis.', sim: { path: 'normal', view: 'A4C' } },
+      { id: 'tdi', text: 'In A4C, set the Trace panel to Tissue Doppler at the lateral and then the septal mitral annulus. Read e\' and E/e\' in dilated cardiomyopathy, then compare the normal heart and aortic stenosis.', sim: { path: 'dcm', view: 'A4C', trace: 'tdi', line: 'mvLat' } },
       { id: 'la', text: 'Compare LA size and LAVi in the Echo report for the normal heart and severe mitral regurgitation.', action: 'report', sim: { path: 'mr', view: 'A4C', grade: 'severe' } },
     ],
     questions: [
@@ -221,7 +223,7 @@ export const MODULES = [
       { q: 'AVA 0.8 cm², mean gradient 25 mmHg, LVEF 30%. The most useful next test is:', options: ['Low-dose dobutamine stress echo', 'Exercise treadmill test', 'Repeat in two years', 'Transoesophageal echo for vegetations'], answer: 0, explain: 'Classical low-flow low-gradient AS: dobutamine shows whether AVA stays < 1.0 cm² as flow rises (true severe) and whether there is contractile reserve.' },
       { q: 'Low flow in aortic stenosis is defined as a stroke volume index below:', options: ['35 mL/m²', '50 mL/m²', '25 mL/m²', '65 mL/m²'], answer: 0, explain: 'SVi < 35 mL/m², even with normal LVEF (paradoxical low-flow).' },
       { q: 'Which finding indicates severe aortic regurgitation?', options: ['Holodiastolic flow reversal in the descending aorta', 'Pressure half-time of 600 ms', 'Vena contracta of 2 mm', 'Narrow central jet in the LVOT'], answer: 0, explain: 'Holodiastolic reversal, PHT < 200 ms and VC > 6 mm support severe AR.' },
-      { q: 'Peak velocity 4.5 m/s, mean gradient 48 mmHg, AVA 0.67 cm² with normal LVEF. Grade the stenosis.', options: ['Severe', 'Moderate', 'Mild', 'Indeterminate'], answer: 0, explain: 'All three measures are concordant for severe AS.' },
+      { q: 'Peak velocity 4.4 m/s, mean gradient 47 mmHg, AVA 0.54 cm² with normal LVEF. Grade the stenosis.', options: ['Severe', 'Moderate', 'Mild', 'Indeterminate'], answer: 0, explain: 'All three measures are concordant for severe AS.' },
       { q: 'Identify the main valve lesion in this case.', case: { path: 'as', view: 'PLAX', grade: 'severe' }, options: ['Aortic stenosis', 'Mitral stenosis', 'Mitral regurgitation', 'Normal valves'], answer: 0, explain: 'A thickened, restricted aortic valve with a high-velocity systolic jet and concentric LV hypertrophy.' },
     ],
   },
@@ -274,7 +276,8 @@ export const MODULES = [
     tasks: [
       { id: 'tapse', text: 'In A4C, note TAPSE and RV size in the Echo report for the normal heart, then for pulmonary hypertension.', action: 'report', sim: { path: 'phtn', view: 'A4C' } },
       { id: 'dsign', text: 'Load pulmonary hypertension in PSAX and watch the septum flatten into a D-shape through the cycle.', sim: { path: 'phtn', view: 'PSAX' } },
-      { id: 'ivc', text: 'Open the subcostal IVC view and estimate RA pressure.', sim: { path: 'tr', view: 'SC_IVC', grade: 'severe' } },
+      { id: 'ivc', text: 'Open the subcostal IVC view and estimate RA pressure: measure the largest and smallest diameter on the M-mode trace across a sniff (or press Sniff and watch the vein), then compare with the normal heart.', sim: { path: 'tr', view: 'SC_IVC', grade: 'severe', trace: 'mmode', line: 'ivc' } },
+      { id: 'rvs', text: 'In A4C, set the Trace panel to Tissue Doppler at the lateral tricuspid annulus and read RV s\' in pulmonary hypertension; measure TAPSE on the M-mode trace of the same annulus.', sim: { path: 'phtn', view: 'A4C', trace: 'tdi', line: 'tvLat' } },
     ],
     questions: [
       { q: 'TAPSE is abnormal below:', options: [`${tapse} mm`, '25 mm', '10 mm', '21 mm'], answer: 0, explain: `TAPSE < ${tapse} mm indicates reduced RV longitudinal function.` },
@@ -285,7 +288,7 @@ export const MODULES = [
       { q: 'IVC 24 mm with less than 50% collapse on sniff. Estimated RA pressure:', options: ['15 mmHg', '3 mmHg', '8 mmHg', '25 mmHg'], answer: 0, explain: 'Dilated, non-collapsing IVC ≈ 15 mmHg.' },
       { q: 'IVC 18 mm with more than 50% collapse on sniff. Estimated RA pressure:', options: ['3 mmHg', '8 mmHg', '15 mmHg', '20 mmHg'], answer: 0, explain: 'Normal-size, collapsing IVC ≈ 3 mmHg.' },
       { q: 'A D-shaped LV in PSAX in both systole and diastole indicates:', options: ['RV pressure overload', 'RV volume overload only', 'LV hypertrophy', 'A normal finding'], answer: 0, explain: 'Pressure overload flattens the septum throughout the cycle; volume overload mainly in diastole.' },
-      { q: 'What does this short-axis view show?', case: { path: 'phtn', view: 'PSAX' }, options: ['A dilated RV with a D-shaped LV — RV pressure overload', 'Normal biventricular size', 'Concentric LV hypertrophy', 'Pericardial effusion'], answer: 0, explain: 'The RV is dilated and the septum flattened. The model: TR Vmax 4.3 m/s, PASP ~89 mmHg — high probability of PH.' },
+      { q: 'What does this short-axis view show?', case: { path: 'phtn', view: 'PSAX' }, options: ['A dilated RV with a D-shaped LV — RV pressure overload', 'Normal biventricular size', 'Concentric LV hypertrophy', 'Pericardial effusion'], answer: 0, explain: 'The RV is dilated and the septum flattened. The model: TR Vmax 4.3 m/s, PASP ~90 mmHg — high probability of PH.' },
       { q: 'Identify the main finding in this case.', case: { path: 'tr', view: 'A4C', grade: 'severe' }, options: ['Tricuspid regurgitation', 'Mitral regurgitation', 'Atrial septal defect', 'Normal right heart'], answer: 0, explain: 'A systolic jet from the tricuspid valve into a dilated RA.' },
     ],
   },
@@ -298,7 +301,7 @@ export const MODULES = [
     ],
     learn: [
       'Effusion size (maximal end-diastolic depth): < 1 cm small, 1–2 cm moderate, > 2 cm large.',
-      'Tamponade signs: RA systolic collapse, RV diastolic collapse, plethoric IVC, respiratory variation in mitral E > 25% / tricuspid E > 40%. It is a clinical diagnosis.',
+      'Tamponade signs: RA systolic collapse, RV diastolic collapse, plethoric IVC, respiratory variation in mitral E > 25% / tricuspid E > 40% with the septum shifting toward the LV in inspiration; in a large effusion the heart may swing, with electrical alternans. Sinus tachycardia and pulsus paradoxus are the bedside signs. It is a clinical diagnosis.',
       'In PLAX, pericardial fluid lies <b>anterior</b> to the descending aorta; pleural fluid extends posterior to it.',
       'ASD: secundum (commonest, fossa ovalis), primum (part of AVSD, cleft mitral leaflet), sinus venosus (often with anomalous right pulmonary venous drainage), coronary sinus.',
       'VSD: perimembranous (commonest in adults), muscular, outlet, inlet. A restrictive VSD has a high-velocity jet (large LV–RV gradient, normal RV pressure).',
@@ -306,7 +309,7 @@ export const MODULES = [
     ],
     tasks: [
       { id: 'eff', text: 'Load pericardial effusion in PLAX; measure the echo-free depth at end-diastole and relate it to the descending aorta.', sim: { path: 'effusion', view: 'PLAX' } },
-      { id: 'tamp', text: 'Load cardiac tamponade in A4C: scrub through late diastole into early systole to see the RA free wall fold in, and early diastole for the RV free wall; then read the mitral PW over the breath and the plethoric IVC (subcostal IVC view).', sim: { path: 'tamponade', view: 'A4C' } },
+      { id: 'tamp', text: 'Load cardiac tamponade in A4C (sinus tachycardia): watch the septum shift toward the LV on each inspiratory beat and the heart swing in the fluid; scrub from the end of atrial contraction into early systole to see the RA free wall fold in, and early diastole for the RV free wall; then read the mitral PW over the breath and the plethoric IVC (subcostal IVC view).', sim: { path: 'tamponade', view: 'A4C' } },
       { id: 'asd', text: 'Load the atrial septal defect in the subcostal view and find the shunt with colour; then look at RV size in A4C.', sim: { path: 'asd', view: 'SUBCOSTAL' } },
       { id: 'vsd', text: 'Load the VSD and catch the systolic jet crossing the septum.', sim: { path: 'vsd', view: 'A4C' } },
     ],
@@ -320,7 +323,7 @@ export const MODULES = [
       { q: 'A primum ASD is associated with:', options: ['A cleft anterior mitral leaflet', 'Anomalous pulmonary venous drainage', 'Ebstein anomaly', 'Pulmonary stenosis'], answer: 0, explain: 'Primum ASD is a partial atrioventricular septal defect, typically with a cleft mitral leaflet.' },
       { q: 'A VSD jet peak velocity of 5 m/s indicates:', options: ['A restrictive defect with normal RV systolic pressure', 'A large non-restrictive defect', 'Eisenmenger physiology', 'Severe pulmonary hypertension'], answer: 0, explain: '4 × 5² = 100 mmHg LV–RV gradient: RV pressure is low, so the defect is restrictive.' },
       { q: 'What is the main finding in this case?', case: { path: 'effusion', view: 'PLAX' }, options: ['Pericardial effusion', 'Pleural effusion only', 'Dilated cardiomyopathy', 'Normal study'], answer: 0, explain: 'An echo-free space surrounds the heart, deepest posteriorly — the model measures 2.3 cm, a large effusion.' },
-      { q: 'This patient is hypotensive. What does this case show?', case: { path: 'tamponade', view: 'A4C' }, options: ['Pericardial effusion with tamponade physiology', 'Pericardial effusion without haemodynamic effect', 'Dilated cardiomyopathy', 'Constrictive pericarditis'], answer: 0, explain: 'The effusion is under pressure: the RA free wall inverts for over a third of the cycle, the RV collapses in early diastole and the IVC is plethoric. The model\'s mitral E falls by ~28% in inspiration (tricuspid E rises ~47%).' },
+      { q: 'This patient is hypotensive. What does this case show?', case: { path: 'tamponade', view: 'A4C' }, options: ['Pericardial effusion with tamponade physiology', 'Pericardial effusion without haemodynamic effect', 'Dilated cardiomyopathy', 'Constrictive pericarditis'], answer: 0, explain: 'The effusion is under pressure, with a sinus tachycardia: the RA free wall inverts for over a third of the cycle, the RV collapses in early diastole and the IVC is plethoric. The model\'s mitral E falls by ~27% in inspiration (tricuspid E rises ~45%).' },
       { q: 'What is the main finding in this case?', case: { path: 'asd', view: 'SUBCOSTAL' }, options: ['Atrial septal defect with left-to-right flow', 'Ventricular septal defect', 'Tricuspid regurgitation', 'Normal interatrial septum'], answer: 0, explain: 'Low-velocity flow crosses the atrial septum from LA to RA, best seen subcostally.' },
       { q: 'What is the main finding in this case?', case: { path: 'vsd', view: 'A4C' }, options: ['Ventricular septal defect', 'Atrial septal defect', 'Mitral regurgitation', 'Normal study'], answer: 0, explain: 'A high-velocity systolic jet crosses the ventricular septum from LV to RV.' },
     ],

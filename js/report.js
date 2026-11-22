@@ -159,10 +159,15 @@ export function measureModel(path = {}) {
   // mean gradient: the mean LV-aortic pressure difference over ejection (what a
   // traced CW envelope's mean 4v^2 estimates); AVA by continuity (SV / VTI)
   {
+    // (AS: the traced CW envelope is the Bernoulli velocity of the instantaneous
+    // pressure drop, vAS(t) = sqrt(dP/4), so its VTI integrates that)
     let dp = 0, s1 = 0, n = 0;
     for (let i = 0; i < 240; i++) {
       const h = hemodynamics(i / 240, path);
-      if (h.Qao > 1) { dp += Math.max(0, h.Plv - h.Pao); s1 += h.Qao / sum.QaoMax; n++; }
+      if (h.Qao > 1) {
+        dp += Math.max(0, h.Plv - h.Pao); n++;
+        s1 += path.aorticStenosis && H.vAoPeak > 0 ? Math.min(1, Math.sqrt(Math.max(0, h.Plv - h.Pao) / 4) / H.vAoPeak) : h.Qao / sum.QaoMax;
+      }
     }
     if (n) {
       m.avMeanGrad = dp / n;
@@ -174,7 +179,7 @@ export function measureModel(path = {}) {
   if (path.mitralStenosis) { m.mva = sum.mvaHakki; m.mvMeanGrad = sum.meanGradMV; }
   if (path.mr || sum.regurgVol > 1) { m.mrRf = sum.regurgFraction * 100; m.mrRvol = sum.regurgVol; }
   m.trVmax = H.vTRPeak || null;
-  m.ivc = 2 * GED.A.ivc.r * 10;
+  m.ivc = 2 * (GED.A.ivc.rMax || GED.A.ivc.r) * 10;
   m.ivcCollapse = GED.A.ivc.collapse != null ? GED.A.ivc.collapse * 100 : null;
   m.rap = rapEstimate(GED.A.ivc);
   if (m.trVmax) m.pasp = 4 * m.trVmax ** 2 + m.rap;
@@ -293,9 +298,12 @@ export function buildReport(path, patient = DEFAULT_PATIENT, learner = {}) {
   const lvSize = g.lvidd.level === 'normal' && g.lvedvi.level === 'normal' ? 'Normal LV size' : `LV ${g.lvedvi.level !== 'normal' ? g.lvedvi.word : g.lvidd.word} (LVEDVi ${f0(lvedvi)} mL/m², LVIDd ${f0(m.lvidd)} mm)`;
   const wall = g.ivsd.level === 'normal' && g.pwd.level === 'normal' ? 'normal wall thickness' : `increased wall thickness (IVSd ${f0(m.ivsd)} mm, PWd ${f0(m.pwd)} mm)`;
   F.push({ section: 'Left ventricle', text: `${lvSize} with ${wall}${geom && geom !== 'normal geometry' ? `; ${geom}` : ''}. LVEF ${f0(m.lvef)}% (${g.lvef.word})${m.gls != null ? `, GLS ${f1(m.gls)}%` : ''}. ${m.rwma ? `Regional wall motion abnormality: ${RWMA_WORDS[m.rwma] || m.rwma}.` : 'No regional wall motion abnormality.'} Mitral inflow E/A ${f1(m.ea)}.` });
-  const rvOk = g.rvd1.level === 'normal' && g.tapse.level === 'normal' && g.rvfac.level === 'normal';
-  F.push({ section: 'Right ventricle', text: rvOk ? `Normal RV size and systolic function (RVD1 ${f0(m.rvd1)} mm, TAPSE ${f0(m.tapse)} mm, FAC ${f0(m.rvfac)}%).`
-    : `RV ${g.rvd1.level !== 'normal' ? 'dilated' : 'normal size'} (RVD1 ${f0(m.rvd1)} mm); TAPSE ${f0(m.tapse)} mm, FAC ${f0(m.rvfac)}%${g.tapse.level !== 'normal' || g.rvfac.level !== 'normal' ? ' — impaired RV systolic function' : ''}.` });
+  // (an RV below the normal basal diameter — compressed and underfilled, as in
+  // tamponade — is small, not dilated: like a small LV, not a conclusion item)
+  const rvOk = g.rvd1.level !== 'high' && g.tapse.level === 'normal' && g.rvfac.level === 'normal';
+  const rvSize = g.rvd1.level === 'high' ? 'dilated' : g.rvd1.level === 'low' ? 'small' : 'normal size';
+  F.push({ section: 'Right ventricle', text: rvOk && g.rvd1.level !== 'low' ? `Normal RV size and systolic function (RVD1 ${f0(m.rvd1)} mm, TAPSE ${f0(m.tapse)} mm, FAC ${f0(m.rvfac)}%).`
+    : `RV ${rvSize} (RVD1 ${f0(m.rvd1)} mm); TAPSE ${f0(m.tapse)} mm, FAC ${f0(m.rvfac)}%${g.tapse.level !== 'normal' || g.rvfac.level !== 'normal' ? ' — impaired RV systolic function' : ''}.` });
   F.push({ section: 'Atria', text: `LA ${g.lavi.word} (LAVi ${f0(lavi)} mL/m²). RA ${g.raArea.level === 'normal' ? 'normal size' : 'dilated'} (area ${f1(m.raArea)} cm²).${m.shunt && path.asd ? ` ${cap(m.shunt.label)} with left-to-right shunt across the interatrial septum${m.qpqs ? ` (Qp:Qs ${f1(m.qpqs)})` : ''}.` : ''}` });
   F.push({ section: 'Aortic valve', text: as ? `${cap(as.word)}: Vmax ${f1(m.avVmax)} m/s, mean gradient ${f0(m.avMeanGrad)} mmHg, AVA ${f2(m.ava)} cm² (continuity).` : `Trileaflet, opens well. Vmax ${f1(m.avVmax)} m/s. No aortic stenosis or regurgitation.` });
   const mvParts = [];
@@ -328,7 +336,7 @@ export function buildReport(path, patient = DEFAULT_PATIENT, learner = {}) {
   if (path.tr && !path.rvpo) C.unshift(`${cap(m.grade)} tricuspid regurgitation (TR Vmax ${f1(m.trVmax)} m/s).`);
   if (!rvOk) {
     const rvBits = [];
-    if (g.rvd1.level !== 'normal') rvBits.push(`RV dilatation (RVD1 ${f0(m.rvd1)} mm)`);
+    if (g.rvd1.level === 'high') rvBits.push(`RV dilatation (RVD1 ${f0(m.rvd1)} mm)`);
     if (g.tapse.level !== 'normal' || g.rvfac.level !== 'normal') rvBits.push(`impaired RV systolic function (TAPSE ${f0(m.tapse)} mm, FAC ${f0(m.rvfac)}%)`);
     C.push(`${cap(rvBits.join(' with '))}.`);
   }

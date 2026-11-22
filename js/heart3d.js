@@ -8,8 +8,9 @@ import { OrbitControls } from '../vendor/OrbitControls.js';
 import { geometryAt, velocityAt, VALVE_DEFS } from './cardiac-model.js';
 import { myoDist, lumenDist, LM } from './anatomy.js';
 import { buildMesh } from './marching.js';
-import { VESSELS, VESSEL_BOX, VESSEL_CELL } from './vessels3d.js';
-import { CONTEXT, buildContext, structureLabels, cameraDir, CAMERA_UP } from './thorax3d.js';
+import { VESSELS, VESSEL_BOX, VESSEL_CELL, CORONARY_3D } from './vessels3d.js';
+import { CONTEXT, buildContext, structureLabels, cameraDir, cameraDirForPlane, declutterLabels, labelPriority, CAMERA_UP } from './thorax3d.js';
+import { teePathParam, teePathPolyline, TEE_PATH_TOP } from './views.js';
 
 const MUSCLE = 0x8a3330;
 // Chamber tints. Ventricles read bright; atria are a touch deeper/darker and
@@ -122,7 +123,16 @@ export class Heart3D {
     this.vesselMeshes = {};
     for (const v of VESSELS) {
       this.vesselMeshes[v.key] = new THREE.Mesh(new THREE.BufferGeometry(),
-        mkMat(v.color, v.key === 'coronary' ? 0.9 : 0.66, { depthWrite: true, roughness: 0.5 }));
+        mkMat(v.color, v.key === 'coronary' ? 1 : 0.66, { depthWrite: true, roughness: 0.5 }));
+    }
+    {
+      // coronaries: opacity 1 and self-lit, drawn after the translucent myocardial
+      // shell (which writes no depth), so they are not tinted by it. (The material
+      // stays in the transparent pass: an opaque-pass mesh is always drawn before
+      // the shell, whatever its renderOrder.)
+      const cm = this.vesselMeshes.coronary;
+      cm.material.emissive = new THREE.Color(CORONARY_3D.emissive);
+      cm.material.emissiveIntensity = CORONARY_3D.emissiveIntensity;
     }
     this.vesMesh = this.vesselMeshes.aorticRoot;
     // Per-chamber Fresnel rim: each pool gets a thin glowing silhouette in its
@@ -138,6 +148,7 @@ export class Heart3D {
     const A0 = geometryAt(0, {}).A;
     for (const v of VESSELS) if (!v.moving) this.vesselMeshes[v.key].geometry = this._geomFrom((x, y, z) => v.fn(x, y, z, A0), VESSEL_BOX, VESSEL_CELL);
     this.bloodMeshes.forEach((m) => { m.renderOrder = 2; });
+    this.vesselMeshes.coronary.renderOrder = CORONARY_3D.renderOrder;   // after the myocardial shell (4)
     [this.myoMesh, ...this.bloodMeshes].forEach((m) => this.heartGroup.add(m));
 
     // Rule-based (Streeter) myofiber overlay: helical fibres wound around the LV
@@ -503,12 +514,25 @@ export class Heart3D {
     );
     body.position.y = 0.7;
     this.probeGroup.add(body);
+    this.probeBody = body;
     const face = new THREE.Mesh(
       new THREE.CylinderGeometry(0.5, 0.5, 0.12, 20),
       new THREE.MeshStandardMaterial({ color: 0x39c0e8, emissive: 0x0a4a5a, emissiveIntensity: 0.6, roughness: 0.3 })
     );
     this.probeGroup.add(face);
     this.scene.add(this.probeGroup);
+    // TEE: the gastroscope shaft along the oesophageal / gastric path from the
+    // transducer up to the upper oesophagus (rebuilt when the probe moves along it)
+    this.shaftMat = new THREE.MeshStandardMaterial({ color: 0xb8c2cc, emissive: 0x1d2a33, roughness: 0.4, metalness: 0.2, depthTest: false, transparent: true, opacity: 0.95 });
+    this.shaft = new THREE.Mesh(new THREE.BufferGeometry(), this.shaftMat);
+    this.shaft.visible = false;
+    this.shaft.renderOrder = 7;                     // drawn over the translucent organs and the heart
+    this.scene.add(this.shaft);
+    this.tipMesh = new THREE.Mesh(new THREE.SphereGeometry(0.6, 16, 12), new THREE.MeshStandardMaterial({ color: 0x39c0e8, emissive: 0x0a4a5a, emissiveIntensity: 0.8, depthTest: false, transparent: true }));
+    this.tipMesh.renderOrder = 8;
+    this.tipMesh.visible = false;
+    this.scene.add(this.tipMesh);
+    this._shaftU = null;
 
     // imaging fan (triangle sector) + edges.
     // Geometry is rebuilt only when the probe actually moves (see updateProbe);
@@ -613,13 +637,16 @@ export class Heart3D {
     this.scene.add(this.flowPoints);
   }
 
-  updateProbe(probe, sectorHalf, depthCm) {
+  updateProbe(probe, sectorHalf, depthCm, tee = false) {
     // orient/position transducer group
     const pos = new THREE.Vector3(...probe.pos);
     const dir = new THREE.Vector3(...probe.dir).normalize();
     this.probeGroup.position.copy(pos);
-    // probe body points opposite the beam (sticking out of the body)
+    // probe body points opposite the beam (sticking out of the body); a TEE
+    // transducer is the side-looking tip of the shaft instead
     this.probeGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().negate());
+    this.probeBody.visible = !tee;
+    this._updateShaft(probe, tee);
 
     const half = sectorHalf, seg = this.fanSeg, depth = depthCm;
     const lat = new THREE.Vector3(...probe.lat).normalize();
@@ -850,6 +877,7 @@ export class Heart3D {
     this.ctxLabels.visible = !!this.showLabels;
 
     this.controls.update();
+    this._declutter();
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -930,12 +958,44 @@ export class Heart3D {
     this.flowPoints.geometry.attributes.alpha.needsUpdate = true;
   }
 
-  setCameraForView(name) {
+  _updateShaft(probe, tee) {
+    this.shaft.visible = this.tipMesh.visible = !!tee;
+    if (!tee) { this._shaftU = null; return; }
+    const u = teePathParam(probe.pos);
+    this.tipMesh.position.set(...probe.pos);
+    if (this._shaftU != null && Math.abs(u - this._shaftU) < 0.05) return;
+    this._shaftU = u;
+    const pts = teePathPolyline(u, TEE_PATH_TOP + 4, 0.5).reverse();
+    pts[0] = probe.pos.slice();
+    if (pts.length < 2) return;
+    const curve = new THREE.CatmullRomCurve3(pts.map((q) => new THREE.Vector3(...q)));
+    this.shaft.geometry.dispose();
+    this.shaft.geometry = new THREE.TubeGeometry(curve, Math.max(8, pts.length * 3), 0.45, 10, false);
+  }
+
+  // hide 3D labels that would overlap on screen from the current camera
+  // (thorax3d declutterLabels; heart labels first, then the organ labels; in a
+  // TEE view the oesophagus label first of all)
+  _declutter() {
+    if (!this.labelGroup) return;
+    const d = new THREE.Vector3().subVectors(this.camera.position, this.controls.target).normalize();
+    const key = `${d.x.toFixed(2)},${d.y.toFixed(2)},${d.z.toFixed(2)},${this._teeView ? 1 : 0}`;
+    if (key === this._declutterKey) return;
+    this._declutterKey = key;
+    const sprites = [...this.labelGroup.children, ...this.ctxLabels.children];
+    const kept = new Set(declutterLabels(sprites.map((sp) => [sp.userData.label, [sp.position.x, sp.position.y, sp.position.z]]), [d.x, d.y, d.z], CAMERA_UP, 0.15, labelPriority(this._teeView)));
+    sprites.forEach((sp, i) => { sp.visible = kept.has(i); });
+  }
+
+  setCameraForView(name, probe = null, tee = false) {
+    this._teeView = !!tee;
     // Per-view direction, but distance is derived from the heart's bounding
     // sphere so every view is framed consistently (never oversized/clipped).
     // (thorax3d CAMERA_PRESETS: patient-superior up, the SVC to the patient's
     // right of the ascending aorta in every preset)
-    const dir = new THREE.Vector3(...cameraDir(name)).normalize();
+    // with the view's probe: an oblique camera off the imaging plane (TEE: from
+    // the left-posterior, the probe side); otherwise the named preset
+    const dir = new THREE.Vector3(...(probe ? cameraDirForPlane(probe.normal, tee, probe.pos) : cameraDir(name))).normalize();
     const box = new THREE.Box3().setFromObject(this.heartGroup);
     if (box.isEmpty()) { // no geometry yet — fall back to a fixed frame
       this.camera.position.copy(dir.multiplyScalar(18));

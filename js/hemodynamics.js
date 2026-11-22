@@ -26,6 +26,69 @@ import { clamp } from './mathutils.js';
 import { dcmSeverityOf } from './scenarios.js';
 
 const CYCLE = 0.833;          // reference cycle length (s) at ~72 bpm
+// Heart rate (review 12, MOT-2 / PAT-9). A case may run at its own rate: path.hr
+// (bpm), or the case's intrinsic one — cardiac tamponade carries the sinus
+// tachycardia that holds its output up as the stroke volume falls (110 bpm). Its
+// circulation is solved on its own cycle, 60 / hr. The activation and relaxation
+// times (TC, TR and the RV's) and the atrial activation (its peak's lead on the
+// next contraction, and its width) are times at the reference rate shortened with
+// sqrt(RR): the QT interval, the electromechanical systole and the LV ejection
+// time all shorten roughly with the square root of the R-R interval (Bazett;
+// Weissler et al., Circulation 1968: QS2 395 -> 315 ms and LVET 291 -> 226 ms
+// from 72 to 110 bpm, x0.80 and x0.78 against sqrt(RR) x0.81), so diastole takes
+// up most of the shorter cycle. The RV activation delay is conduction, constant
+// in seconds. As a fraction of the case's own cycle, a time x of the reference
+// cycle becomes x * s counted from the onset of systole and 1 - (1 - x) * s
+// counted back from the next one, s = sqrt(CYCLE / cycle); at 72 bpm s = 1 and
+// every number is as before. The filling waves keep pace too: the AV inflow
+// inertances scale with RR (circParams), so the E wave's own time course — its
+// acceleration and deceleration, ~ sqrt(L C) against the chamber elastances —
+// also shortens with sqrt(RR) (the heart-rate-corrected deceleration time,
+// DT / sqrt(RR)), and E and A stay two waves at a sinus tachycardia instead of
+// fusing into one.
+const HR_REF = 72;
+export const TAMPONADE_HR = 110;   // the tamponade case's sinus tachycardia (bpm)
+export function heartRate(path = {}) { return path && path.hr > 0 ? path.hr : path && path.tamponade ? TAMPONADE_HR : HR_REF; }
+export function cycleOf(path = {}) { const hr = heartRate(path); return hr === HR_REF ? CYCLE : 60 / hr; }
+function timeScale(path) { const c = cycleOf(path); return c === CYCLE ? 1 : Math.sqrt(CYCLE / c); }
+// The cardiac PHASE every caller passes (hemodynamics(), geometryAt(), the
+// playback clock, the audit tools) stays the reference, event-anchored phase: 0
+// the onset of systole, 0.42 aortic closure, 0.513 mitral opening, 0.80 the A-wave
+// onset — the reference cycle's events (electrophysiology.js PH_*), at any rate.
+// A case solved on its own cycle stores its trace by TIME (a fraction of its own
+// cycle); timeOfPhase maps a phase onto it and phaseOfTime back. Systole and the
+// isovolumic relaxation (0 -> mitral opening) scale by s, atrial systole (A-wave
+// onset -> the next contraction) by s back from the end, and early diastole
+// between them takes what is left; so the curves drawn on the event timing (the
+// atrial reservoir / conduit / booster curve, the venous waves, the valve
+// envelopes, the stand-in ECG) stay in step with the solved trace. Identity at
+// 72 bpm. caseTiming: the case's cycle (s), its scale and its events as fractions
+// of its own cycle (null at the reference rate), for the rhythm engine's warp.
+const REF_MVO = 0.513, REF_ATR = 0.80;
+export function caseTiming(path = {}) {
+  const s = timeScale(path), c = cycleOf(path);
+  if (s === 1) return null;
+  return { rr: c, s, avo: 0.072 * s, avc: 0.421 * s, mvo: REF_MVO * s, atr: 1 - (1 - REF_ATR) * s, phaseOf: (t) => phaseOfTimeS(t, s) };
+}
+// seconds per unit of phase in systole (and atrial systole) for this case: the
+// reference cycle at 72 bpm, shortened with sqrt(RR) (valve time constants)
+export function phaseSeconds(path = {}) { return CYCLE / timeScale(path); }
+export function phaseOfTime(t, path = {}) { return phaseOfTimeS(t, timeScale(path)); }
+function phaseOfTimeS(t, s) {
+  if (s === 1) return t;
+  const p = t - Math.floor(t), m = REF_MVO * s, a = 1 - (1 - REF_ATR) * s;
+  if (p <= m) return p / s;
+  if (p >= a) return 1 - (1 - p) / s;
+  return REF_MVO + (p - m) * (REF_ATR - REF_MVO) / (a - m);
+}
+export function timeOfPhase(x, path = {}) { return timeOfPhaseS(x, timeScale(path)); }
+function timeOfPhaseS(x, s) {
+  if (s === 1) return x;
+  const p = x - Math.floor(x), m = REF_MVO * s, a = 1 - (1 - REF_ATR) * s;
+  if (p <= REF_MVO) return p * s;
+  if (p >= REF_ATR) return 1 - (1 - p) * s;
+  return m + (p - REF_MVO) * (a - m) / (REF_ATR - REF_MVO);
+}
 // Ventricular activation is ASYMMETRIC: contraction to peak elastance takes
 // longer than the relaxation that follows, and end-systole sits at the peak. A
 // symmetric bump over 0..0.40 put peak elastance at tau 0.20, which ended
@@ -38,6 +101,31 @@ const CYCLE = 0.833;          // reference cycle length (s) at ~72 bpm
 // (0.22) stretched IVRT to ~150 ms, the impaired-relaxation pattern.
 const TC = 0.40;              // contraction: activation rises to peak (end-systole)
 const TR = 0.14;              // relaxation: activation decays back to zero
+// Right-ventricular timing, kept in ONE place (heart-rate support scales these
+// with the cycle). The RV free wall is activated ~25 ms after the LV (the
+// right bundle reaches the free wall last) and relaxes on its own time (relax).
+// With the low, compliant pulmonary load this puts tricuspid
+// closure (T1) after mitral closure (M1), pulmonary closure (P2) after aortic (A2,
+// the physiological split of S2) and a shorter isovolumic relaxation than the LV's.
+// delay: activation delay as a fraction of the reference cycle (0.03 ~ 25 ms);
+// contract: RV activation rise time to its peak (cycle fraction; the LV's is TC),
+// a little longer: with the delay, P2 follows A2 by ~30 ms and the RVOT envelope
+// peaks in mid-systole;
+// relax: RV activation decay time (cycle fraction; the LV's is TR), shorter than
+// the LV's: the RV only has to fall from ~25 to ~5 mmHg, so its isovolumic
+// relaxation is brief (~50 ms against the LV's ~75) and the tricuspid valve opens
+// ~7 ms before the mitral (relax 0.075; the pressure-loaded RV of pulmonary
+// hypertension or mitral stenosis relaxes more slowly, TRrv in rightHeartParams).
+// raLead: how far (cycle fraction) the RA booster peaks ahead of the LA's: 0.02,
+// ~17 ms, as in vivo (the sinus node is in the RA, which is activated 10-20 ms
+// before the LA). In this lumped model an AV valve shuts when its flow stops. The
+// tricuspid A wave outlasts the mitral's although the RA contracts first: the RV
+// is activated later (delay) and, as its last filling lifts the annulus back,
+// the RA keeps its pressure (raDesc), so T1 follows M1 by ~25 ms. (Before the
+// annular descent was modelled the RA kick had to lag the LA's, -0.02, to hold
+// the tricuspid valve open that long.)
+// A pathology may override it (p.raLead: the ASD's shunt calibration).
+export const RV_TIMING = { delay: 0.03, contract: 0.41, relax: 0.075, raLead: 0.02 };
 const NSAMPLE = 240;          // samples stored per output cycle
 const STEPS = 3000;           // integration steps per cycle
 const NCYCLE = 60;            // cycles run to reach the limit cycle (the right heart's volumes settle slowly)
@@ -48,9 +136,9 @@ const NCYCLE = 60;            // cycles run to reach the limit cycle (the right 
 // systole). Both joins are C1 (zero slope at τ=0, τ=TC and τ=TC+TR).
 // tr (default TR) is the case's relaxation time: circParams sets it per pathology
 // (slower in concentric LVH / aortic stenosis — impaired relaxation).
-function activation(tau, tr = TR) {
-  if (tau < TC) { const u = tau / TC, sn = Math.sin(Math.PI * 0.5 * u), cs = 0.5 * (1 - Math.cos(Math.PI * u)); const w = 0.4; return sn * (1 - w) + cs * w; }
-  if (tau < TC + tr) { const c = Math.cos(Math.PI * 0.5 * (tau - TC) / tr); return c * c; }
+function activation(tau, tr = TR, tc = TC) {
+  if (tau < tc) { const u = tau / tc, sn = Math.sin(Math.PI * 0.5 * u), cs = 0.5 * (1 - Math.cos(Math.PI * u)); const w = 0.4; return sn * (1 - w) + cs * w; }
+  if (tau < tc + tr) { const c = Math.cos(Math.PI * 0.5 * (tau - tc) / tr); return c * c; }
   return 0;
 }
 
@@ -70,10 +158,34 @@ function atrialAct(tau, at = 0.905, w = 0.045) {
 const LA_NORMAL = { ElaMin: 0.305, aWave: 2.7, kLa: 0.0112, Rpv: 0.0695, laDesc: 6.6, V0la: 37.4, aW: 0.0472, kPv: 0.263,
   Emin: 0.0596, Lmv: 0.00159, Rmv: 0.00998, TR: 0.138, aAt: 0.89, Emax: 2.74 };
 const LA_LEGACY = { ElaMin: 0.20, aWave: 1.1, kLa: 0, Rpv: 0.040, laDesc: 20, V0la: 10, aW: 0.045, kPv: 0,
-  Emin: 0.085, Lmv: 0.0009, Rmv: 0.009, TR: 0.14, aAt: 0.905, Emax: 2.7 };
+  Emin: 0.085, Lmv: 0.0009, Rmv: 0.009, TR: 0.14, aAt: 0.905, Emax: 2.7,
+  // (and the aortic coupling they were graded on: a stiffer aorta, a smaller
+  // characteristic impedance and a larger LVOT inertance; review 12 rounded the
+  // normal ejection, see circParams)
+  Lao: 0.0015, Zc: 0.08, Cao: 1.5, Rsys: 0.95 };
 
 // Per-pathology circulation parameters. Normal values are calibrated to
 // EDV≈121, ESV≈47, EF≈61%, aortic ~125/76, LVEDP≈8.
+// RWMA: the infarcted territory no longer ejects, so the global end-systolic
+// elastance is the remote myocardium's alone. Set per territory so the solved
+// LVEF is what the drawn LV (territory frozen, remote walls compensating) ejects:
+// a large LAD infarct (septal, apex) ~40 %, a smaller circumflex/RCA one a little
+// higher (typical post-infarct LVEF 35-50 %). Scaled with the severity (0.85 =
+// the default, akinetic scar).
+const RWMA_EMAX = { septal: 1.3, anteroseptal: 1.3, anterior: 1.35, apical: 1.35, lateral: 1.4, inferior: 1.4, inferolateral: 1.45, posterior: 1.45 };
+function rwmaEmax(path) {
+  const spec = typeof path.rwma === 'object' ? path.rwma : {};
+  const name = spec.region || (typeof path.rwma === 'string' ? path.rwma : 'septal');
+  const sev = spec.severity != null ? Math.max(0, Math.min(1, spec.severity)) : 0.85;
+  const e = RWMA_EMAX[name] || RWMA_EMAX.septal;
+  return 2.7 - (2.7 - e) * sev / 0.85;
+}
+// the RWMA territory and severity change the solved loop: part of the cache key
+function rwmaSig(path) {
+  if (!path.rwma) return '';
+  return ':' + (typeof path.rwma === 'object' ? (path.rwma.region || 'septal') + '/' + (path.rwma.severity ?? '') : path.rwma);
+}
+
 function circParams(path) {
   const p = {
     Emax: 2.7,   // end-systolic elastance (contractility)
@@ -119,11 +231,30 @@ function circParams(path) {
     // AS overrides Rao explicitly per grade below, so this only affects normals.
     Rao: 0.006,
     // (aortic-valve resistance, ∝ 1/AVA)
-    Rsys: 0.95,  // systemic vascular resistance
-    Cao: 1.50,   // arterial (Windkessel) compliance (sets pulse pressure)
+    // Ejection shape (LVOT PW, review 12): with a small characteristic
+    // impedance (0.08) and a large LVOT inertance (0.0015) the aortic flow shot
+    // up to a sharp early peak (~530 mL/s, peak/mean 2.2) and trailed off in a
+    // long inertial tail, so the LVOT PW peak (Q/CSA) was ~1.5 m/s with a VTI of
+    // 19 cm, or (scaled to a 1 m/s peak) a VTI of 14 cm. A larger characteristic
+    // impedance (0.12) and a short inertance (0.0002) give the rounder flow of the
+    // normal LVOT (peak ~425 mL/s, peak/mean ~1.7: ~1.17 m/s and a VTI of ~19 cm
+    // through a 2.15 cm LVOT) at the same SV, EF and ejection time, ~131/69 mmHg.
+    // The total arterial compliance is near the adult's ~1.5-2 mL/mmHg: a more
+    // compliant Windkessel (3.0) lowered the late-systolic aortic pressure, so
+    // ejection ran on (aortic closure ~2 ms later, A2 ~28 ms after the end of the
+    // T wave) at a higher peak (1.19 m/s). (Zc sets both the peak and the closure:
+    // 0.13 gives ~1.12 m/s but puts A2 30 ms past the end of the T wave,
+    // verify-timing; a larger inertance lengthens the cusp closure but sharpens
+    // the peak, 1.2-1.3 m/s at 0.0005-0.003.)
+    Lao: 0.0002, // LVOT / proximal-aortic inertance (mmHg·s²/mL)
+    Zc: 0.12,    // aortic characteristic impedance (mmHg·s/mL)
+    Rsys: 0.92,  // systemic vascular resistance
+    Cao: 2.0,    // arterial (Windkessel) compliance (sets pulse pressure)
     Pven: 4,     // downstream systemic venous pressure
     Rmr: Infinity, // mitral regurgitant-orifice resistance (∞ = competent)
     TR: TR,      // LV relaxation time (activation decay, s/cycle): slower = impaired relaxation
+    TC: TC,      // LV contraction time (activation rise to end-systole, cycle fraction; heart rate scales it)
+    rvDelay: RV_TIMING.delay,   // RV activation delay (cycle fraction; heart rate scales it)
     // ---- right heart (lumped, solved in the same loop) ----
     // A varying-elastance RV (same activation clock as the LV) filled from a
     // compliant, contracting RA through the tricuspid valve (resistance +
@@ -137,15 +268,50 @@ function circParams(path) {
     // VSD / ASD gradients all come from these solved curves.
     Ermax: 0.62, // RV end-systolic elastance
     Ermin: 0.034, // RV passive elastance
-    V0rv: 30,    // RV unstressed volume
+    // RV unstressed volume (review 12: 30 gave a low-normal RVEF of 51 %; 20 gives
+    // ~55 %, RVEDV ~127 mL — mid-normal by CMR — which the drawn RV now ejects)
+    V0rv: 20,
     Rtv: 0.005, Ltv: 0.0008,   // tricuspid resistance / inertance
-    Rpvl: 0.003, Lpa: 0.0012,  // pulmonary valve resistance / RVOT inertance
+    Rpvl: 0.003, Lpa: 0.00135, // pulmonary valve resistance / RVOT inertance (review 12: 0.0012 -> 0.00135,
+                               // the normal RVOT envelope's rounded peak, acceleration time ~125 ms)
     Zpa: 0.025, Cpa: 3.2,      // PA characteristic impedance / compliance
     Rpvr: 0.085, // pulmonary vascular resistance (~1.4 Wood units)
+    // Pulmonary wave reflection: the forward pressure wave (Zpa x Qpa) returns
+    // from the arterioles as a reflected wave of relative size reflG after a
+    // round-trip time reflT (s). In the normal, compliant, low-resistance bed it
+    // is small and arrives after the flow peak (a late-peaking, rounded RVOT
+    // envelope, acceleration time ~130 ms). In pulmonary arterial hypertension the
+    // stiff proximal arteries and the narrowed distal bed make it large and early:
+    // it decelerates the ejection in mid-systole (the mid-systolic notch) and
+    // shortens the acceleration time. null: derived from Rpvr and Cpa (simulate).
+    reflG: null, reflT: null,
+    TRrv: RV_TIMING.relax,   // RV relaxation time (activation decay, cycle fraction)
+    TCrv: RV_TIMING.contract, // RV contraction time (activation rise to its peak, cycle fraction)
+    // Ventricular interdependence: while the activated RV's pressure exceeds the
+    // LV's (the septum bowed into the LV in the late, prolonged RV systole of
+    // pressure overload) a share kVI of the difference is added to the LV pressure.
+    kVI: 0,
     Era: 0.13,   // passive RA elastance
-    aRa: 1.0,    // RA booster (activation raises Era by aRa x Era, ~30 ms before the LA)
+    // RA booster (activation raises Era by aRa x Era, timed by RV_TIMING.raLead).
+    // The normal RA's a-wave stands at or just above its v-wave (review 12, MOT-7).
+    // The x descent of the annulus (raDesc) lowers the v-wave, so a booster of 1.0
+    // gives a ~4.4, v ~3.6 mmHg; without the descent 1.0 left v > a (the left-atrial
+    // pattern), and 1.5 with it doubles the hepatic-vein atrial reversal (~0.26 m/s
+    // against the normal ~0.13) and pushes the tricuspid E/A below 1.
+    aRa: 1.0,
+    raW: 0.045,  // RA activation width (atrialAct; heart rate scales it)
     V0ra: 8,     // RA unstressed volume
     Rsv: 0.018,  // systemic vein -> RA resistance (phasic caval S / D inflow)
+    // Tricuspid annular descent: as the RV long axis shortens in systole the
+    // tricuspid annulus is pulled toward the apex (TAPSE ~2-2.5 cm over a ~9 cm2
+    // annulus) and the RA gains capacity, as the LA does (laDesc). Its pressure
+    // then falls through ejection (the x descent) and the caval / hepatic-vein
+    // inflow peaks in systole: the S wave that dominates the normal hepatic-vein
+    // trace (S > D). Follows the RV volume ratio, rho_RV^0.24, as laDesc does the LV's.
+    // (38 mL at an RV ejection fraction of 0.6: hepatic S/D ~1.6 with the solved
+    // RV of review 12, RVEF ~55 %; a pathology may override it, rightHeartParams.)
+    raDesc: 38,
+    kLv: 0, Vk: 0, // restrictive LV: extra passive stiffness kLv (mmHg/mL2) above volume Vk (mL)
     Atr: 0,      // effective TR orifice (cm2), Bernoulli
     Ppc: 0,      // pericardial pressure (mmHg), added to every chamber (tamponade)
     // pericardial stiffness (mmHg/mL): a tense, fluid-filled sac holds the total
@@ -157,6 +323,19 @@ function circParams(path) {
     Vref: null,  // total heart volume the pericardial pressure is referred to (null: own mean)
     qvrRef: null, // mean venous return (mL/s) the factor vr scales (null: this circulation's own systemic flow)
     vr: 1,       // venous-return factor (respiration in tamponade)
+    // Compliant central veins (review 12): the caval / hepatic-vein segment next
+    // to the RA is a capacitance (Csv, mL/mmHg) between the venous reservoir and
+    // the atrium, filled through Rsv x (1 - svLink) and drained into the RA through
+    // the short junction, Rsv x svLink (the mean pressure drop stays Rsv x the
+    // venous return). Slow RA pressure changes (the x and y descents) still draw the
+    // S and D waves through the whole Rsv; a brisk atrial kick pushes blood back into
+    // the soft veins (the hepatic AR wave). Veins are compliant only while partly
+    // collapsed: once the RA pressure distends them (the plethoric IVC that barely
+    // collapses, ASE 2010: RAP >= 8-15 mmHg; the anatomy's ivcOfRap distends the
+    // drawn IVC over 4.6-9 mmHg) they are stiff (CsvMin), and a tall a or c-v wave
+    // meets the whole Rsv instead of driving a fast backward jet through the
+    // junction alone (hepatic reversal ~0.5 m/s in severe TR or PH, not 1.5).
+    Csv: 6, CsvMin: 0.3, svLink: 0.3,
   };
   // graded severity (mild/moderate/severe) for valve lesions; default severe so
   // presets that set only the flag keep their original "severe by design" behaviour.
@@ -179,14 +358,18 @@ function circParams(path) {
     // compensated AS keeps a normal-to-high blood pressure (~120-140/70-80): the
     // systemic vascular resistance is raised, so the LV (not the aorta) carries
     // the valve gradient — LV systolic pressure ~190-210 in severe AS
-    p.Rsys *= ({ mild: 1.3, moderate: 1.4, severe: 1.62 })[g];
+    // (review 12: x1.62 on a stiff aorta held the diastolic pressure at ~99
+    // mmHg; an elderly, mildly stiffened aorta (Cao 1.6) behind a moderately
+    // raised resistance gives ~125-130/75-80 with LV systolic ~200 mmHg)
+    p.Rsys *= ({ mild: 1.15, moderate: 1.22, severe: 1.3 })[g];
+    p.Cao = 1.6;
     // concentric LVH relaxes slowly and is stiff (grade I diastolic dysfunction):
     // a long IVRT, a small E with a long deceleration time, filling shifted to
     // the atrial kick (E/A < 0.8) — a hypertrophied, enlarged LA with a vigorous
     // booster and a mildly raised mean pressure
-    p.TR = ({ mild: 0.19, moderate: 0.215, severe: 0.245 })[g];
+    p.TR = ({ mild: 0.19, moderate: 0.215, severe: 0.255 })[g];
     p.Emin = ({ mild: 0.13, moderate: 0.145, severe: 0.165 })[g];
-    p.aWave = ({ mild: 2.9, moderate: 4.0, severe: 5.9 })[g];
+    p.aWave = ({ mild: 2.9, moderate: 4.0, severe: 6.3 })[g];   // (severe: relaxation and booster retuned with the lower afterload, review 12)
     p.Pla0 = ({ mild: 8.5, moderate: 9.2, severe: 10.1 })[g];
     p.V0la = ({ mild: 38, moderate: 41, severe: 44.6 })[g];
     p.ElaMin = 0.24; p.kLa = 0.0068; p.aAt = 0.905;
@@ -202,12 +385,19 @@ function circParams(path) {
     Object.assign(p, {
       borderline: { Emax: 2.00, Emin: 0.065, V0: 24, Rsys: 1.10, Cao: 1.45, Pla0: 10 },
       impaired: { Emax: 1.21, Emin: 0.068, V0: 27, Rsys: 1.20, Cao: 1.4, Pla0: 14, ElaMin: 0.28, V0la: 25, aWave: 0.6, laDesc: 14 },
-      severe: { Emax: 0.60, Emin: 0.075, V0: 30, Rsys: 1.30, Cao: 1.4, Pla0: 18, ElaMin: 0.35, V0la: 40, aWave: 0.2, laDesc: 8 },
+      // severe (review 12): the restrictive LV is stiff at the top of its
+      // pressure-volume curve (kLv above Vk mL): the atrial kick meets a steeply
+      // rising LV pressure, so little blood crosses the mitral valve (a small A,
+      // E/A > 2) and the rest is pushed back up the pulmonary veins: the
+      // prominent Ar of a raised LVEDP (Ar >= 0.35 m/s; ASE/EACVI 2016). The LA
+      // keeps a weak booster (aWave 0.9 of a stiff, dilated atrium); a lower vein
+      // resistance (Rpv) lets the kick reach the veins.
+      severe: { Emax: 0.60, Emin: 0.075, V0: 30, Rsys: 1.30, Cao: 1.4, Pla0: 18, ElaMin: 0.35, V0la: 40, aWave: 0.9, laDesc: 8, Rpv: 0.035, kLv: 0.45, Vk: 222 },
     }[dcmSeverityOf(path)]);
   }
   // DCM: annular dilatation and leaflet tethering leave a central FUNCTIONAL MR
   // (moderate: regurgitant fraction ~30 % in severe DCM) even with structurally normal leaflets
-  if (path.dilated && !path.mr) { p.Rmr = ({ borderline: 3.5, impaired: 1.8, severe: 1.05 })[dcmSeverityOf(path)]; }
+  if (path.dilated && !path.mr) { p.Rmr = ({ borderline: 3.47, impaired: 1.78, severe: 1.005 })[dcmSeverityOf(path)]; }
   if (path.mr) {
     // Regurgitant orifice + congested LA, plus the chronic volume-overload
     // REMODELLING of primary MR: the LV dilates (unstressed volume V0 rises) so it
@@ -224,7 +414,7 @@ function circParams(path) {
     // whose pressure climbs to a v-wave (severe: >= 25 mmHg) that blunts the
     // late-systolic MR velocity, then empties fast into the LV (a tall E wave,
     // E-dominant inflow); its booster function wanes as it dilates.
-    p.Rmr = ({ mild: 1.6, moderate: 0.85, severe: 0.33 })[g];
+    p.Rmr = ({ mild: 1.58, moderate: 0.835, severe: 0.32 })[g];
     p.Pla0 = ({ mild: 9, moderate: 12, severe: 17 })[g];
     p.V0 = ({ mild: 20, moderate: 34, severe: 40 })[g];
     p.Emax = Math.min(p.Emax, ({ mild: 2.7, moderate: 2.4, severe: 1.8 })[g]);
@@ -253,13 +443,45 @@ function circParams(path) {
   }
   if (path.rvpo) {
     // pulmonary hypertension: the failing right heart delivers less to the left
-    // (low LA filling pressure) and the flattened, leftward-shifted septum stiffens
-    // LV filling (ventricular interdependence) — the D-shaped LV is underfilled
-    p.Pla0 = Math.min(p.Pla0, 7); p.Emin = 0.09;            // LV EDV ~90 mL
+    // and the flattened, leftward-shifted septum stiffens LV filling — the D-shaped
+    // LV is underfilled (EDV ~90 mL). Review 12 (MOT-8): severe PAH shows the
+    // impaired-relaxation pattern (mitral E/A < 1, IVRT >= 100 ms), from slow LV
+    // relaxation, the septum pushed into the LV while the slowly relaxing RV still
+    // holds pressure in early diastole (ventricular interdependence, kVI), and a
+    // small, stiff LA that empties late, by its booster
+    Object.assign(p, { Pla0: 8, Emin: 0.15, TR: 0.26, kVI: 0.5, aWave: 7, ElaMin: 0.24, kLa: 0.0068, V0la: 20 });
   }
-  if (path.rwma) { p.Emax = Math.min(p.Emax, 1.8); }              // regional dysfunction → low global contractility
+  if (path.rwma) { p.Emax = Math.min(p.Emax, rwmaEmax(path)); }  // regional dysfunction → low global contractility
+  // secundum ASD: the defect makes the two atria one chamber in practice; the
+  // systolic capacity the descending annuli open is shared through it, and the
+  // LA's (laDesc) already decompresses that common atrium. A separate RA descent
+  // on top lowered only the RA side and raised the interatrial gradient (shunt
+  // velocity) above what an unrestrictive defect shows.
+  if (path.asd) p.raDesc = 0;
+  if (path.vsd) {
+    // chronic restrictive VSD (review 12): the shunt has volume-loaded the left
+    // heart for years. The pulmonary venous return carries the shunt back to the
+    // LA (mean LAP up a little) into an eccentrically dilated LV (unstressed
+    // volume up), which ejects the shunt on top of a normal forward output: the
+    // systemic stroke volume and blood pressure stay normal and the LV EDV rises
+    // with Qp:Qs (~1.35), rather than the shunt stealing from the aorta as an
+    // acute defect would.
+    p.Pla0 = 10; p.V0 = 39;
+  }
   Object.assign(p, shuntParams(path), rightHeartParams(path, g));
   if (path.tamponade) {
+    // the sympathetic drive of tamponade (review 12, MOT-9) besides its sinus
+    // tachycardia (heartRate): both ventricles relax faster (lusitropy: TR, TRrv)
+    // and the atria contract harder (rightHeartParams aWave, aRa), later after the
+    // P wave (a short PR) and more briefly (aAt, aW, raW, raLead). Against the
+    // pericardial constraint, filling is a short E (the ventricle soon full) and
+    // a preserved A from both atria — in each respiratory phase — instead of one
+    // wave fused across the short diastole
+    Object.assign(p, { TR: 0.105, TRrv: 0.047, aAt: 0.913, aW: 0.038, raW: 0.0225, raLead: -0.014 });
+    // and the LV contracts harder (inotropy): the small, underfilled LV stays
+    // hyperdynamic, LVEF ~57 % (not the borderline-low EF of a normal LV that
+    // fills to only ~65 mL)
+    p.Emax = 3.45;
     // the pericardial pressure is transmitted to the LA too: a high absolute LAP
     // over a small transmural filling pressure -> an underfilled LV, low SV.
     // Inspiration lowers the pulmonary venous (LA filling) pressure while it
@@ -271,7 +493,20 @@ function circParams(path) {
     if (path.resp) p.Emin *= path.resp === 'insp' ? 1 + p.septShift : 1 - 0.5 * p.septShift;
     // the venous return swings about the apnoeic systemic flow (the systemic
     // veins are a reservoir that outlasts a breath), not about this phase's output
-    if (path.resp) p.qvrRef = solved({ ...path, resp: undefined }).sum.forwardSV / CYCLE;
+    if (path.resp) p.qvrRef = solved({ ...path, resp: undefined }).sum.forwardSV / cycleOf(path);
+  }
+  // heart rate (see heartRate): the case's timing shortened with sqrt(RR)
+  const s = timeScale(path);
+  if (s !== 1) {
+    p.TC *= s; p.TR *= s; p.TCrv *= s; p.TRrv *= s;
+    p.rvDelay *= s * s;                                  // conduction: constant in seconds
+    p.aAt = 1 - (1 - p.aAt) * s; p.aW *= s; p.raW *= s;
+    p.raLead = (p.raLead != null ? p.raLead : RV_TIMING.raLead) * s;
+    // the filling waves keep pace: the E wave's time course (acceleration and
+    // deceleration, the heart-rate-corrected DT/sqrt(RR)) is set by the inflow
+    // inertance against the chamber elastances, a period ~ sqrt(L C), so the
+    // inertances scale with RR for the E wave to shorten with sqrt(RR) too
+    p.Lmv /= s * s; p.Ltv /= s * s;
   }
   return p;
 }
@@ -289,14 +524,35 @@ function circParams(path) {
 // each respiratory phase is solved as its own steady state.
 function rightHeartParams(path, g) {
   const r = {};
-  if (path.rvpo) Object.assign(r, { Rpvr: 1.08, Ermax: 0.81, Ermin: 0.0898, V0rv: 26.6, Era: 0.0567, V0ra: 37, Atr: 0.0997, Cpa: 1.2 });
-  if (path.mitralStenosis) Object.assign(r, { Rpvr: ({ mild: 0.12, moderate: 0.22, severe: 0.40 })[g], Ermax: 0.425, Ermin: 0.0544, V0rv: 26, Cpa: 2.2, Atr: g === 'severe' ? 0.04 : 0 });
+  // (PH: a stiff proximal PA — a high characteristic impedance — and an early,
+  // large reflected wave from the narrowed distal bed, which decelerates the RV
+  // ejection in mid-systole: the notched RVOT envelope with a short acceleration
+  // and ejection time; the hypertrophied RV relaxes more slowly than the normal
+  // one, so it still holds pressure as the LV starts to fill)
+  if (path.rvpo) Object.assign(r, { Rpvr: 0.78, Ermax: 0.81, Ermin: 0.0898, V0rv: 26.6, Era: 0.0567, V0ra: 37, Atr: 0.0997, Cpa: 1.2,
+    Zpa: 0.045, reflG: 1.0, reflT: 0.065, Lpa: 0.0009, TRrv: 0.12, aRa: 1.0 });
+  if (path.mitralStenosis) Object.assign(r, { Rpvr: ({ mild: 0.12, moderate: 0.22, severe: 0.40 })[g], Ermax: 0.425, Ermin: 0.0544, V0rv: 26, Cpa: 2.2, Atr: g === 'severe' ? 0.04 : 0, TRrv: 0.09 });
   // TR: the RV-RA gradient falls as the regurgitant volume swells the RA v-wave;
+  // (review 12: the TR flows only in systole and isovolumic relaxation, simulate)
   // severe TR comes with a mildly raised PA pressure and a plethoric IVC (RAP ~12)
   if (path.tr && !path.rvpo) Object.assign(r, ({
     mild: { Atr: 0.156, Era: 0.058, V0ra: 26, V0rv: 12, Ermin: 0.0344, Ermax: 0.62, Rpvr: 0.188 },
     moderate: { Atr: 0.325, Era: 0.0303, V0ra: 62, V0rv: 18.7, Ermin: 0.065, Ermax: 0.6, Rpvr: 0.154 },
-    severe: { Atr: 0.55, Era: 0.0384, V0ra: 139, V0rv: 23.5, Ermin: 0.0998, Ermax: 0.55, Rpvr: 0.199 },
+    // severe: the RA is "ventricularised" — a dilated (RA ~95-125 mL, not the
+    // ~450 mL of a slack chamber) but full, stiff atrium whose systolic filling by
+    // the regurgitant volume is a giant c-v wave well above its weak a-wave, and
+    // whose y descent is steep; the volume-loaded RV is compliant (RAP ~12).
+    // (raDesc 0: in severe TR the x descent is obliterated. The regurgitant jet
+    // fills the RA from the first instant of RV contraction and the c-v wave takes
+    // the place of the systolic fall in RA pressure, so the hepatic-vein S wave is
+    // reversed. With the annular-descent capacity of a competent valve the RA would
+    // absorb the regurgitant volume at an almost flat pressure: v - a ~2.6 mmHg and
+    // forward systolic hepatic flow, the picture of mild TR.)
+    // (Rsv 0.012: the dilated cavae and hepatic veins of severe TR (IVC ~2.5 cm)
+    // resist less than normal veins, so the end-diastolic forward flow is small
+    // when the c-v wave arrives and the systolic reversal is well above any
+    // forward systolic flow: reversed / forward ~1.7.)
+    severe: { Atr: 0.9, Era: 0.4, V0ra: 80, aRa: 0.1, raDesc: 0, Rsv: 0.012, V0rv: 23.5, Ermin: 0.065, Ermax: 0.55, Rpvr: 0.199 },
   })[g]);
   if (path.dilated) Object.assign(r, ({
     borderline: { Ermax: 0.5, Ermin: 0.04 }, impaired: { Ermax: 0.4, Ermin: 0.055, V0rv: 40 },
@@ -304,12 +560,34 @@ function rightHeartParams(path, g) {
   })[dcmSeverityOf(path)]);
   // (ASD: a vigorous RA kick ~30 ms ahead of the LA's opens the dip in the L->R
   // flow; the volume-loaded atria contract a little later in diastole)
-  if (path.asd) Object.assign(r, { Ermin: 0.02, V0rv: 60, Era: 0.08, V0ra: 25, aRa: 3, aAt: 0.915 });
+  if (path.asd) Object.assign(r, { Ermin: 0.02, V0rv: 60, Era: 0.1, V0ra: 25, aRa: 3, aAt: 0.915, raLead: 0.035 });
   if (path.tamponade) {
-    Object.assign(r, { Ppc: 13.2, Kpc: 0.177, Era: 0.233, Ermin: 0.0168, V0rv: 18.2, laOff: 5.3, respLa: 1.0, septShift: 0.5, V0la: 20, aWave: 5, aRa: 2.5 });
+    // (review 12, MOT-9: at its sinus tachycardia the RA keeps ~20-30 mL into late
+    // diastole — a compliant atrium over a larger unstressed volume — so both atria
+    // still contract into a filled ventricle: a tricuspid and a mitral A wave in
+    // each respiratory phase. The RA wall buckles once it has emptied, after its
+    // contraction, and stays in until it refills in systole. Equalised diastolic
+    // pressures ~15 mmHg (RAP 15, LA 18); the swing between expiration and
+    // inspiration (aortic ~113/69 vs ~85/52) is a pulsus paradoxus of ~28 mmHg, with
+    // the mitral E falling ~27 % and the tricuspid E rising ~45 % in inspiration)
+    // (with the annular descent and the compliant caval bed of the merged model:
+    // raDesc 10, not the normal 38 — the small, underfilled RV inside a tense sac
+    // ejects ~30 mL and its annulus travels little, so the RA gains only a small
+    // systolic capacity; the full descent kept the RA below its buckling pressure
+    // for 0.7 of the cycle and, returned by the atrial kick, made the tricuspid A
+    // twice the E. Kpc 0.125, between the 0.07 of the tachycardic retune and the
+    // 0.20 tuned with the descent at 72 bpm: the tense sac holds the diastolic
+    // caval inflow down, and with the plethoric, low-resistance cavae and hepatic
+    // veins (Rsv 0.009, as in severe TR) the hepatic-vein flow is systolic-dominant,
+    // D/S < 0.4 in every breath, while E and A still stand apart on both valves.
+    // A slightly stiffer RV (Ermin 0.018) ends the short E sooner and the RA
+    // booster (aRa 4.8) is retuned to the larger atrial preload the descent leaves:
+    // tricuspid A/E ~0.9-0.95, the A 7-13 % above the E-wave trough.)
+    Object.assign(r, { Ppc: 14, Kpc: 0.125, Era: 0.123, V0ra: 11.6, Ermin: 0.018, V0rv: 20, laOff: 3.7, respLa: 0.58, septShift: 0.33, V0la: 15, aWave: 9.4, aRa: 4.8,
+      raDesc: 10, Rsv: 0.009 });
     // (vr: the venous return, up in inspiration as the pleural pressure falls)
-    if (path.resp === 'insp') r.vr = 1.45;
-    if (path.resp === 'exp') r.vr = 0.7;
+    if (path.resp === 'insp') r.vr = 1.47;
+    if (path.resp === 'exp') r.vr = 0.75;
   }
   return r;
 }
@@ -327,7 +605,7 @@ function rightHeartParams(path, g) {
 // pressure (Pla0) because the pulmonary venous return rises with the shunt.
 function shuntParams(path) {
   return {
-    asdA: path.asd ? 0.62 : 0,     // effective ASD orifice (cm2): the ~1.4 x 0.7 cm oval defect x Cd
+    asdA: path.asd ? 0.66 : 0,     // effective ASD orifice (cm2): the ~1.4 x 0.7 cm oval defect (0.77 cm2) x Cd ~0.85
     vsdA: path.vsd ? 0.12 : 0,     // restrictive VSD vena contracta (cm2)
   };
 }
@@ -348,23 +626,42 @@ export function gradeOf(path = {}) {
 // shunt-jet velocity (m/s, signed) from the pressure difference across it (Bernoulli)
 const shuntV = (dP) => (dP >= 0 ? 1 : -1) * Math.sqrt(Math.abs(dP) / 4);
 
+// Compliance of the central veins (mL/mmHg) at a mean RA pressure P: Csv while
+// they are partly collapsed (P <= 4.6 mmHg), CsvMin once fully distended (P >= 9),
+// a smooth step between (the IVC's distension range in anatomy.js ivcOfRap)
+function veinCompliance(p, P) {
+  const t = clamp((P - 4.6) / (9 - 4.6), 0, 1), s = t * t * (3 - 2 * t);
+  return p.Csv + (p.CsvMin - p.Csv) * s;
+}
+
 // Integrate the closed loop to its limit cycle and return a sampled trace of one
 // cycle plus scalar summary (EDV/ESV/SV/EF/pressures/gradients/regurg fraction).
 function simulate(path) {
   const p = circParams(path);
-  const dt = CYCLE / STEPS;
+  const cycT = cycleOf(path), tw = { cyc: cycT, s: timeScale(path) };   // the case's cycle (s) and time scale
+  const dt = cycT / STEPS;
   let Vlv = 120, Pao = 80, Qao = 0, Vla = 50, Qmv = 0;
   let edvPrev = 120, edvRun = 0;      // last cycle's EDV (annular-descent reference)
   let Ppv = p.Pla0 + p.Rpv * 90, qpvSum = 0;   // pulmonary venous pressure (see Pla0)
   const descNorm = 1 - Math.pow(0.4, 0.24);
   // LVOT/aortic inertance (mmHg·s²/mL) and aortic characteristic impedance (mmHg·s/mL)
-  const L = 0.0015, Zc = 0.08;
+  const L = p.Lao, Zc = p.Zc;
   // right heart: RV / RA volumes, PA (Windkessel) pressure, tricuspid and
   // pulmonary-valve flows, and the systemic venous pressure that feeds the RA
   let Vrv = 140, Vra = 45, Ppa = 14, Qtv = 0, Qpa = 0;
+  let rvEdvPrev = 140, rvEdvRun = 0;  // last cycle's RV EDV (tricuspid annular-descent reference)
   let qsysSum = 0, qvrTarget = 85 * p.vr, praSum = 0, Psv = 4 + p.Ppc + p.Rsv * qvrTarget;
+  // compliant central veins (see circParams): junction / upstream resistances,
+  // the vein pressure and its compliance (set each cycle from the mean RAP)
+  const RsvJ = p.Rsv * p.svLink, RsvU = p.Rsv - RsvJ;
+  let Pcv = Psv - RsvU * qvrTarget, Ccv = p.Csv;
   let ppaSum = 0, ppaMean = Ppa, pulseSum = 0, pulseMean = 0;
   let vtotSum = 0, vtotMean = Vlv + Vla + Vrv + Vra;
+  // pulmonary wave reflection: coefficient and round-trip delay (see circParams)
+  const reflG = p.reflG != null ? p.reflG : 0.6 * p.Rpvr / (p.Rpvr + 0.35);
+  const reflT = p.reflT != null ? p.reflT : clamp(0.045 * p.Cpa / 1.2, 0.04, 0.14);
+  const nRefl = Math.max(1, Math.round(reflT / dt));
+  const qpaHist = new Float64Array(STEPS);          // Qpa over the last cycle (ring)
 
   const tr = {
     phase: new Float64Array(NSAMPLE), Plv: new Float64Array(NSAMPLE),
@@ -384,31 +681,44 @@ function simulate(path) {
     const record = cyc === NCYCLE - 1;
     let sIdx = 0;
     if (cyc > 0) {
-      edvPrev = edvRun; Ppv = p.Pla0 + p.Rpv * qpvSum / STEPS;
+      edvPrev = edvRun; rvEdvPrev = rvEdvRun; Ppv = p.Pla0 + p.Rpv * qpvSum / STEPS;
       // venous return: its mean equals the systemic flow of the last cycle (x the
       // respiratory factor); the RA pressure is whatever the RV needs to pump it
       qvrTarget = p.vr * (p.qvrRef != null ? p.qvrRef : qsysSum / STEPS);
       Psv = praSum / STEPS + p.Rsv * qvrTarget;
+      Ccv = veinCompliance(p, praSum / STEPS);
       ppaMean = ppaSum / STEPS; pulseMean = pulseSum / STEPS; vtotMean = vtotSum / STEPS;
     }
-    edvRun = 0; qpvSum = 0; qsysSum = 0; praSum = 0; ppaSum = 0; pulseSum = 0; vtotSum = 0;
+    edvRun = 0; rvEdvRun = 0; qpvSum = 0; qsysSum = 0; praSum = 0; ppaSum = 0; pulseSum = 0; vtotSum = 0;
     for (let s = 0; s < STEPS; s++) {
       const tau = s / STEPS;
-      const a = activation(tau, p.TR);
+      const a = activation(tau, p.TR, p.TC);
+      // the RV on its own activation: delayed, with its own rise and decay times (RV_TIMING)
+      const tauR = tau - p.rvDelay < 0 ? tau - p.rvDelay + 1 : tau - p.rvDelay;
+      const aR = activation(tauR, p.TRrv, p.TCrv);
       const E = p.Emin + (p.Emax - p.Emin) * a;
       const vtot = Vlv + Vla + Vrv + Vra;
       vtotSum += vtot;
       const Ppc = p.Ppc + p.Kpc * (vtot - (p.Vref != null ? p.Vref : vtotMean));   // pericardial pressure
-      const Plv = E * (Vlv - p.V0) + Ppc;
+      const Erv = p.Ermin + (p.Ermax - p.Ermin) * aR;
+      const Prv = Erv * (Vrv - p.V0rv) + Ppc;
+      // (kLv: the steep end of a restrictive LV's passive pressure-volume curve)
+      const PlvOwn = E * (Vlv - p.V0) + (p.kLv ? (1 - a) * p.kLv * Math.max(0, Vlv - p.Vk) ** 2 : 0) + Ppc;
+      // interdependence: the septum is pushed into the LV while the RV is still
+      // activated (its prolonged systole and slow relaxation) and its pressure
+      // exceeds the LV's — the LV's early filling, not its end-diastolic volume
+      const Plv = PlvOwn + p.kVI * Math.min(1, 5 * aR) * Math.max(0, Prv - PlvOwn);
       if (Vlv > edvRun) edvRun = Vlv;
       const desc = p.laDesc * Math.max(0, 1 - Math.pow(Math.min(1, Vlv / edvPrev), 0.24)) / descNorm;
       const xla = Math.max(0, Vla - p.V0la - desc);
       const Pla = p.ElaMin * xla * (1 + p.kLa * xla + p.aWave * atrialAct(tau, p.aAt, p.aW)) + Ppc;
       // right heart (same activation clock); the RA contracts ~25 ms before the LA.
       // Transmural RA pressure may fall below zero in tamponade (the wall buckles).
-      const Erv = p.Ermin + (p.Ermax - p.Ermin) * a;
-      const Prv = Erv * (Vrv - p.V0rv) + Ppc;
-      const Pra = p.Era * (1 + p.aRa * atrialAct(tau, p.aAt - 0.035)) * (Vra - p.V0ra) + Ppc;
+      // (descRa: the tricuspid annulus descends as the RV ejects and enlarges the
+      // RA, the x-descent; it follows the RV volume, so it runs on the RV's clock)
+      if (Vrv > rvEdvRun) rvEdvRun = Vrv;
+      const descRa = p.raDesc ? p.raDesc * Math.max(0, 1 - Math.pow(Math.min(1, Vrv / rvEdvPrev), 0.24)) / descNorm : 0;
+      const Pra = p.Era * (1 + p.aRa * atrialAct(tau, p.aAt - (p.raLead != null ? p.raLead : RV_TIMING.raLead), p.raW)) * (Vra - p.V0ra - descRa) + Ppc;
       // mitral valve: a diode with resistance AND inertance (semi-implicit, like
       // the aortic outflow below); it opens when LA > LV and shuts as the
       // forward flow decelerates to zero
@@ -437,15 +747,32 @@ function simulate(path) {
         Qao = (Qao + dt / L * (Plv - Pao)) / (1 + dt * (p.Rao + Zc) / L);
         if (Qao < 0) Qao = 0;
       }
-      if (Qpa > 0 || Prv > Ppa) {                         // pulmonary valve / RVOT
-        Qpa = (Qpa + dt / p.Lpa * (Prv - Ppa)) / (1 + dt * (p.Rpvl + p.Zpa) / p.Lpa);
+      // the pressure the RV ejects into: the PA Windkessel plus the reflected
+      // wave of the flow nRefl steps ago (Zpa x Qpa is the forward wave)
+      const Pref = reflG * p.Zpa * qpaHist[(s - nRefl + STEPS) % STEPS];
+      if (Qpa > 0 || Prv > Ppa + Pref) {                  // pulmonary valve / RVOT
+        Qpa = (Qpa + dt / p.Lpa * (Prv - Ppa - Pref)) / (1 + dt * (p.Rpvl + p.Zpa) / p.Lpa);
         if (Qpa < 0) Qpa = 0;
       }
-      const Qmr = (p.Rmr !== Infinity && Plv > Pla) ? (Plv - Pla) / p.Rmr : 0;
-      const Qtr = Prv > Pra ? orifice(p.Atr, Prv - Pra) : 0;
+      qpaHist[s] = Qpa;
+      // MR only while the mitral valve is shut and the LV activated (QRS through
+      // isovolumic relaxation), as for TR below: forward and regurgitant flow
+      // cannot share one open orifice, and the 2-3 mmHg by which the LV pressure
+      // overshoots the LA's after the E and A waves (inertial inflow still
+      // running) is not a regurgitant gradient. Diastolic MR belongs to AV block.
+      const Qmr = (p.Rmr !== Infinity && Plv > Pla && Qmv <= 0 && a > 0.01) ? (Plv - Pla) / p.Rmr : 0;
+      // TR only while the tricuspid valve is shut and the RV activated (systole
+      // and isovolumic relaxation): no leak while forward flow still crosses the
+      // valve, nor through the closed valve in late diastole
+      const Qtr = Prv > Pra && Qtv <= 0 && aR > 0.01 ? orifice(p.Atr, Prv - Pra) : 0;
       const Qsys = (Pao - p.Pven) / p.Rsys;
       qsysSum += Qsys;
-      const Qvr = (Psv - Pra) / p.Rsv;                    // caval inflow (phasic)
+      // caval inflow (phasic) through the compliant central veins: the vein
+      // pressure is updated semi-implicitly (stable at any compliance; a stiff
+      // vein, Ccv -> 0, is the plain resistance Rsv)
+      const kcv = dt / Ccv;
+      Pcv = (Pcv + kcv * (Psv / RsvU + Pra / RsvJ)) / (1 + kcv * (1 / RsvU + 1 / RsvJ));
+      const Qvr = (Pcv - Pra) / RsvJ;
       praSum += Pra; ppaSum += Ppa;
       const Qlung = (Ppa - Pla) / p.Rpvr;                 // through the pulmonary bed
       const dPasd = p.asdA ? Pla - Pra : 0, dPvsd = p.vsdA ? Plv - Prv : 0;
@@ -469,7 +796,7 @@ function simulate(path) {
           tr.Qmv[sIdx] = Qmv; tr.Qao[sIdx] = Qao; tr.Qmr[sIdx] = Qmr; tr.Pla[sIdx] = Pla;
           tr.Vla[sIdx] = Vla; tr.Qpv[sIdx] = Qpv;
           tr.Qasd[sIdx] = Qasd; tr.Qvsd[sIdx] = Qvsd; tr.dPasd[sIdx] = dPasd; tr.dPvsd[sIdx] = dPvsd;
-          tr.Prv[sIdx] = Prv; tr.Pra[sIdx] = Pra; tr.Ppa[sIdx] = Ppa + p.Zpa * Qpa;
+          tr.Prv[sIdx] = Prv; tr.Pra[sIdx] = Pra; tr.Ppa[sIdx] = Ppa + p.Zpa * Qpa + Pref;
           tr.Vrv[sIdx] = Vrv; tr.Vra[sIdx] = Vra; tr.Qtv[sIdx] = Qtv; tr.Qpa[sIdx] = Qpa; tr.Qtr[sIdx] = Qtr;
           tr.Qvr[sIdx] = Qvr; tr.Ppc[sIdx] = Ppc;
           sIdx++;
@@ -483,7 +810,7 @@ function simulate(path) {
   let grad = 0, fwd = 0, regurg = 0, tMin = 0, PlaAtSys = 0, gradMV = 0, mvSum = 0, mvN = 0;
   let QaoMax = 0, QmvMax = 0, QmrMax = 0, iQmax = 0, iOpen = -1, iClose = -1, mrGradMax = 0;
   let shunt = 0, vAsdMax = 0, vAsdMin = 0, vVsdMax = 0;
-  const dtS = CYCLE / NSAMPLE;
+  const dtS = cycT / NSAMPLE;
   for (let i = 0; i < NSAMPLE; i++) {
     if (tr.Vlv[i] > EDV) EDV = tr.Vlv[i];
     if (tr.Vlv[i] < ESV) { ESV = tr.Vlv[i]; tMin = tr.phase[i]; }
@@ -514,40 +841,52 @@ function simulate(path) {
     // transmitral gradient (mmHg): peak and diastolic mean, and the Hakki valve area
     // (cardiac output L/min over sqrt(mean gradient)) — what continuity/PHT would report
     gradientMV: gradMV, meanGradMV: mvN ? mvSum / mvN : 0,
-    mvaHakki: mvN && mvSum > 0 ? (SV * 60 / CYCLE / 1000) / Math.sqrt(mvSum / mvN) : 0,
+    mvaHakki: mvN && mvSum > 0 ? (SV * 60 / cycT / 1000) / Math.sqrt(mvSum / mvN) : 0,
     forwardSV: fwd, regurgVol: regurg,
     regurgFraction: SV > 0 ? clamp(regurg / SV, 0, 1) : 0,
     tMinVol: tMin,
     QaoMax, QmvMax, QmrMax, // per-cycle peak flows, for jet-velocity envelopes
     mrGradMax,              // peak LV-LA gradient while regurgitating (MR jet Vmax = sqrt(/4))
     accelTime: (iQmax - iOpen) * dtS, ejectTime: (iClose - iOpen + 1) * dtS,
+    aAt: p.aAt,             // LA activation peak (phase): times the drawn atrium's booster
     Pla0: p.Pla0,           // chronic LA pressure (drives LA remodelling in the anatomy)
     // intracardiac shunt (ASD / VSD): net left-to-right volume per beat, the
     // pulmonary-to-systemic flow ratio and the shunt-jet velocities (m/s, + = L->R)
     shuntVol: shunt, QpQs: fwd > 0 ? (fwd + shunt) / fwd : 1,
     vAsdPeak: vAsdMax, vAsdMin, vVsdPeak: vVsdMax,
   };
-  Object.assign(sum, laMetrics(tr), inflowMetrics(tr), rightMetrics(tr, p, fwd));
+  Object.assign(sum, laMetrics(tr, tw), inflowMetrics(tr, tw), rightMetrics(tr, p, fwd, tw));
+  sum.hr = heartRate(path); sum.cycle = cycT;
   if (p.Kpc) { let v = 0; for (let i = 0; i < NSAMPLE; i++) v += tr.Vlv[i] + tr.Vla[i] + tr.Vrv[i] + tr.Vra[i]; sum.vtotMean = v / NSAMPLE; }
   // isovolumic relaxation: aortic closure to mitral opening
   if (sum.mvoPhase != null && iClose >= 0) sum.ivrt = (sum.mvoPhase * NSAMPLE - iClose - 1) * dtS;
+  // (the phases the summary reports are cardiac phases, as hemodynamics() takes)
+  if (tw.s !== 1) {
+    sum.tMinVol = phaseOfTimeS(sum.tMinVol, tw.s);
+    if (sum.mvoPhase != null) sum.mvoPhase = phaseOfTimeS(sum.mvoPhase, tw.s);
+  }
   return { tr, sum, params: p };
 }
 
 // LA pressure and volume over the cycle: mean LAP, the systolic v-wave peak, the
 // a-wave peak, and the reservoir (max), pre-atrial-contraction and minimum volumes
 // with the passive (conduit) and active (booster) emptying fractions.
-function laMetrics(tr) {
+// Phase windows of the reference cycle moved onto a case's own cycle (heartRate,
+// timeOfPhase; tw: { cyc, s }; identity at 72 bpm)
+const TW_REF = { cyc: CYCLE, s: 1 };
+const ws = (x, tw) => timeOfPhaseS(x, tw.s);
+function laMetrics(tr, tw = TW_REF) {
   let pSum = 0, vWave = 0, aWaveP = 0, vMax = -1e9, vMin = 1e9;
+  const vEnd = ws(0.56, tw), aOn = ws(0.84, tw), aEnd = ws(0.03, tw);
   for (let i = 0; i < NSAMPLE; i++) {
     const ph = tr.phase[i];
     pSum += tr.Pla[i];
-    if (ph < 0.56 && tr.Pla[i] > vWave) vWave = tr.Pla[i];
-    if ((ph >= 0.84 || ph < 0.03) && tr.Pla[i] > aWaveP) aWaveP = tr.Pla[i];
+    if (ph < vEnd && tr.Pla[i] > vWave) vWave = tr.Pla[i];
+    if ((ph >= aOn || ph < aEnd) && tr.Pla[i] > aWaveP) aWaveP = tr.Pla[i];
     if (tr.Vla[i] > vMax) vMax = tr.Vla[i];
     if (tr.Vla[i] < vMin) vMin = tr.Vla[i];
   }
-  const vPreA = tr.Vla[Math.round(0.84 * NSAMPLE)];
+  const vPreA = tr.Vla[Math.round(aOn * NSAMPLE)];
   return {
     PlaMean: pSum / NSAMPLE, PlaVWave: vWave, PlaAWave: aWaveP,
     LAVmax: vMax, LAVmin: vMin, LAVpreA: vPreA,
@@ -566,10 +905,17 @@ function laMetrics(tr) {
 // cycle the RA (transmural pressure < 0, i.e. inverted by the pericardium) and the
 // RV are collapsed.
 const RV_BUCKLE = 1.0;   // RV transmural pressure (mmHg) below which the free wall buckles
-function rightMetrics(tr, p, fwdLV) {
+// (review 12, MOT-9: the RA free wall, thinner still, buckles the same way —
+// pushed in by the pericardium once its distending pressure falls to ~1 mmHg,
+// which a relaxing atrium reaches at its smallest volume, just after its
+// contraction, against the end-diastolic peak of the pericardial pressure. Only
+// under a pericardial pressure: without one nothing pushes the wall in)
+const RA_BUCKLE = 1.0;
+function rightMetrics(tr, p, fwdLV, tw = TW_REF) {
   let RVSP = -1e9, RVEDV = -1e9, RVESV = 1e9, raSum = 0, PASP = -1e9, PADia = 1e9, paSum = 0;
-  let trGrad = 0, trVol = 0, qp = 0, raInv = 0, rvColl = 0, QtvMax = 0, raA = -1e9, raV = -1e9, RVEDP = 0;
-  const dtS = CYCLE / NSAMPLE;
+  let trGrad = 0, trVol = 0, qp = 0, raInv = 0, rvColl = 0, QtvMax = 0, QtrMax = 0, raA = -1e9, raV = -1e9, RVEDP = 0, raVmax = -1e9, raVmin = 1e9;
+  const dtS = tw.cyc / NSAMPLE;
+  const trEnd = ws(0.48, tw), aOn = ws(0.82, tw), aEnd = ws(0.03, tw), vOn = ws(0.25, tw), vEnd = ws(0.56, tw);
   for (let i = 0; i < NSAMPLE; i++) {
     const ph = tr.phase[i];
     if (tr.Prv[i] > RVSP) RVSP = tr.Prv[i];
@@ -578,19 +924,26 @@ function rightMetrics(tr, p, fwdLV) {
     raSum += tr.Pra[i]; paSum += tr.Ppa[i];
     if (tr.Ppa[i] > PASP) PASP = tr.Ppa[i];
     if (tr.Ppa[i] < PADia) PADia = tr.Ppa[i];
-    if (ph < 0.48 && tr.Prv[i] - tr.Pra[i] > trGrad) trGrad = tr.Prv[i] - tr.Pra[i];
+    if (ph < trEnd && tr.Prv[i] - tr.Pra[i] > trGrad) trGrad = tr.Prv[i] - tr.Pra[i];
     trVol += tr.Qtr[i] * dtS; qp += tr.Qpa[i] * dtS;
-    if (tr.Pra[i] - tr.Ppc[i] < 0) raInv++;
+    if (p.Ppc > 0 && tr.Pra[i] - tr.Ppc[i] < RA_BUCKLE) raInv++;
     // (the thin RV free wall has almost no bending stiffness: it is pushed in
     // once its distending pressure falls to ~1 mmHg, in early diastole)
     if (tr.Prv[i] - tr.Ppc[i] < RV_BUCKLE) rvColl++;
     if (tr.Qtv[i] > QtvMax) QtvMax = tr.Qtv[i];
-    if ((ph >= 0.82 || ph < 0.03) && tr.Pra[i] > raA) raA = tr.Pra[i];
-    if (ph >= 0.25 && ph < 0.56 && tr.Pra[i] > raV) raV = tr.Pra[i];
+    if (tr.Qtr[i] > QtrMax) QtrMax = tr.Qtr[i];
+    raVmax = Math.max(raVmax, tr.Vra[i]); raVmin = Math.min(raVmin, tr.Vra[i]);
+    if ((ph >= aOn || ph < aEnd) && tr.Pra[i] > raA) raA = tr.Pra[i];
+    if (ph >= vOn && ph < vEnd && tr.Pra[i] > raV) raV = tr.Pra[i];
   }
-  // tricuspid E (early, rapid-filling) peak flow and the tricuspid A
+  // tricuspid E (early, rapid-filling) peak flow and the tricuspid A, the peak
+  // inflow of atrial systole: from the RA's activation onset (2 widths before its
+  // peak) or phase 0.8, whichever is later — at a tachycardia the E wave is still
+  // decelerating at phase 0.8, and its tail is not the A wave (review 12, MOT-9)
   let tvE = 0, tvA = 0;
-  for (let i = 0; i < NSAMPLE; i++) { const ph = tr.phase[i]; if (ph >= 0.36 && ph < 0.75) tvE = Math.max(tvE, tr.Qtv[i]); else if (ph >= 0.8) tvA = Math.max(tvA, tr.Qtv[i]); }
+  const raOn = p.aAt - (p.raLead != null ? p.raLead : RV_TIMING.raLead) - 2 * p.raW;
+  const eOn = ws(0.36, tw), tvAOn = Math.max(ws(0.8, tw), raOn - Math.floor(raOn)), eEnd = Math.max(ws(0.75, tw), tvAOn);
+  for (let i = 0; i < NSAMPLE; i++) { const ph = tr.phase[i]; if (ph >= eOn && ph < eEnd) tvE = Math.max(tvE, tr.Qtv[i]); else if (ph >= tvAOn) tvA = Math.max(tvA, tr.Qtv[i]); }
   const RAP = raSum / NSAMPLE;
   return {
     RVSP, RVEDP, RVEDV, RVESV, RVSV: RVEDV - RVESV, RVEF: RVEDV > 0 ? (RVEDV - RVESV) / RVEDV * 100 : 0,
@@ -600,6 +953,8 @@ function rightMetrics(tr, p, fwdLV) {
     Qp: qp, QpQsRV: fwdLV > 0 ? qp / fwdLV : 1,
     Ppc: p.Ppc, raInvFrac: raInv / NSAMPLE, rvCollapseFrac: rvColl / NSAMPLE,
     QtvMax, QtvE: tvE, QtvA: tvA,
+    QtrMax, Atr: p.Atr || 0,   // peak TR flow (mL/s) and the effective regurgitant orifice (cm2): size the colour jet
+    RAVmax: raVmax, RAVmin: raVmin,   // solved RA volume range (mL)
   };
 }
 
@@ -614,12 +969,12 @@ function rightMetrics(tr, p, fwdLV) {
 //           early (steep) slope extrapolated if the A wave arrives first
 //   diastasis  lowest flow between the E and A waves as a fraction of E
 //   eaFlow  E / A peak-flow ratio; aPresent: an A-wave bump above the pre-A flow
-function inflowMetrics(tr) {
-  const dtS = CYCLE / NSAMPLE, Q = tr.Qmv;
+function inflowMetrics(tr, tw = TW_REF) {
+  const dtS = tw.cyc / NSAMPLE, Q = tr.Qmv;
   let iO = -1;
-  for (let i = Math.round(0.3 * NSAMPLE); i < NSAMPLE; i++) if (Q[i] > 0.5) { iO = i; break; }
+  for (let i = Math.round(ws(0.3, tw) * NSAMPLE); i < NSAMPLE; i++) if (Q[i] > 0.5) { iO = i; break; }
   if (iO < 0) return {};
-  const iAon = Math.round(0.86 * NSAMPLE);
+  const iAon = Math.round(ws(0.86, tw) * NSAMPLE);
   let iE = iO;
   for (let i = iO; i < iAon; i++) { if (Q[i] > Q[iE]) iE = i; else if (Q[i] < 0.7 * Q[iE]) break; }
   const E = Q[iE];
@@ -645,8 +1000,8 @@ function inflowMetrics(tr) {
   }
   // diastasis: the flow nadir between the E and A waves (up to the A-wave upstroke)
   let dMin = Infinity, q75 = 0;
-  for (let i = iE; i < Math.round(0.90 * NSAMPLE); i++) dMin = Math.min(dMin, Q[i]);
-  for (let i = Math.round(0.75 * NSAMPLE); i <= Math.round(0.82 * NSAMPLE); i++) q75 = Math.max(q75, Q[i]);
+  for (let i = iE; i < Math.round(ws(0.90, tw) * NSAMPLE); i++) dMin = Math.min(dMin, Q[i]);
+  for (let i = Math.round(ws(0.75, tw) * NSAMPLE); i <= Math.round(ws(0.82, tw) * NSAMPLE); i++) q75 = Math.max(q75, Q[i]);
   let A = 0;
   for (let i = iAon - 4; i < NSAMPLE + 8; i++) A = Math.max(A, Q[i % NSAMPLE]);
   const preA = Q[iAon - 6];
@@ -665,17 +1020,57 @@ const _cache = new Map();
 function sig(path) {
   return [path.aorticStenosis, path.lvh, path.dilated, path.mr, path.mitralStenosis,
     path.rwma ? 1 : 0, path.rvpo, path.asd, path.vsd, path.tr, path.tamponade, path._legacyLA].map((v) => (v ? 1 : 0)).join('') + ':' + gradeOf(path)
-    + ':' + (path.dilated ? dcmSeverityOf(path) : '') + ':' + (path.tamponade && path.resp ? path.resp : '');
+    + ':' + (path.dilated ? dcmSeverityOf(path) : '') + ':' + (path.tamponade && path.resp ? path.resp + (path.resp === 'mix' ? path.respW : '') : '')
+    + (heartRate(path) !== HR_REF ? ':hr' + heartRate(path) : '');
 }
 function solved(path) {
-  const key = sig(path);
+  const key = sig(path) + rwmaSig(path);
   let r = _cache.get(key);
   if (!r) {
-    r = simulate(path);
+    // (a blend between the expiratory and inspiratory states: respPath)
+    r = path.tamponade && path.resp === 'mix'
+      ? blendSolved(solved({ ...path, resp: 'exp', respW: undefined }), solved({ ...path, resp: 'insp', respW: undefined }), path.respW)
+      : simulate(path);
     _cache.set(key, r);
     if (path.tamponade && !path.resp) Object.assign(r.sum, respMetrics(path));
   }
   return r;
+}
+
+// ---- respiration (tamponade) ------------------------------------------------
+// One breath spans three beats — expiration, inspiration, expiration — on the
+// spectral display (echo.js specBeats) and, counted from playback, on the
+// B-mode (breathOf: the respiratory phase of beat n). Each respiratory phase is
+// its own solved circulation; respPath(path, w) gives the one path object per
+// state of a case, w = the inspiratory share (0 expiration, 1 inspiration, or
+// 'exp' / 'insp'), and in between a blend of the two solved states ('mix'),
+// quantised to RESP_STEPS so each step's per-path caches stay warm: the B-mode
+// carries a beat's state into the next across diastole instead of jumping at
+// the QRS.
+const BREATH = ['exp', 'insp', 'exp'];
+export function breathOf(n) { return BREATH[((n % 3) + 3) % 3]; }
+const RESP_STEPS = 12;
+const _respPaths = new WeakMap();
+export function respPath(path, w) {
+  let r = _respPaths.get(path);
+  if (!r) { r = []; _respPaths.set(path, r); }
+  const x = w === 'insp' ? 1 : w === 'exp' ? 0 : clamp(+w || 0, 0, 1);
+  const k = Math.round(x * RESP_STEPS);
+  if (!r[k]) r[k] = k === 0 ? { ...path, resp: 'exp' } : k === RESP_STEPS ? { ...path, resp: 'insp' } : { ...path, resp: 'mix', respW: k / RESP_STEPS };
+  return r[k];
+}
+function blendSolved(a, b, w) {
+  const tr = {}, sum = {};
+  for (const k of Object.keys(a.tr)) {
+    const x = a.tr[k], y = b.tr[k], z = new Float64Array(x.length);
+    for (let i = 0; i < x.length; i++) z[i] = x[i] + (y[i] - x[i]) * w;
+    tr[k] = z;
+  }
+  for (const k of Object.keys(a.sum)) {
+    const x = a.sum[k], y = b.sum[k];
+    sum[k] = typeof x === 'number' && typeof y === 'number' ? x + (y - x) * w : w < 0.5 ? x : y;
+  }
+  return { tr, sum, params: w < 0.5 ? a.params : b.params };
 }
 
 // Tamponade: respiratory variation of the mitral and tricuspid E waves, from the
@@ -694,6 +1089,7 @@ function respMetrics(path) {
 const _state = {
   phase: 0, Plv: 0, Pao: 0, Vlv: 0, Pla: 0, Qmv: 0, Qao: 0, Qmr: 0, vAsd: 0, vVsd: 0, Qasd: 0, Qvsd: 0,
   Prv: 0, Pra: 0, Ppa: 0, Ppc: 0, Vrv: 0, Vra: 0, Qtv: 0, Qpa: 0, Qtr: 0,
+  Qvr: 0, Qpv: 0, Vla: 0,
   rho: 1, kv: 0, sum: null,
 };
 
@@ -702,7 +1098,8 @@ const _state = {
 // the geometry); `kv` = (EDV−Vlv)/(EDV−ESV) normalised contraction fraction.
 export function hemodynamics(phase, path = {}) {
   const { tr, sum } = solved(path);
-  const x = ((phase % 1) + 1) % 1 * NSAMPLE;
+  // (a case on its own cycle stores its trace by time: timeOfPhase)
+  const x = ((timeOfPhase(phase, path) % 1) + 1) % 1 * NSAMPLE;
   const i0 = Math.floor(x) % NSAMPLE;
   const i1 = (i0 + 1) % NSAMPLE;
   const f = x - Math.floor(x);
@@ -716,6 +1113,9 @@ export function hemodynamics(phase, path = {}) {
   _state.Vrv = lerp(tr.Vrv); _state.Vra = lerp(tr.Vra);
   _state.Qtv = lerp(tr.Qtv); _state.Qpa = lerp(tr.Qpa); _state.Qtr = lerp(tr.Qtr);
   _state.Qasd = lerp(tr.Qasd); _state.Qvsd = lerp(tr.Qvsd);
+  // solved venous inflow: caval (systemic veins -> RA) and pulmonary-venous
+  // (veins -> LA) flow, mL/s (+ toward the atrium), for the venous Doppler traces
+  _state.Qvr = lerp(tr.Qvr); _state.Qpv = lerp(tr.Qpv); _state.Vla = lerp(tr.Vla);
   _state.vAsd = shuntV(lerp(tr.dPasd)); _state.vVsd = shuntV(lerp(tr.dPvsd));
   _state.rho = sum.EDV > 0 ? clamp(_state.Vlv / sum.EDV, 0.05, 1) : 1;
   _state.kv = sum.SV > 0 ? clamp((sum.EDV - _state.Vlv) / sum.SV, 0, 1.2) : 0;
@@ -733,7 +1133,7 @@ export function hemoSummary(path = {}) { return solved(path).sum; }
 // moves; a failing DCM atrium loses its booster). {c: 1, b: 1} for a normal heart.
 const _laCache = new Map();
 export function laPhasic(path = {}) {
-  const key = sig(path);
+  const key = sig(path) + rwmaSig(path);
   let r = _laCache.get(key);
   if (!r) {
     // (the remodelled-LA lesions are calibrated against the earlier normal LA,
@@ -757,11 +1157,12 @@ let _eaPath = null, _eaVal;
 export function eaRatio(path = {}) {
   if (path === _eaPath) return _eaVal;
   const { tr } = solved(path);
+  const tw = { cyc: cycleOf(path), s: timeScale(path) }, eOn = ws(0.36, tw), eEnd = ws(0.72, tw), aOn = ws(0.80, tw);
   let e = 0, a = 0;
   for (let i = 0; i < NSAMPLE; i++) {
     const ph = i / NSAMPLE, q = tr.Qmv[i];
-    if (ph >= 0.36 && ph < 0.72) { if (q > e) e = q; }
-    else if (ph >= 0.80) { if (q > a) a = q; }
+    if (ph >= eOn && ph < eEnd) { if (q > e) e = q; }
+    else if (ph >= aOn) { if (q > a) a = q; }
   }
   _eaVal = a > 0 ? e / a : null;
   _eaPath = path;
@@ -775,7 +1176,7 @@ export function pvLoop(path = {}, n = 120) {
   const out = [];
   for (let i = 0; i < n; i++) {
     const idx = Math.round(i * NSAMPLE / n) % NSAMPLE;
-    out.push({ V: tr.Vlv[idx], P: tr.Plv[idx], phase: tr.phase[idx] });
+    out.push({ V: tr.Vlv[idx], P: tr.Plv[idx], phase: phaseOfTime(tr.phase[idx], path) });
   }
   return out;
 }

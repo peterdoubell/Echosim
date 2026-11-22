@@ -10,13 +10,17 @@ import { buildReport, reportText, fillTemplate, TEMPLATES, TEMPLATE_FOR, DEFAULT
 import { initFeedback } from './feedback.js';
 import { initPathway } from './pathway-ui.js';
 import { Heart3D } from './heart3d.js';
-import { EchoView, colourDefault, dopplerColor } from './echo.js';
+import { EchoView, colourDefault, dopplerColor, teeSiteChoices, MMODE_LINES, TDI_SITES } from './echo.js';
+import { setIvcBreath } from './anatomy.js';
 import { MeasureTool } from './measure.js';
 import { vadd, vsub, vscale, vdot, vcross, norm, vrot } from './mathutils.js';
-import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, makeProbe, teeManipulate, teeOmni } from './views.js';
+import { TTE_VIEWS, EXTRA_VIEWS, TEE_VIEWS, makeProbe, teeManipulate, teeOmni, sectorHalfOf, nearestTeePreset } from './views.js';
 import { Heartbeat, vcgToLeads, LEAD_NAMES, PH_AVO, PH_AVC, PH_MVO, PH_ATR } from './electrophysiology.js';
 import { RWMA_SCENARIOS, DCM_SEVERITIES } from './scenarios.js';
 import { PlaybackClock } from './playback-clock.js';
+// (a case's own heart rate, the tamponade breath and swinging heart)
+import { hemodynamics, heartRate, breathPath, swingOffset, TAMPONADE_HR } from './cardiac-model.js';
+import { colourPreset } from './echo.js';
 
 // ---------------------------------------------------------------------------
 // Standard echocardiographic windows: derived from the anatomy landmarks in
@@ -31,14 +35,16 @@ const VIEW_LABEL = {
   PSAX_AV: 'PSAX-AV', MELAA: 'ME LAA', PSAX_MV: 'PSAX-MV', RVIT: 'RV inflow', SC_IVC: 'Subcostal IVC',
   SSN: 'Suprasternal', ME2C: 'ME 2C', MEAVSAX: 'ME AV SAX', MEBICAVAL: 'ME bicaval', MERVIO: 'ME RV in-out',
   DESCAO: 'Desc Ao SAX', MEAVLAX: 'ME AV LAX', MECOMM: 'ME commissural', TG2C: 'TG 2C', TGLAX: 'TG LAX',
-  DTG5C: 'Deep TG 5C', DESCAOLAX: 'Desc Ao LAX',
+  DTG5C: 'Deep TG 5C', DESCAOLAX: 'Desc Ao LAX', MEASCSAX: 'ME Asc SAX', MEASCLAX: 'ME Asc LAX',
+  TGBSAX: 'TG basal SAX', TGRVIN: 'TG RV inflow', UEARCHLAX: 'UE arch LAX', UEARCHSAX: 'UE arch SAX',
 };
 
 // Transesophageal (TEE) window set (views.js): a higher-frequency probe in the
 // oesophagus directly behind the left atrium, so the atria sit in the near field.
-const TEE_CAM = { ME4C: 'A4C', MELAX: 'PLAX', TGSAX: 'PSAX', MELAA: 'A2C', ME2C: 'A2C', MEAVSAX: 'PSAX_AV',
-  MEBICAVAL: 'SUBCOSTAL', MERVIO: 'PSAX_AV', DESCAO: 'PSAX', MEAVLAX: 'PLAX', MECOMM: 'A2C', TG2C: 'A2C',
-  TGLAX: 'PLAX', DTG5C: 'A4C', DESCAOLAX: 'PSAX' }; // reuse a sensible 3D camera
+// 3D camera: every TEE view uses the oblique left-posterior 'TEE' camera off its
+// imaging plane (thorax3d cameraDirForPlane), so the probe in the oesophagus
+// behind the LA and its fan face the viewer
+const TEE_CAM = Object.fromEntries(Object.keys(TEE_VIEWS).map((k) => [k, 'TEE']));
 
 const PATHOLOGY = {
   normal:    { flags: {}, view: 'PLAX', name: 'Normal heart',
@@ -55,8 +61,9 @@ const PATHOLOGY = {
     text: 'After a myocardial infarction one territory stops contracting. <span class="cue">Watch the <b>septal</b> wall fail to thicken and move inward in systole while the other walls contract normally — regional, not global, dysfunction. Overall EF is reduced.</span>' },
   effusion: { flags: { effusion: true }, view: 'PLAX', name: 'Pericardial effusion',
     text: 'Fluid collects in the pericardial sac. <span class="cue">An echo-free (black) space surrounding the heart, typically first seen posteriorly/inferiorly.</span>' },
-  tamponade: { flags: { effusion: true, tamponade: true }, view: 'A4C', name: 'Cardiac tamponade',
-    text: 'The effusion is under pressure: the pericardial pressure exceeds the right heart\'s filling pressure. <span class="cue">The RA free wall <b>inverts</b> from late diastole into systole and the RV free wall is pushed in in early diastole; the IVC is plethoric; mitral and tricuspid inflow swing in opposite directions with respiration (PW shows several breaths).</span>' },
+  // (hr: the sinus tachycardia its circulation is solved at; loading the case sets the rate)
+  tamponade: { flags: { effusion: true, tamponade: true, hr: TAMPONADE_HR }, view: 'A4C', name: 'Cardiac tamponade',
+    text: 'The effusion is under pressure: the pericardial pressure exceeds the right heart\'s filling pressure. <span class="cue">Sinus tachycardia. The RA free wall <b>inverts</b> from the end of atrial contraction into systole and the RV free wall is pushed in in early diastole; the IVC is plethoric. With each breath the septum swings toward the LV in inspiration and back in expiration, and mitral and tricuspid inflow swing in opposite directions (PW shows a breath of three beats); the heart swings in the fluid, with alternating QRS voltage (electrical alternans).</span>' },
   vsd: { flags: { vsd: true }, view: 'A4C', name: 'Ventricular septal defect',
     text: 'A hole in the interventricular septum shunts blood LV → RV. <span class="cue">A turbulent systolic jet crossing the septum at high velocity (left-to-right shunt).</span>' },
   asd: { flags: { asd: true }, view: 'SUBCOSTAL', name: 'Atrial septal defect',
@@ -76,7 +83,7 @@ const CHECKS = {
   dcm:      { look: ['Enlarged rounded LV', 'Little wall thickening', 'Low EF'], hint: 'Compare LVIDd and EF in Measurements against a normal heart.' },
   rwma:     { look: ['One akinetic wall segment', 'Thinned, bright scar', 'Normal thickening elsewhere', 'Reduced global EF'], hint: 'Pause in systole and watch the septum fail to thicken while the lateral wall does.' },
   effusion: { look: ['Echo-free rim around the heart', 'Largest posteriorly', 'Anterior to the descending aorta'], hint: 'Look behind the LV posterior wall for the dependent black crescent.' },
-  tamponade: { look: ['RA free-wall inversion (> 1/3 of the cycle)', 'RV early-diastolic collapse', 'Plethoric IVC', 'Mitral E falls > 25% in inspiration, tricuspid E rises > 40%'], hint: 'A4C: scrub through late diastole and early systole to catch the RA wall folding in; then PW the mitral and tricuspid inflow over several breaths.' },
+  tamponade: { look: ['Sinus tachycardia', 'RA free-wall inversion (> 1/3 of the cycle)', 'RV early-diastolic collapse', 'Plethoric IVC', 'Inspiratory septal shift toward the LV', 'Mitral E falls > 25% in inspiration, tricuspid E rises > 40%', 'Swinging heart with electrical alternans'], hint: 'A4C: scrub through late diastole and early systole to catch the RA wall folding in; watch the septum and the RV across a breath; then PW the mitral and tricuspid inflow over several breaths.' },
   vsd:      { look: ['Interventricular septum', 'Systolic jet LV→RV', 'Turbulent mosaic'], hint: 'Centre the septum and pause in systole to catch the trans-septal jet.' },
   asd:      { look: ['Interatrial septum', 'Flow LA→RA', 'Dilated right heart'], hint: 'Use the subcostal window where the atrial septum lies across the beam.' },
   tr:       { look: ['Tricuspid valve', 'Systolic jet into the RA', 'Peak jet velocity → PA pressure'], hint: 'Peak TR velocity estimates pulmonary pressures — read it off the trace.' },
@@ -101,6 +108,8 @@ const state = {
   phase: 0,
   playing: true,
   hr: 72,
+  beat: 0,         // the playing beat's number (the rhythm engine's count)
+  caseHr: null,    // the heart rate a loaded case brought with it (tamponade)
   az: 0, tilt: 0, slide: 0,
   // TEE probe manipulation (views.js teeManipulate): omniplane angle (null = the
   // view's own), advance (+) / withdraw (cm), shaft turn and tip flexion (deg)
@@ -329,12 +338,31 @@ function drawTwelveLead() {
 }
 
 // ---------------------------------------------------------------------------
+// The beat's geometry. Tamponade (review 12, MOT-2 / PAT-9): the B-mode breathes
+// on the spectral display's schedule — a breath of three beats, expiration,
+// inspiration, expiration, counted from playback — each beat drawn from its
+// respiratory phase's solved circulation, blended into the next across diastole
+// (breathPath), and the heart swings in the effusion with a two-beat period
+// (swingOffset), which the ECG's alternans follows. Other cases: the case's own
+// circulation.
+// ---------------------------------------------------------------------------
+function beatGeometry(phase, beat) {
+  const G = geometryAt(phase, breathPath(state.path, beat, phase));
+  const sw = swingOffset(state.path, beat, phase);
+  if (sw) G.swing = sw;
+  G.beat = beat;   // (the spectral display's cursor marks this beat of the breath)
+  return G;
+}
+
+// ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
 let lastBannerT = 0;   // throttle for the probe-banner frame-rate readout
 // Treat hidden tabs as suspended playback rather than queuing stale images or
 // fast-forwarding a lesson when the learner comes back.
 document.addEventListener('visibilitychange', () => { state.lastT = performance.now(); });
+// respiratory clock (seconds of running time) and the time of the last sniff
+const resp = { t: 0, sniffAt: null };
 function loop(now) {
   // rAF's timestamp can predate other expensive callbacks in the same frame.
   // Read the clock here, and never clamp away elapsed foreground time.
@@ -349,17 +377,32 @@ function loop(now) {
     // (electromechanical coupling), so an irregular rhythm (AF, PVC) makes the
     // heart beat — and the echo move — irregularly.
     playback.advance(dt);
-    state.phase = heart.mechanical().phase;
+    const mech = heart.mechanical();
+    state.phase = mech.phase;
+    state.beat = mech.beat;
     const scrub = document.getElementById('scrub');
     scrub.value = Math.round(state.phase * 1000);
     scrub.setAttribute('aria-valuetext', Math.round(state.phase * 100) + '% — ' + phaseName(state.phase));
   }
 
-  const G = geometryAt(state.phase, state.path);
+  // Respiration: quiet breathing (a 4 s cycle) and, on the Sniff button, one
+  // brisk inspiration over ~1.6 s. Only the IVC's calibre follows it.
+  if (advancing) resp.t += dt;
+  {
+    const quiet = 0.25 * 0.5 * (1 - Math.cos(2 * Math.PI * resp.t / 4));
+    let sn = 0;
+    if (resp.sniffAt != null) {
+      const x = (resp.t - resp.sniffAt - 0.8) / 0.62, x2 = x * x;
+      sn = Math.exp(-x2 * x2);
+      if (resp.t - resp.sniffAt > 1.8) resp.sniffAt = null;
+    }
+    setIvcBreath(Math.max(quiet, sn));
+  }
+  const G = beatGeometry(state.phase, state.beat);
   const probe = effectiveProbe(G.A);
 
   echo.depthCm = state.depthCm || 17;
-  heart3d.updateProbe(probe, echo.sectorHalf, echo.depthCm);
+  heart3d.updateProbe(probe, echo.sectorHalf, echo.depthCm, !!TEE_VIEWS[state.viewName]);
   // Particle advection can use a bounded step without altering the heart clock.
   heart3d.update(G, state.path, probe, advancing ? Math.min(dt, 0.05) : 0);
   echo.rrSec = 60 / (state.hr || 72);
@@ -502,8 +545,9 @@ function drawPvLoop(G) {
   pvCtx.strokeStyle = '#c0392b'; pvCtx.lineWidth = 1.8; pvCtx.beginPath();
   _pv.pts.forEach((p, i) => { const px = x(p.V), py = y(p.P); i ? pvCtx.lineTo(px, py) : pvCtx.moveTo(px, py); });
   pvCtx.closePath(); pvCtx.stroke();
-  // operating-point marker at the current phase (from the live per-frame snapshot)
-  const hd = G && G.hemo;
+  // operating-point marker at the current phase (from the live per-frame snapshot;
+  // a tamponade beat's own breath state sits off the case's loop: read the case)
+  const hd = G && G.path !== state.path && G.hemo ? hemodynamics(state.phase, state.path) : G && G.hemo;
   if (hd && hd.Vlv != null && hd.Plv != null) {
     pvCtx.fillStyle = '#39c0e8';
     pvCtx.beginPath(); pvCtx.arc(x(hd.Vlv), y(hd.Plv), 3.4, 0, Math.PI * 2); pvCtx.fill();
@@ -619,7 +663,7 @@ function drawBullseye() {
   bullCtx.fillText('ANT', cx, cy - R + 6); bullCtx.fillText('INF', cx, cy + R - 6);
   bullCtx.textAlign = 'left'; bullCtx.fillText('SEPT', 3, cy); bullCtx.textAlign = 'right'; bullCtx.fillText('LAT', W - 3, cy);
   // readouts
-  setText('sGls', Math.round(gls) + ' %');
+  setText('sGls', gls.toFixed(1) + ' %');            // the same value as the panel's GLS
   const worst = segments.reduce((m, s) => (s.strain > m.strain ? s : m), segments[0]);
   const abn = worst.strain > -12;
   setText('sPattern', !abn ? 'normal / uniform' : (state.path.dilated ? 'global impairment' : worst.name + ' loss'));
@@ -661,26 +705,29 @@ function publishMeasure(r) {
 function setView(name) {
   state.viewName = name;
   if (echo) echo.viewName = name; // let the echo label whitelist know the current view
+  if (echo) queueMicrotask(() => { if (typeof refreshTrace === 'function') refreshTrace(); });
   const tee = TEE_VIEWS[name];
   if (tee) {
     state.baseProbe = tee.probe();
     state.depthCm = tee.depth; echo.depthCm = tee.depth;
     echo.freqMHz = 5.5;                 // TEE probes run higher-frequency → finer PSF
+    echo.sectorHalf = sectorHalfOf(tee); // multiplane TEE: a 90 deg sector
     echo.nearFieldCm = 0.3;             // only the oesophageal wall lies in front
     // small high-frequency TEE aperture: a thin slab focused in the near field
     echo.elevFocus = 4.0; echo.elevMin = 0.05; echo.elevDiv = 0.015;
     setRange('depth', tee.depth, 'depthOut', String(tee.depth), tee.depth + ' cm');
-    heart3d.setCameraForView(TEE_CAM[name] || 'A4C');
+    heart3d.setCameraForView(TEE_CAM[name] || 'TEE', state.baseProbe, true);
   } else {
     state.baseProbe = (VIEWS[name] || EXTRA_VIEWS[name].probe)();
     echo.freqMHz = 2.7;                 // standard transthoracic probe
+    echo.sectorHalf = sectorHalfOf(null);
     echo.elevFocus = 8.0; echo.elevMin = 0.09; echo.elevDiv = 0.025;
     // chest wall (parasternal / apical) or abdominal wall (subcostal) under the probe
     echo.nearFieldCm = name === 'SUBCOSTAL' ? 1.6 : /^A\dC$/.test(name) ? 1.4 : 2.0;
     const d = viewDepth(name);          // fill the FOV per view
     state.depthCm = d; echo.depthCm = d;
     setRange('depth', d, 'depthOut', String(d), d + ' cm');
-    heart3d.setCameraForView(name);
+    heart3d.setCameraForView(name, state.baseProbe, false);
   }
   state.az = 0; state.tilt = 0; state.slide = 0;
   state.tee = { omni: null, adv: 0, rot: 0, flex: 0 };
@@ -691,6 +738,7 @@ function setView(name) {
     setRange('adv', 0, 'advOut', '0', '0 cm'); setRange('rot', 0, 'rotOut', '0°', '0°'); setRange('flex', 0, 'flexOut', '0°', '0°');
     const ctl = document.getElementById('teeProbeCtl');
     if (ctl) ctl.classList.toggle('hidden', !tee);
+    setTeeSites(tee ? name : null);
   }
   setRange('az', 0, 'azOut', '0°', '0°');
   setRange('tilt', 0, 'tiltOut', '0°', '0°');
@@ -714,6 +762,21 @@ function applyColourDefault(name) {
   echo.colorOn = on;
   const c = document.getElementById('colorOn');
   if (c) c.checked = on;
+  applyColourPreset(name, hidden);
+}
+// The colour scale and box a case opens with (colourPreset: a narrowed box and a
+// ~45 cm/s scale for an ASD shunt study). Applied when the preset changes (a new
+// case), so the learner's own Nyquist setting stays as they move between views;
+// a hidden-diagnosis case keeps the standard one, which gives nothing away.
+let lastColourPreset = null;
+function applyColourPreset(name, hidden) {
+  const pre = colourPreset(name, hidden ? {} : state.path || {});
+  const sig = pre.nyquist + '/' + pre.box;
+  if (sig === lastColourPreset) return;
+  lastColourPreset = sig;
+  echo.nyquist = pre.nyquist;
+  echo.cboxSize = pre.box;
+  setRange('nyq', pre.nyquist, 'nyqOut', pre.nyquist.toFixed(2), pre.nyquist + ' m/s');
 }
 
 // Scanner-style probe banner. Real machines annotate the active imaging mode on
@@ -794,9 +857,21 @@ function syncScenarioControls(key) {
   }
   if (isDcm) dcmSelect.value = state.path.dcmSeverity || 'severe';
 }
+// set the heart rate (control, readouts, rhythm engine)
+function setHeartRate(hr) {
+  state.hr = hr;
+  heart.setHR(hr);
+  setRange('hr', hr, 'hrOut', String(hr), hr + ' bpm');
+  const ro = document.getElementById('hrReadout'); if (ro) ro.textContent = hr + ' bpm';
+}
 function syncCaseModel() {
   heart3d.setPathology(state.path);
   heart.setPathology(state.path);
+  // a case solved at its own heart rate (tamponade's sinus tachycardia) brings
+  // that rate with it; leaving such a case restores the default
+  const caseHr = state.path.hr || (heartRate(state.path) !== 72 ? heartRate(state.path) : null);
+  if (caseHr || state.caseHr) setHeartRate(caseHr || 72);
+  state.caseHr = caseHr;
   // Repaint the retained beat history with the new morphology, including when
   // paused, without moving the shared clock or mixing two different regions.
   vcgHead = vcgFilled = 0;
@@ -935,10 +1010,32 @@ const bind = (id, outId, fn, suffix = '', unit) => {
     e.target.setAttribute('aria-valuetext', unit != null ? e.target.value + unit : disp);
   });
 };
+// TEE manipulation away from the view's preset: omniplane angle (the slider reads
+// whole degrees), advance / withdraw, turn or flex
+function teeModified() {
+  if (!TEE_VIEWS[state.viewName]) return false;
+  const tm = state.tee, om0 = Math.round(Math.min(180, Math.max(0, teeOmni(state.baseProbe))));
+  return (tm.omni != null && Math.abs(tm.omni - om0) >= 1) || !!tm.adv || !!tm.rot || !!tm.flex;
+}
+// the on-image view tag: the preset's name, or for a manipulated TEE probe the
+// live omniplane angle and the preset it now matches (one probe: the ME4C turned
+// to ~60 deg is the ME commissural), else '<view> → omni N°, modified'
+function updateViewTag() {
+  const t = document.getElementById('viewTag');
+  if (!t) return;
+  const name = state.viewName, lab = VIEW_LABEL[name] || name;
+  if (!teeModified()) { t.textContent = lab; return; }
+  const p = effectiveProbe(null), om = Math.round(((teeOmni(p) % 180) + 180) % 180);
+  const near = nearestTeePreset(p);
+  t.textContent = near.match && near.name !== name
+    ? `${VIEW_LABEL[near.name] || near.name} · omni ${om}°`
+    : `${lab} → omni ${om}°, modified`;
+}
 function updatePlaneFlag() {
-  const modified = !!(state.az || state.tilt || state.slide);
+  const modified = !!(state.az || state.tilt || state.slide) || teeModified();
   const f = document.getElementById('planeFlag');
   if (f) f.textContent = modified ? '• modified' : '';
+  updateViewTag();
   // the reset affordance reflects whether the plane has actually been moved
   const reset = document.getElementById('resetPlane');
   if (reset) { reset.disabled = !modified; reset.classList.toggle('muted', !modified); }
@@ -948,15 +1045,72 @@ bind('tilt', 'tiltOut', (v) => { state.tilt = v; updatePlaneFlag(); }, '°', '°
 bind('slide', 'slideOut', (v) => { state.slide = v; updatePlaneFlag(); }, '', ' cm');
 bind('depth', 'depthOut', (v) => (state.depthCm = v), '', ' cm');
 // TEE probe: omniplane angle, advance / withdraw (slider in mm), turn and flex
-bind('omni', 'omniOut', (v) => { state.tee.omni = v; }, '°', '°');
+bind('omni', 'omniOut', (v) => { state.tee.omni = v; updatePlaneFlag(); }, '°', '°');
 document.getElementById('adv').addEventListener('input', (e) => {
   state.tee.adv = +e.target.value / 10;
   const t = state.tee.adv.toFixed(1);
   document.getElementById('advOut').textContent = t;
   e.target.setAttribute('aria-valuetext', t + ' cm');
+  updatePlaneFlag();
 });
-bind('rot', 'rotOut', (v) => { state.tee.rot = v; }, '°', '°');
-bind('flex', 'flexOut', (v) => { state.tee.flex = v; }, '°', '°');
+bind('rot', 'rotOut', (v) => { state.tee.rot = v; updatePlaneFlag(); }, '°', '°');
+bind('flex', 'flexOut', (v) => { state.tee.flex = v; updatePlaneFlag(); }, '°', '°');
+// TEE spectral site: the view's standard trace ('' = dopplerDefault) or another
+// site this TEE view records (pulmonary-vein / LAA PW from the ME LAA, LVOT PW and
+// AV CW from the deep TG 5C), taken with the beam angled to its flow
+function setTeeSites(view) {
+  const sel = document.getElementById('teeSite'), row = document.getElementById('teeSiteRow');
+  const list = view ? teeSiteChoices(view) : [];
+  if (sel) {
+    sel.innerHTML = '';
+    const o0 = document.createElement('option'); o0.value = ''; o0.textContent = 'Standard site'; sel.appendChild(o0);
+    for (const c of list) {
+      const o = document.createElement('option'); o.value = c.key;
+      o.textContent = c.name + (/\b(PW|CW)\b/.test(c.name) || !c.mode ? '' : ' ' + c.mode);
+      sel.appendChild(o);
+    }
+    sel.value = '';
+  }
+  if (row) row.classList.toggle('hidden', !list.length);
+  pickTeeSite(null);
+}
+function pickTeeSite(k) {
+  echo.dopplerSite = k; echo.dopplerAlign = !!k;
+  const lab = document.getElementById('spLabel'), sel = document.getElementById('teeSite');
+  const name = k && sel && sel.selectedOptions[0] ? sel.selectedOptions[0].textContent : null;
+  if (lab) lab.textContent = `Spectral Doppler (${name || 'standard site for the view'} · 1 cardiac cycle)`;
+}
+document.getElementById('teeSite')?.addEventListener('change', (e) => pickTeeSite(e.target.value || null));
+// Trace panel: spectral Doppler, M-mode or tissue Doppler. The second selector
+// lists the M-mode lines of the view (or the tissue Doppler sites).
+function refreshTrace() {
+  const mode = document.getElementById('traceMode'), sel = document.getElementById('traceLine'), cv = document.getElementById('spectral');
+  if (!mode || !sel) return;
+  const m = mode.value, list = m === 'mmode' ? (MMODE_LINES[state.viewName] || [['beam', 'Central beam']]) : m === 'tdi' ? TDI_SITES : [];
+  const keep = sel.value;
+  sel.innerHTML = '';
+  for (const [k, name] of list) { const o = document.createElement('option'); o.value = k; o.textContent = name; sel.appendChild(o); }
+  if (list.some((l) => l[0] === keep)) sel.value = keep;
+  sel.classList.toggle('hidden', !list.length);
+  echo.traceMode = m === 'doppler' ? null : m;
+  echo.mmodeKey = m === 'mmode' ? sel.value : null;
+  echo.tdiSite = m === 'tdi' ? sel.value : null;
+  echo.mmodeCal = [];
+  echo.mmodeData = null; echo.tdiData = null;      // (stale readouts of the previous line)
+  if (cv) cv.classList.toggle('mm-cal', m === 'mmode');
+  const lab = document.getElementById('spLabel');
+  if (lab && m !== 'doppler') lab.textContent = m === 'mmode' ? 'M-mode (depth against time · click two points on the trace to measure)' : 'Tissue Doppler of the annulus (apical four-chamber view · 2 cardiac cycles)';
+  else if (lab) pickTeeSite(echo.dopplerSite || null);
+}
+document.getElementById('traceMode')?.addEventListener('change', refreshTrace);
+document.getElementById('traceLine')?.addEventListener('change', refreshTrace);
+document.getElementById('sniffBtn')?.addEventListener('click', () => { resp.sniffAt = resp.t; });
+document.getElementById('spectral')?.addEventListener('click', (e) => {
+  if (echo.traceMode !== 'mmode') return;
+  const cv = e.currentTarget, r = cv.getBoundingClientRect();
+  const q = { x: (e.clientX - r.left) * cv.width / r.width, y: (e.clientY - r.top) * cv.height / r.height };
+  echo.mmodeCal = (echo.mmodeCal || []).length >= 2 ? [q] : [...(echo.mmodeCal || []), q];
+});
 bind('gain', 'gainOut', (v) => (echo.gain = v));
 bind('nyq', 'nyqOut', (v) => (echo.nyquist = v), '', ' m/s');
 bind('pers', 'persOut', (v) => (echo.persistence = v));
@@ -999,11 +1153,8 @@ document.getElementById('resetPlane').addEventListener('click', () => { setView(
 // Reset all — restore gain, nyquist, depth, HR, plane offsets and toggles to defaults
 const DEFAULTS = { hr: 72, depth: 15, gain: 1.0, nyq: 0.62 };
 function resetAll() {
-  // heart rate
-  state.hr = DEFAULTS.hr;
-  heart.setHR(state.hr);
-  setRange('hr', DEFAULTS.hr, 'hrOut', String(DEFAULTS.hr), DEFAULTS.hr + ' bpm');
-  document.getElementById('hrReadout').textContent = DEFAULTS.hr + ' bpm';
+  // heart rate (a case solved at its own rate — tamponade — resets to that rate)
+  setHeartRate(state.caseHr || DEFAULTS.hr);
   // imaging — depth is view-appropriate so the heart fills the field of view
   const dep = viewDepth(state.viewName);
   state.depthCm = dep; echo.depthCm = dep;
@@ -1012,6 +1163,7 @@ function resetAll() {
   setRange('gain', DEFAULTS.gain, 'gainOut', DEFAULTS.gain.toFixed(1), DEFAULTS.gain.toFixed(1));
   echo.nyquist = DEFAULTS.nyq;
   setRange('nyq', DEFAULTS.nyq, 'nyqOut', DEFAULTS.nyq.toFixed(2), DEFAULTS.nyq + ' m/s');
+  lastColourPreset = null;           // (setView below re-applies the case's colour preset)
   // toggles back on
   // harmonic imaging is off by default (fundamental), unlike the toggles below
   const harm = document.getElementById('harmonicOn');
@@ -1371,7 +1523,7 @@ function lockForCase(on) {
       '<div class="quiz"><b>🎓 Pathway case</b><br>Answer the question in the pathway. The diagnosis stays hidden until you answer.</div>';
   }
 }
-function simLoad({ path: key = 'normal', grade = 'severe', view, rwma, dcmSeverity, hidden = false, hideView = false } = {}) {
+function simLoad({ path: key = 'normal', grade = 'severe', view, rwma, dcmSeverity, hidden = false, hideView = false, trace, line } = {}) {
   if (challenge.active) challengeBtn.click();
   if (hidden && !pathwayCase.prev) pathwayCase.prev = { key: state.pathKey || 'normal', view: state.viewName, grade: state.path.grade || 'severe', rwma: state.path.rwma, dcmSeverity: state.path.dcmSeverity };
   state.pathKey = key;
@@ -1379,6 +1531,11 @@ function simLoad({ path: key = 'normal', grade = 'severe', view, rwma, dcmSeveri
   if (key === 'rwma' && RWMA_SCENARIOS[rwma]) state.path.rwma = rwma;
   if (key === 'dcm' && DCM_SEVERITIES[dcmSeverity]) state.path.dcmSeverity = dcmSeverity;
   setView(view || PATHOLOGY[key].view);
+  // the trace panel: a task may ask for M-mode or tissue Doppler on a given line
+  {
+    const tm = document.getElementById('traceMode'), tl = document.getElementById('traceLine');
+    if (tm && tl) { tm.value = trace === 'mmode' || trace === 'tdi' ? trace : 'doppler'; refreshTrace(); if (line) { tl.value = line; refreshTrace(); } }
+  }
   setGradeButtons(grade);
   if (hidden) {
     pathwayCase.active = true;
