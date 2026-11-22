@@ -433,10 +433,10 @@ your own write-up.
 | Regional wall motion abnormality | 1. Impaired LV systolic function, LVEF 41%. 2. Regional wall motion abnormality: septal and apical hypokinesis (LAD territory). |
 | Pericardial effusion | 1. Large pericardial effusion (2.3 cm). |
 | Cardiac tamponade | 1. Large pericardial effusion (2.4 cm) with echocardiographic features of tamponade (RA inversion, RV diastolic collapse, plethoric IVC, mitral E variation 32%, tricuspid E 48%). Tamponade is a clinical diagnosis. |
-| Tricuspid regurgitation | 1. Severe tricuspid regurgitation (TR Vmax 2.4 m/s). 2. RV dilatation (RVD1 52 mm). |
+| Tricuspid regurgitation | 1. Severe tricuspid regurgitation (TR Vmax 2.5 m/s). 2. RV dilatation (RVD1 53 mm). |
 | Pulmonary hypertension | 1. High echocardiographic probability of pulmonary hypertension (TR Vmax 4.3 m/s, PASP ~89 mmHg). 2. RV dilatation (RVD1 48 mm) with impaired RV systolic function (TAPSE 15 mm, FAC 33%). |
 | Atrial septal defect | 1. Secundum ASD (Qp:Qs 1.7). 2. RV dilatation (RVD1 57 mm). |
-| Ventricular septal defect | 1. Mildly dilated LV (LVEDVi 84 mL/m²). 2. Dilated left atrium (LAVi 39 mL/m²). 3. Restrictive muscular VSD (Qp:Qs 1.3). |
+| Ventricular septal defect | 1. Mildly dilated LV (LVEDVi 83 mL/m²). 2. Dilated left atrium (LAVi 39 mL/m²). 3. Restrictive muscular VSD (Qp:Qs 1.3). |
 
 A few reporting points from these cases:
 
