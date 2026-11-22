@@ -2033,17 +2033,30 @@ function dAppendage(x, y, z, segs, k) {
 // trabeculated appendage, against the smooth-walled LA body), ramping in over the
 // first lobe
 const LAA_LIP = 0.8;
-const LAA_PECT = { period: 0.65, h: 0.22, from: 0.45, clear: 0.25 };
+const LAA_PECT = { period: 0.65, h: 0.22, from: 0.45, clear: 0.25, blend: 0.1 };
+// (The position along the appendage is a distance-weighted mean over the lobes'
+// axes, not the arc length at the single nearest axis point: on the inside of a
+// bend the nearest point jumps from one lobe to the next, the arc length with it,
+// and a ridge was sliced off along the bend's bisector — on one side of it a
+// full-height ridge, on the other none — leaving a slab of muscle that touches no
+// wall and is cut as free dots in the appendage ostium by the ME two-chamber
+// plane. LAA_PECT.blend, cm, is the distance over which one lobe's count hands
+// over to the next.)
 function laaPectinate(x, y, z, segs) {
-  let best = 1e9, sArc = 0, acc = 0;
+  let best = 1e9, acc = 0;
+  const rs = [], ss = [];
   for (const g of segs) {
     const ax = sub(g.b, g.a), L = Math.hypot(ax[0], ax[1], ax[2]);
     const t = Math.max(0, Math.min(1, ((x - g.a[0]) * ax[0] + (y - g.a[1]) * ax[1] + (z - g.a[2]) * ax[2]) / (L * L)));
     const q = [g.a[0] + ax[0] * t - x, g.a[1] + ax[1] * t - y, g.a[2] + ax[2] * t - z];
-    const r = q[0] * q[0] + q[1] * q[1] + q[2] * q[2];
-    if (r < best) { best = r; sArc = acc + t * L; }
+    const r = Math.sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
+    if (r < best) best = r;
+    rs.push(r); ss.push(acc + t * L);
     acc += L;
   }
+  let sw = 0, sArc = 0;
+  for (let i = 0; i < rs.length; i++) { const w = Math.exp(-(rs[i] - best) / LAA_PECT.blend); sw += w; sArc += w * ss[i]; }
+  sArc /= sw;
   const s0 = LAA_PECT.from * Math.hypot(...sub(segs[0].b, segs[0].a));
   if (sArc <= s0) return 0;
   const ramp = Math.min(1, (sArc - s0) / 0.6);
